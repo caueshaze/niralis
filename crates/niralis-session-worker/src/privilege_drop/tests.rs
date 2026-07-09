@@ -165,7 +165,7 @@ fn supplementary_group_mismatch_is_rejected() {
 }
 
 #[test]
-fn excessive_observed_group_count_fails_verification() {
+fn excessive_observed_group_count_is_credential_mismatch() {
     let syscalls = RecordingSyscalls {
         calls: Mutex::new(Vec::new()),
         setgroups: Ok(()),
