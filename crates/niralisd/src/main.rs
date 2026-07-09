@@ -1,14 +1,13 @@
 use std::path::PathBuf;
 
 use clap::Parser;
-use niralis_auth::{Authenticator, MockAuthenticator, PamAuthenticator};
 use niralis_discovery::{
     DesktopSessionDirectory, NssUserDirectory, SessionDirectory, SessionDiscoveryConfig,
     UserDirectory, UserDiscoveryConfig,
 };
-use niralisd::config::{AuthBackend, Config, DEFAULT_CONFIG_PATH};
+use niralisd::config::{Config, DEFAULT_CONFIG_PATH};
 use niralisd::handler::DaemonHandler;
-use niralisd::session_launcher::build_session_launcher;
+use niralisd::login_backend::build_login_backend;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -35,27 +34,18 @@ fn run() -> MainResult<()> {
     init_logging(&config.daemon.log_level)?;
     info!(config = %cli.config.display(), "starting niralisd");
 
-    let authenticator = build_authenticator(&config);
+    let login_backend = build_login_backend(&config)?;
     let user_directory = build_user_directory(&config);
     let session_directory = build_session_directory(&config);
-    let session_launcher = build_session_launcher(&config)?;
     let handler = DaemonHandler::new(
         config.clone(),
-        authenticator,
-        session_launcher,
+        login_backend,
         user_directory,
         session_directory,
     );
     niralisd::server::run(&config, handler)?;
 
     Ok(())
-}
-
-fn build_authenticator(config: &Config) -> Box<dyn Authenticator> {
-    match config.auth.backend {
-        AuthBackend::Mock => Box::new(MockAuthenticator),
-        AuthBackend::Pam => Box::new(PamAuthenticator::new(config.auth.pam_service.clone())),
-    }
 }
 
 fn build_user_directory(config: &Config) -> Box<dyn UserDirectory> {

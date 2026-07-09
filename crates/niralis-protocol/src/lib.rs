@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum NiralisRequest {
     Status,
@@ -13,6 +13,26 @@ pub enum NiralisRequest {
     },
     Shutdown,
     Reboot,
+}
+
+impl std::fmt::Debug for NiralisRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Status => f.write_str("Status"),
+            Self::GetUsers => f.write_str("GetUsers"),
+            Self::GetSessions => f.write_str("GetSessions"),
+            Self::Shutdown => f.write_str("Shutdown"),
+            Self::Reboot => f.write_str("Reboot"),
+            Self::Login {
+                username, session, ..
+            } => f
+                .debug_struct("Login")
+                .field("username", username)
+                .field("password", &"[redacted]")
+                .field("session", session)
+                .finish(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,6 +95,20 @@ mod tests {
             encoded,
             r#"{"type":"login","username":"test","password":"test","session":"niri"}"#
         );
+    }
+
+    #[test]
+    fn login_request_debug_redacts_password() {
+        let request = NiralisRequest::Login {
+            username: "test".to_owned(),
+            password: "secret".to_owned(),
+            session: "niri".to_owned(),
+        };
+
+        let debug = format!("{request:?}");
+
+        assert!(debug.contains("[redacted]"));
+        assert!(!debug.contains("secret"));
     }
 
     #[test]

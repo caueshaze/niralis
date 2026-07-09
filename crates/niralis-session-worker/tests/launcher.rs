@@ -3,7 +3,8 @@ use std::time::Duration;
 
 use niralis_protocol::{SessionInfo, SessionKind};
 use niralis_session::{
-    SessionError, SessionLauncher, SessionRequest, StartedSession, WorkerSessionLauncher,
+    SessionError, SessionLauncher, SessionRequest, StartedSession, WorkerSecret,
+    WorkerSessionLauncher,
 };
 
 fn request() -> SessionRequest {
@@ -104,6 +105,45 @@ fn ready_then_hang_times_out() {
         .start_session(request())
         .expect_err("ready then hang should time out");
     assert_eq!(error, SessionError::WorkerTimedOut);
+}
+
+#[test]
+fn authentication_failed_is_reported() {
+    let launcher = launcher_for(env!("CARGO_BIN_EXE_fixture-auth-failed"));
+    let error = launcher
+        .start_pam_session(
+            request(),
+            "niralis".to_owned(),
+            WorkerSecret::new("secret".to_owned()),
+        )
+        .expect_err("auth failure should fail");
+    assert_eq!(error, SessionError::AuthenticationFailed);
+}
+
+#[test]
+fn session_failed_is_reported() {
+    let launcher = launcher_for(env!("CARGO_BIN_EXE_fixture-session-failed"));
+    let error = launcher
+        .start_pam_session(
+            request(),
+            "niralis".to_owned(),
+            WorkerSecret::new("secret".to_owned()),
+        )
+        .expect_err("session failure should fail");
+    assert_eq!(error, SessionError::AuthenticatedSessionFailed);
+}
+
+#[test]
+fn auth_failure_with_exit_zero_is_protocol_error() {
+    let launcher = launcher_for(env!("CARGO_BIN_EXE_fixture-auth-failed-exit0"));
+    let error = launcher
+        .start_pam_session(
+            request(),
+            "niralis".to_owned(),
+            WorkerSecret::new("secret".to_owned()),
+        )
+        .expect_err("exit zero auth failure should fail");
+    assert_eq!(error, SessionError::WorkerProtocolFailed);
 }
 
 #[test]

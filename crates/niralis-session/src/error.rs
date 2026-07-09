@@ -2,6 +2,10 @@ use thiserror::Error;
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum SessionError {
+    #[error("authentication failed")]
+    AuthenticationFailed,
+    #[error("authenticated session failed")]
+    AuthenticatedSessionFailed,
     #[error("invalid worker path")]
     InvalidWorkerPath,
     #[error("worker spawn failed")]

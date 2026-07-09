@@ -77,7 +77,7 @@ fn valid_request_returns_ready_and_preserves_session() {
 #[test]
 fn invalid_version_returns_rejection() {
     let request = serde_json::to_string(&WorkerEnvelope {
-        version: 999,
+        version: 1,
         message: WorkerRequest::PrepareSession {
             request: SessionRequest {
                 username: "test".to_owned(),

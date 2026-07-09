@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 
 use crate::config::{AuthBackend, Config, SessionLauncherBackend};
+use crate::error::NiralisdError;
+use crate::login_backend::build_login_backend;
 
 fn config_raw(auth_backend: &str) -> String {
     format!(
@@ -102,4 +104,21 @@ fn missing_backend_and_discovery_sections_use_defaults() {
         PathBuf::from("/usr/libexec/niralis-session-worker")
     );
     assert_eq!(config.session.worker_timeout_seconds, 5);
+}
+
+#[test]
+fn rejects_pam_with_mock_launcher() {
+    let mut config = Config::default();
+    config.auth.backend = AuthBackend::Pam;
+    config.session.launcher = SessionLauncherBackend::Mock;
+
+    let error = match build_login_backend(&config) {
+        Ok(_) => panic!("pam + mock should fail"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(
+        error,
+        NiralisdError::InvalidAuthLauncherCombination
+    ));
 }

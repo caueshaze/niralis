@@ -6,36 +6,27 @@ mod tests;
 
 use std::time::Duration;
 
-use niralis_auth::Authenticator;
 use niralis_discovery::{DiscoveryError, SessionDirectory, UserDirectory};
 use niralis_protocol::{DaemonStatus, NiralisRequest, NiralisResponse};
-use niralis_session::SessionLauncher;
 
 use crate::config::Config;
+use crate::login_backend::LoginBackend;
 use rate_limit::LoginRateLimiter;
 
 pub trait RequestHandler: Send + Sync {
     fn handle(&self, request: NiralisRequest) -> NiralisResponse;
 }
 
-#[derive(Debug)]
-pub struct DaemonHandler<A, S, U, D> {
+pub struct DaemonHandler<L, U, D> {
     config: Config,
-    authenticator: A,
-    session_launcher: S,
+    login_backend: L,
     user_directory: U,
     session_directory: D,
     rate_limiter: std::sync::Mutex<LoginRateLimiter>,
 }
 
-impl<A, S, U, D> DaemonHandler<A, S, U, D> {
-    pub fn new(
-        config: Config,
-        authenticator: A,
-        session_launcher: S,
-        user_directory: U,
-        session_directory: D,
-    ) -> Self {
+impl<L, U, D> DaemonHandler<L, U, D> {
+    pub fn new(config: Config, login_backend: L, user_directory: U, session_directory: D) -> Self {
         let rate_limiter = LoginRateLimiter::new(
             config.auth.max_attempts,
             Duration::from_secs(config.auth.cooldown_seconds),
@@ -43,8 +34,7 @@ impl<A, S, U, D> DaemonHandler<A, S, U, D> {
 
         Self {
             config,
-            authenticator,
-            session_launcher,
+            login_backend,
             user_directory,
             session_directory,
             rate_limiter: std::sync::Mutex::new(rate_limiter),
@@ -52,10 +42,9 @@ impl<A, S, U, D> DaemonHandler<A, S, U, D> {
     }
 }
 
-impl<A, S, U, D> RequestHandler for DaemonHandler<A, S, U, D>
+impl<L, U, D> RequestHandler for DaemonHandler<L, U, D>
 where
-    A: Authenticator,
-    S: SessionLauncher,
+    L: LoginBackend,
     U: UserDirectory,
     D: SessionDirectory,
 {

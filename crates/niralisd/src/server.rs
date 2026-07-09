@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use niralis_protocol::{NiralisRequest, NiralisResponse};
 use tracing::{debug, info, warn};
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::config::Config;
 use crate::error::{NiralisdError, Result};
@@ -65,9 +66,9 @@ where
 {
     let writer = stream.try_clone()?;
     let mut reader = BufReader::new(stream);
-    let mut line = String::new();
+    let mut line = Zeroizing::new(String::new());
 
-    reader.read_line(&mut line)?;
+    reader.read_line(&mut *line)?;
     debug!("received ipc request");
 
     let response = if line.trim().is_empty() {
@@ -76,6 +77,7 @@ where
         }
     } else {
         let request: NiralisRequest = serde_json::from_str(line.trim_end())?;
+        (*line).zeroize();
         handler.handle(request)
     };
 

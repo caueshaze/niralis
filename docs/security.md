@@ -1,123 +1,170 @@
 # Niralisd Security Notes
 
-This phase preserves the authenticated PAM transaction with RAII and introduces
-an isolated, one-shot session worker process boundary while keeping graphical
-session startup, greeter management, Wayland UI, privilege transitions, and
-full session lifecycle semantics out of scope.
+Niralis now validates sessions in the daemon, performs PAM only inside the
+dedicated `niralis-session-worker`, and keeps graphical session startup,
+privilege transitions, compositor execution, and greeter lifecycle out of
+scope.
 
 ## Current Guarantees
 
-- Passwords are accepted only as IPC input for login and are never written to
-  logs.
-- Login failure responses are generic and do not reveal whether the username,
-  password, PAM service, account policy, or rate limit caused the failure.
-- PAM failures return `LoginFailed` to the client.
-- PAM detail, if logged at all, is restricted to `debug` or `trace`; `info` and
-  `warn` logs must not contain raw PAM messages, PAM codes, or password data.
-- IPC is local-only through a Unix socket.
-- The daemon creates the socket with restricted permissions (`0660`).
-- Login attempts are rate-limited per username before PAM is called.
-- Successful login resets that user's rate limit state.
-- Requested sessions are validated through discovery before PAM is called.
-- Session startup can be delegated to an isolated `niralis-session-worker`
-  process using a private, versioned internal protocol.
-- Daemon, protocol, authentication, session startup, and CLI code live in
-  separate crates.
-- Request handling is isolated from socket handling so it can be tested without
-  opening a real socket.
+- Passwords are accepted only through local IPC login requests.
+- Passwords are never written to logs, worker arguments, worker environment, or
+  daemon responses.
+- `LoginFailed` remains generic and does not reveal whether rejection came from
+  username, password, PAM policy, or rate limit.
+- `SessionUnavailable` remains distinct from authentication failure.
+- The daemon Unix socket is local-only and created with restricted
+  permissions.
+- Login rate limiting remains keyed by username and represents authentication
+  failures only.
+- Sessions are resolved canonically through discovery before any login backend
+  is called.
+- Worker launches are versioned, size-limited, supervised, and shell-free.
 
-## PAM Authentication
+## PAM Authority Migration
 
-`niralis-auth` provides `PamAuthenticator`, selected by default with:
+When configured with:
 
 ```toml
 [auth]
 backend = "pam"
-pam_service = "niralis"
+
+[session]
+launcher = "worker"
 ```
 
-The PAM service file must be installed manually at `/etc/pam.d/niralis`. An
-openSUSE-oriented example is available at `config/pam/niralis`.
+the main `niralisd` process no longer creates `PamAuthenticator`,
+`PamAuthenticatedTransaction`, or `pam::Client` for login attempts.
 
-The PAM conversation is non-interactive and silent: it supplies the username and
-password already received through IPC and does not echo PAM text back to stdout,
-stderr, logs, or the client.
+Instead, the daemon performs:
 
-The authenticated PAM transaction remains owned by Niralis after
-`authenticate()` returns. This preserves the same PAM context for a future
-session worker instead of authenticating in one transaction and opening a
-session in another.
+1. rate limit checks;
+2. canonical session validation;
+3. worker trust validation;
+4. worker supervision.
 
-The password is removed from the PAM conversation immediately after successful
-authentication. Niralis does not keep the password alive for the full lifetime
-of the authenticated transaction.
+The full PAM transaction belongs to the worker.
 
-`niralisd` does not call `pam::Client::open_session()` directly in this phase.
-Future PAM session opening must happen inside an isolated session context so
-user environment changes do not contaminate the privileged daemon process.
+## Same Transaction Lifecycle
 
-In phase 4C, the authenticated transaction still remains in the main
-`niralisd` process while the worker runs. The PAM transaction is not serialized
-or transferred across the worker boundary.
+Inside `niralis-session-worker`, the same authenticated transaction is used for:
 
-If Niralis later needs one PAM context to own
-`pam_authenticate -> pam_acct_mgmt -> pam_open_session -> pam_close_session ->
-pam_end`, that authentication flow must move into the worker in a later phase.
+1. `authenticate()`
+2. PAM account management performed by the crate
+3. `open_session()`
+4. transaction drop
+5. session close and credential cleanup through RAII
+6. `pam_end`
 
-## Mock Authentication
+In this phase, the worker performs a short PAM lifecycle only:
 
-`MockAuthenticator` remains available for unit tests and local smoke tests:
+`authenticate -> open_session -> close_session -> exit`
+
+No compositor or session command is started yet.
+
+## Secret Transport and Memory Hygiene
+
+The password currently travels only through:
+
+`IPC client -> niralisd -> private worker stdin pipe`
+
+It is never sent through:
+
+- worker argv
+- environment variables
+- files
+- logs
+- public IPC responses
+
+Current cleanup points:
+
+- raw daemon IPC line buffer is wrapped in `Zeroizing<String>`;
+- handler password is wrapped in `Zeroizing<String>` immediately on entry;
+- worker JSON payload serialization uses `Zeroizing<Vec<u8>>`;
+- worker raw JSON read buffer uses `Zeroizing<Vec<u8>>`;
+- worker protocol secrets use `WorkerSecret`, which redacts `Debug` and does
+  not implement `Clone`;
+- the PAM conversation clears its stored password after every authenticate
+  attempt;
+- launcher writer and reader threads are joined before returning, so no
+  secret-bearing thread is left behind after login completion or failure.
+
+## Worker Boundary
+
+`niralis-session-worker` is a dedicated, one-shot process per login attempt.
+
+The daemon spawns it directly with:
+
+- absolute path
+- no shell
+- piped stdin/stdout
+- inherited stderr
+- `cwd = /`
+- cleared environment
+
+The worker protocol is internal, versioned, and capped at `64 KiB`.
+
+The daemon rejects worker responses that do not match the canonical
+`username/session` request it sent.
+
+Workers that hang are killed and reaped. The timeout covers:
+
+- request write
+- response read
+- worker process exit
+
+## Worker Trust Policy
+
+When PAM is enabled, the worker binary must be trusted before the daemon is
+allowed to send credentials to it.
+
+Required properties:
+
+- absolute path
+- real file, not symlink
+- executable
+- root-owned
+- not writable by group or others
+- every parent directory is real, root-owned, and not writable by group or
+  others
+
+`auth = "pam"` with `launcher = "mock"` is rejected at daemon startup.
+
+## PAM Crate Limitations
+
+The current implementation relies on `pam = "0.8.0"` high-level client APIs.
+
+Known limitations:
+
+- `authenticate()` already encapsulates PAM authentication and account checks;
+- `open_session()` performs credential and environment work inside the worker
+  process;
+- session close happens through `Client` drop, so close failures are not
+  observable through the current API;
+- internal `open_session()` paths may panic during environment initialization;
+  the worker catches unwind panics, but this does not protect builds compiled
+  with `panic = "abort"`.
+
+## Mock Modes
+
+These combinations remain supported:
+
+- `auth = "mock", launcher = "mock"`
+- `auth = "mock", launcher = "worker"`
+
+Mock credentials remain:
 
 - user: `test`
 - password: `test`
 
-Use it only with `backend = "mock"`. It is not the default runtime backend.
-
-## Session Worker Boundary
-
-`niralis-session-worker` is a dedicated, ephemeral process created per session
-launch attempt when the worker backend is enabled.
-
-The daemon spawns it directly without a shell, with piped stdin/stdout,
-inherited stderr, `cwd = /`, and a cleared environment. Workers receive one
-internal request, return at most one internal response, and then terminate.
-
-The internal worker protocol is versioned, size-limited, and does not contain
-passwords, PAM handles, or other secret material.
-
-Workers that hang are killed and reaped after a timeout; the timeout covers both
-waiting for a response and waiting for the worker process to exit after
-responding, so no worker can block the login flow indefinitely.
-
-The worker must answer with the same canonical username and `SessionInfo` that
-the daemon sent. A worker that returns different session data is treated as a
-protocol violation.
-
-When the PAM authenticator is selected, the configured worker binary must come
-from a trusted path: no symlink at the worker node, root ownership, and no
-group/other write bits on the worker file or its parent directories.
-
-## Mock Session Startup
-
-`niralis-session` can either return success immediately through the mock
-launcher or delegate to `niralis-session-worker`, which currently performs only
-mock session preparation and returns canonical session data.
-
-Neither launcher calls `setuid`, opens PAM sessions, talks to logind, or
-spawns a graphical session in this phase.
-
 ## Out of Scope for This Phase
 
-- Greeter process supervision.
-- Wayland protocol or UI work.
-- Real graphical session spawning.
-- `pam_open_session` or `pam_close_session`.
-- Passwords or PAM state inside the worker protocol.
-- Shutdown or reboot execution.
-- Privilege dropping or user switching.
-- UID/GID switching, `initgroups`, or logind session creation.
-- PAM environment import, `pam_getenvlist`, or user environment application to
-  the main daemon.
-- `Exec` execution from `.desktop` sessions.
-- Real compositor, Wayland, X11, seat, DRM, or VT handling.
-- Interactive password prompt in `niralisctl`.
+- real graphical session startup
+- `.desktop` `Exec` execution
+- compositor or `niri-session` launch
+- `setuid`, `setgid`, `initgroups`, or supplementary groups
+- logind integration
+- seat, VT, DRM, Wayland, or X11 lifecycle
+- PAM environment import back into the daemon
+- persistent worker lifetime
+- interactive password prompt in `niralisctl`

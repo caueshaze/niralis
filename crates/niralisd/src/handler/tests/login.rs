@@ -12,6 +12,7 @@ use super::support::{
 use crate::config::Config;
 use crate::handler::login::{login_failed, session_unavailable};
 use crate::handler::{DaemonHandler, RequestHandler};
+use crate::login_backend::LocalLoginBackend;
 
 #[test]
 fn valid_login_returns_canonical_session() {
@@ -39,8 +40,7 @@ fn invalid_session_skips_auth_and_launcher() {
     let launch_calls = launcher.calls.clone();
     let handler = DaemonHandler::new(
         Config::default(),
-        auth,
-        launcher,
+        LocalLoginBackend::new(auth, launcher),
         StubUserDirectory::default(),
         StubSessionDirectory::with_sessions(vec![niri_session()]),
     );
@@ -59,8 +59,7 @@ fn invalid_session_does_not_increment_rate_limit_and_discovery_errors_skip_auth(
     let auth_calls = auth.calls.clone();
     let handler = DaemonHandler::new(
         test_config(1, 60),
-        auth,
-        MockSessionLauncher,
+        LocalLoginBackend::new(auth, MockSessionLauncher),
         StubUserDirectory::default(),
         StubSessionDirectory::with_sessions(vec![niri_session()]),
     );
@@ -78,8 +77,7 @@ fn invalid_session_does_not_increment_rate_limit_and_discovery_errors_skip_auth(
     let launch_calls = launcher.calls.clone();
     let handler = DaemonHandler::new(
         Config::default(),
-        auth,
-        launcher,
+        LocalLoginBackend::new(auth, launcher),
         StubUserDirectory::default(),
         StubSessionDirectory::with_error(),
     );
@@ -100,8 +98,7 @@ fn launcher_receives_validated_session_and_rate_limit_still_behaves() {
     let seen = launcher.last_request.clone();
     let handler = DaemonHandler::new(
         Config::default(),
-        MockAuthenticator,
-        launcher,
+        LocalLoginBackend::new(MockAuthenticator, launcher),
         StubUserDirectory::default(),
         StubSessionDirectory::with_sessions(vec![niri_session()]),
     );
@@ -122,8 +119,7 @@ fn launcher_receives_validated_session_and_rate_limit_still_behaves() {
     let calls = auth.calls.clone();
     let handler = DaemonHandler::new(
         test_config(2, 60),
-        auth,
-        MockSessionLauncher,
+        LocalLoginBackend::new(auth, MockSessionLauncher),
         StubUserDirectory::default(),
         StubSessionDirectory::default(),
     );
@@ -137,8 +133,7 @@ fn launcher_receives_validated_session_and_rate_limit_still_behaves() {
     let calls = auth.calls.clone();
     let handler = DaemonHandler::new(
         test_config(2, 60),
-        auth,
-        MockSessionLauncher,
+        LocalLoginBackend::new(auth, MockSessionLauncher),
         StubUserDirectory::default(),
         StubSessionDirectory::default(),
     );
@@ -164,8 +159,7 @@ fn authenticated_transaction_stays_alive_during_successful_launch() {
     let alive_during_launch = launcher.active_during_launch.clone();
     let handler = DaemonHandler::new(
         Config::default(),
-        auth,
-        launcher,
+        LocalLoginBackend::new(auth, launcher),
         StubUserDirectory::default(),
         StubSessionDirectory::default(),
     );
@@ -189,8 +183,7 @@ fn authenticated_transaction_is_dropped_after_launcher_error() {
     let alive_during_launch = launcher.active_during_launch.clone();
     let handler = DaemonHandler::new(
         Config::default(),
-        auth,
-        launcher,
+        LocalLoginBackend::new(auth, launcher),
         StubUserDirectory::default(),
         StubSessionDirectory::default(),
     );
@@ -215,8 +208,7 @@ fn authentication_failure_does_not_create_transaction() {
     let launch_calls = launcher.calls.clone();
     let handler = DaemonHandler::new(
         Config::default(),
-        auth,
-        launcher,
+        LocalLoginBackend::new(auth, launcher),
         StubUserDirectory::default(),
         StubSessionDirectory::default(),
     );

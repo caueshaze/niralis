@@ -1,4 +1,6 @@
-use crate::{AuthError, AuthenticatedTransaction, AuthenticatedUser, Authenticator};
+use crate::{
+    AuthError, AuthSessionError, AuthenticatedTransaction, AuthenticatedUser, Authenticator,
+};
 
 #[derive(Debug, Default)]
 pub struct MockAuthenticator;
@@ -30,5 +32,9 @@ pub struct MockAuthenticatedTransaction {
 impl AuthenticatedTransaction for MockAuthenticatedTransaction {
     fn user(&self) -> &AuthenticatedUser {
         &self.user
+    }
+
+    fn open_session(&mut self) -> Result<(), AuthSessionError> {
+        Ok(())
     }
 }

@@ -1,22 +1,22 @@
-use std::io::Cursor;
-
 use niralis_protocol::{SessionInfo, SessionKind};
 
 use crate::{
-    run_worker_process, SessionRequest, StartedSession, WorkerEnvelope, WorkerErrorCode,
-    WorkerRequest, WorkerResponse, WORKER_PROTOCOL_VERSION,
+    SessionRequest, StartedSession, WorkerEnvelope, WorkerRequest, WorkerResponse, WorkerSecret,
+    WORKER_PROTOCOL_VERSION,
 };
 
 fn session(kind: SessionKind) -> SessionInfo {
     SessionInfo {
-        id: match kind {
-            SessionKind::Wayland => "niri",
-            SessionKind::X11 => "plasma",
+        id: if matches!(kind, SessionKind::Wayland) {
+            "niri"
+        } else {
+            "plasma"
         }
         .to_owned(),
-        name: match kind {
-            SessionKind::Wayland => "Niri",
-            SessionKind::X11 => "Plasma",
+        name: if matches!(kind, SessionKind::Wayland) {
+            "Niri"
+        } else {
+            "Plasma"
         }
         .to_owned(),
         kind,
@@ -24,35 +24,37 @@ fn session(kind: SessionKind) -> SessionInfo {
 }
 
 #[test]
-fn worker_request_round_trip_preserves_wayland_and_x11() {
+fn worker_request_round_trip_preserves_wayland_x11_and_secret() {
     for kind in [SessionKind::Wayland, SessionKind::X11] {
         let encoded = serde_json::to_string(&WorkerEnvelope {
             version: WORKER_PROTOCOL_VERSION,
-            message: WorkerRequest::PrepareSession {
+            message: WorkerRequest::PamSession {
                 request: SessionRequest {
                     username: "test".to_owned(),
                     session: session(kind),
                 },
+                pam_service: "niralis".to_owned(),
+                password: WorkerSecret::new("secret".to_owned()),
             },
         })
         .expect("request should serialize");
-
         let decoded: WorkerEnvelope<WorkerRequest> =
             serde_json::from_str(&encoded).expect("request should deserialize");
 
         assert_eq!(decoded.version, WORKER_PROTOCOL_VERSION);
-        assert_eq!(
-            decoded,
-            WorkerEnvelope {
-                version: WORKER_PROTOCOL_VERSION,
-                message: WorkerRequest::PrepareSession {
-                    request: SessionRequest {
-                        username: "test".to_owned(),
-                        session: session(kind),
-                    },
-                },
+        match decoded.message {
+            WorkerRequest::PamSession {
+                request,
+                pam_service,
+                password,
+            } => {
+                assert_eq!(request.username, "test");
+                assert_eq!(request.session, session(kind));
+                assert_eq!(pam_service, "niralis");
+                assert_eq!(password.expose(), "secret");
             }
-        );
+            other => panic!("unexpected request: {other:?}"),
+        }
     }
 }
 
@@ -69,11 +71,9 @@ fn worker_response_round_trip_preserves_session() {
             },
         })
         .expect("response should serialize");
-
         let decoded: WorkerEnvelope<WorkerResponse> =
             serde_json::from_str(&encoded).expect("response should deserialize");
 
-        assert_eq!(decoded.version, WORKER_PROTOCOL_VERSION);
         assert_eq!(
             decoded.message,
             WorkerResponse::Ready {
@@ -87,78 +87,10 @@ fn worker_response_round_trip_preserves_session() {
 }
 
 #[test]
-fn worker_process_accepts_valid_request() {
-    let input = format!(
-        "{}\n",
-        serde_json::to_string(&WorkerEnvelope {
-            version: WORKER_PROTOCOL_VERSION,
-            message: WorkerRequest::PrepareSession {
-                request: SessionRequest {
-                    username: "test".to_owned(),
-                    session: session(SessionKind::Wayland),
-                },
-            },
-        })
-        .expect("request should serialize")
-    );
-    let mut reader = Cursor::new(input.into_bytes());
-    let mut writer = Vec::new();
+fn worker_secret_debug_redacts_plaintext() {
+    let secret = WorkerSecret::new("secret".to_owned());
+    let debug = format!("{secret:?}");
 
-    run_worker_process(&mut reader, &mut writer).expect("worker should succeed");
-
-    let decoded: WorkerEnvelope<WorkerResponse> =
-        serde_json::from_slice(&writer[..writer.len() - 1]).expect("response should deserialize");
-    assert_eq!(
-        decoded.message,
-        WorkerResponse::Ready {
-            session: StartedSession {
-                username: "test".to_owned(),
-                session: session(SessionKind::Wayland),
-            },
-        }
-    );
-}
-
-#[test]
-fn worker_process_rejects_invalid_version_and_json() {
-    let invalid_version = format!(
-        "{}\n",
-        serde_json::to_string(&WorkerEnvelope {
-            version: 999,
-            message: WorkerRequest::PrepareSession {
-                request: SessionRequest {
-                    username: "test".to_owned(),
-                    session: session(SessionKind::Wayland),
-                },
-            },
-        })
-        .expect("request should serialize")
-    );
-    let mut reader = Cursor::new(invalid_version.into_bytes());
-    let mut writer = Vec::new();
-    let error = run_worker_process(&mut reader, &mut writer)
-        .expect_err("worker should reject unsupported version");
-    assert_eq!(error, crate::SessionError::WorkerRejected);
-    let version_response: WorkerEnvelope<WorkerResponse> =
-        serde_json::from_slice(&writer[..writer.len() - 1]).expect("response should deserialize");
-    assert_eq!(
-        version_response.message,
-        WorkerResponse::Rejected {
-            code: WorkerErrorCode::UnsupportedVersion,
-        }
-    );
-
-    let mut reader = Cursor::new(b"{bad\n".to_vec());
-    let mut writer = Vec::new();
-    let error = run_worker_process(&mut reader, &mut writer)
-        .expect_err("worker should reject invalid json");
-    assert_eq!(error, crate::SessionError::WorkerRejected);
-    let json_response: WorkerEnvelope<WorkerResponse> =
-        serde_json::from_slice(&writer[..writer.len() - 1]).expect("response should deserialize");
-    assert_eq!(
-        json_response.message,
-        WorkerResponse::Rejected {
-            code: WorkerErrorCode::InvalidRequest,
-        }
-    );
+    assert!(debug.contains("[redacted]"));
+    assert!(!debug.contains("secret"));
 }

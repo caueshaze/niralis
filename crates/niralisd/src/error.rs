@@ -28,6 +28,8 @@ pub enum NiralisdError {
     WorkerUnavailable(PathBuf),
     #[error("worker binary is untrusted: {0}")]
     WorkerUntrusted(PathBuf),
+    #[error("PAM authentication requires the worker session launcher")]
+    InvalidAuthLauncherCombination,
 }
 
 pub type Result<T> = std::result::Result<T, NiralisdError>;

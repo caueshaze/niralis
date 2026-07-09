@@ -5,6 +5,7 @@ use niralis_session::MockSessionLauncher;
 use super::support::{handler, StubSessionDirectory, StubUserDirectory};
 use crate::config::Config;
 use crate::handler::{DaemonHandler, RequestHandler};
+use crate::login_backend::LocalLoginBackend;
 
 #[test]
 fn handles_status() {
@@ -47,8 +48,7 @@ fn handles_get_sessions() {
 fn get_sessions_uses_session_directory() {
     let handler = DaemonHandler::new(
         Config::default(),
-        MockAuthenticator,
-        MockSessionLauncher,
+        LocalLoginBackend::new(MockAuthenticator, MockSessionLauncher),
         StubUserDirectory::default(),
         StubSessionDirectory::with_sessions(vec![SessionInfo {
             id: "plasma".to_owned(),
@@ -73,8 +73,7 @@ fn get_sessions_uses_session_directory() {
 fn discovery_errors_return_structured_error_response() {
     let handler = DaemonHandler::new(
         Config::default(),
-        MockAuthenticator,
-        MockSessionLauncher,
+        LocalLoginBackend::new(MockAuthenticator, MockSessionLauncher),
         StubUserDirectory::with_error(),
         StubSessionDirectory::with_error(),
     );

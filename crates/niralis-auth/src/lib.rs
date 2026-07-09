@@ -20,8 +20,16 @@ pub enum AuthError {
     LoginFailed,
 }
 
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum AuthSessionError {
+    #[error("failed to open authenticated session")]
+    OpenFailed,
+}
+
 pub trait AuthenticatedTransaction: Send {
     fn user(&self) -> &AuthenticatedUser;
+
+    fn open_session(&mut self) -> Result<(), AuthSessionError>;
 }
 
 pub trait Authenticator: Send + Sync {

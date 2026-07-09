@@ -1,7 +1,9 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use niralis_auth::{AuthError, AuthenticatedTransaction, AuthenticatedUser, Authenticator};
+use niralis_auth::{
+    AuthError, AuthSessionError, AuthenticatedTransaction, AuthenticatedUser, Authenticator,
+};
 
 pub(crate) struct CountingAuthenticator {
     pub(crate) calls: Arc<AtomicUsize>,
@@ -58,5 +60,9 @@ impl StaticTransaction {
 impl AuthenticatedTransaction for StaticTransaction {
     fn user(&self) -> &AuthenticatedUser {
         &self.user
+    }
+
+    fn open_session(&mut self) -> Result<(), AuthSessionError> {
+        Ok(())
     }
 }

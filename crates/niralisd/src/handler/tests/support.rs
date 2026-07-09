@@ -8,19 +8,21 @@ use niralis_auth::MockAuthenticator;
 use niralis_protocol::{NiralisRequest, SessionInfo, SessionKind};
 use niralis_session::MockSessionLauncher;
 pub(super) use tracking::{
-    CountingSessionLauncher, TrackingAuthenticator, TrackingSessionLauncher,
+    CountingLoginBackend, CountingSessionLauncher, TrackingAuthenticator, TrackingSessionLauncher,
 };
 
 use crate::config::Config;
 use crate::handler::DaemonHandler;
+use crate::login_backend::LocalLoginBackend;
 
-pub(super) fn handler(
-) -> DaemonHandler<MockAuthenticator, MockSessionLauncher, StubUserDirectory, StubSessionDirectory>
-{
+pub(super) fn handler() -> DaemonHandler<
+    LocalLoginBackend<MockAuthenticator, MockSessionLauncher>,
+    StubUserDirectory,
+    StubSessionDirectory,
+> {
     DaemonHandler::new(
         Config::default(),
-        MockAuthenticator,
-        MockSessionLauncher,
+        LocalLoginBackend::new(MockAuthenticator, MockSessionLauncher),
         StubUserDirectory::with_users(vec![niralis_protocol::UserInfo {
             uid: 1000,
             username: "test".to_owned(),

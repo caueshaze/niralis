@@ -5,12 +5,15 @@ use crate::{AuthError, Authenticator, MockAuthenticator, PamAuthenticator};
 fn accepts_mock_user_transaction() {
     let auth = MockAuthenticator;
 
-    let transaction = auth
+    let mut transaction = auth
         .authenticate("test", "test")
         .expect("mock credentials should authenticate");
 
     assert_eq!(transaction.user().username, "test");
     assert_eq!(transaction.user().display_name, "Test User");
+    transaction
+        .open_session()
+        .expect("mock transaction should allow opening session");
 }
 
 #[test]

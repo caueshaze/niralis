@@ -1,4 +1,4 @@
-use niralis_session::run_worker_process;
+use niralis_session_worker::run_worker_process;
 use tracing_subscriber::EnvFilter;
 
 fn main() {

@@ -10,17 +10,19 @@ use crate::error::{NiralisdError, Result};
 pub fn build_session_launcher(config: &Config) -> Result<Box<dyn SessionLauncher>> {
     match config.session.launcher {
         SessionLauncherBackend::Mock => Ok(Box::new(MockSessionLauncher)),
-        SessionLauncherBackend::Worker => {
-            validate_worker_timeout(config.session.worker_timeout_seconds)?;
-            validate_worker_binary(config)?;
-            WorkerSessionLauncher::new(
-                config.session.worker_path.clone(),
-                Duration::from_secs(config.session.worker_timeout_seconds),
-            )
-            .map(|launcher| Box::new(launcher) as Box<dyn SessionLauncher>)
-            .map_err(|_| NiralisdError::InvalidWorkerPath(config.session.worker_path.clone()))
-        }
+        SessionLauncherBackend::Worker => build_worker_session_launcher(config)
+            .map(|launcher| Box::new(launcher) as Box<dyn SessionLauncher>),
     }
+}
+
+pub fn build_worker_session_launcher(config: &Config) -> Result<WorkerSessionLauncher> {
+    validate_worker_timeout(config.session.worker_timeout_seconds)?;
+    validate_worker_binary(config)?;
+    WorkerSessionLauncher::new(
+        config.session.worker_path.clone(),
+        Duration::from_secs(config.session.worker_timeout_seconds),
+    )
+    .map_err(|_| NiralisdError::InvalidWorkerPath(config.session.worker_path.clone()))
 }
 
 fn validate_worker_timeout(timeout_seconds: u64) -> Result<()> {

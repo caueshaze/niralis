@@ -2,7 +2,9 @@ use pam::Client;
 use tracing::debug;
 
 use crate::conversation::SilentPasswordConversation;
-use crate::{AuthError, AuthenticatedTransaction, AuthenticatedUser, Authenticator};
+use crate::{
+    AuthError, AuthSessionError, AuthenticatedTransaction, AuthenticatedUser, Authenticator,
+};
 
 #[derive(Debug, Clone)]
 pub struct PamAuthenticator {
@@ -39,11 +41,12 @@ impl Authenticator for PamAuthenticator {
             .conversation_mut()
             .set_credentials(username.to_owned(), password.to_owned());
 
-        client.authenticate().map_err(|error| {
+        let auth_result = client.authenticate();
+        client.conversation_mut().clear_password();
+        auth_result.map_err(|error| {
             debug!(service = %self.service, username = %username, ?error, "PAM authentication failed");
             AuthError::LoginFailed
         })?;
-        client.conversation_mut().clear_password();
 
         Ok(Box::new(PamAuthenticatedTransaction {
             user: AuthenticatedUser {
@@ -63,6 +66,13 @@ pub(crate) struct PamAuthenticatedTransaction {
 impl AuthenticatedTransaction for PamAuthenticatedTransaction {
     fn user(&self) -> &AuthenticatedUser {
         &self.user
+    }
+
+    fn open_session(&mut self) -> Result<(), AuthSessionError> {
+        self.client.open_session().map_err(|error| {
+            debug!(username = %self.user.username, ?error, "PAM open_session failed");
+            AuthSessionError::OpenFailed
+        })
     }
 }
 

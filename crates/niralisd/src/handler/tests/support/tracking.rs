@@ -1,8 +1,12 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use niralis_auth::{AuthError, AuthenticatedTransaction, AuthenticatedUser, Authenticator};
+use niralis_auth::{
+    AuthError, AuthSessionError, AuthenticatedTransaction, AuthenticatedUser, Authenticator,
+};
 use niralis_session::{SessionError, SessionLauncher, SessionRequest, StartedSession};
+
+use crate::login_backend::{LoginAttempt, LoginBackend, LoginBackendError};
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct TrackingAuthState {
@@ -74,6 +78,10 @@ impl AuthenticatedTransaction for TrackingTransaction {
     fn user(&self) -> &AuthenticatedUser {
         &self.user
     }
+
+    fn open_session(&mut self) -> Result<(), AuthSessionError> {
+        Ok(())
+    }
 }
 
 impl Drop for TrackingTransaction {
@@ -144,5 +152,27 @@ impl SessionLauncher for TrackingSessionLauncher {
                 session: request.session,
             })
         }
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct CountingLoginBackend {
+    pub(crate) calls: Arc<AtomicUsize>,
+    pub(crate) result: Result<StartedSession, LoginBackendError>,
+}
+
+impl CountingLoginBackend {
+    pub(crate) fn fails(error: LoginBackendError) -> Self {
+        Self {
+            calls: Arc::new(AtomicUsize::new(0)),
+            result: Err(error),
+        }
+    }
+}
+
+impl LoginBackend for CountingLoginBackend {
+    fn login(&self, _attempt: LoginAttempt) -> Result<StartedSession, LoginBackendError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.result.clone()
     }
 }
