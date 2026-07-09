@@ -48,11 +48,18 @@ impl Authenticator for PamAuthenticator {
             AuthError::LoginFailed
         })?;
 
+        let pam_username = client.get_user().map_err(|error| {
+            debug!(
+                service = %self.service,
+                requested_username = %username,
+                ?error,
+                "failed to determine PAM authenticated username"
+            );
+            AuthError::LoginFailed
+        })?;
+
         Ok(Box::new(PamAuthenticatedTransaction {
-            user: AuthenticatedUser {
-                username: username.to_owned(),
-                display_name: username.to_owned(),
-            },
+            user: authenticated_user_from_pam(pam_username),
             client,
         }))
     }
@@ -89,5 +96,12 @@ impl PamAuthenticatedTransaction {
     #[allow(dead_code)]
     pub(crate) fn password_is_cleared(&self) -> bool {
         self.client.conversation().password_is_cleared()
+    }
+}
+
+pub(crate) fn authenticated_user_from_pam(pam_username: String) -> AuthenticatedUser {
+    AuthenticatedUser {
+        username: pam_username.clone(),
+        display_name: pam_username,
     }
 }

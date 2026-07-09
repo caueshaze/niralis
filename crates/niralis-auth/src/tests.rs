@@ -1,4 +1,5 @@
 use crate::conversation::SilentPasswordConversation;
+use crate::pam::authenticated_user_from_pam;
 use crate::{AuthError, Authenticator, MockAuthenticator, PamAuthenticator};
 
 #[test]
@@ -44,4 +45,12 @@ fn constructs_pam_authenticator() {
     let auth = PamAuthenticator::new("niralis");
 
     assert_eq!(auth.service(), "niralis");
+}
+
+#[test]
+fn uses_pam_username_as_authenticated_identity() {
+    let user = authenticated_user_from_pam("canonical-user".to_owned());
+
+    assert_eq!(user.username, "canonical-user");
+    assert_eq!(user.display_name, "canonical-user");
 }

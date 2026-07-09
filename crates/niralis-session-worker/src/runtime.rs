@@ -8,8 +8,15 @@ use niralis_session::{
 };
 use tracing::{debug, info, warn};
 
+use crate::identity::{NssUnixIdentityResolver, UnixIdentityResolver};
+
 pub trait WorkerAuthenticatorFactory: Send + Sync {
     fn build(&self, pam_service: &str) -> Box<dyn Authenticator>;
+}
+
+pub struct WorkerDependencies<'a, F, I> {
+    pub authenticator_factory: &'a F,
+    pub identity_resolver: &'a I,
 }
 
 #[derive(Debug, Default)]
@@ -25,13 +32,25 @@ pub fn run_worker_process<R: Read, W: Write>(
     reader: &mut R,
     writer: &mut W,
 ) -> Result<(), SessionError> {
-    run_worker_process_with_factory(reader, writer, &PamAuthenticatorFactory)
+    run_worker_process_with_dependencies(
+        reader,
+        writer,
+        WorkerDependencies {
+            authenticator_factory: &PamAuthenticatorFactory,
+            identity_resolver: &NssUnixIdentityResolver,
+        },
+    )
 }
 
-pub fn run_worker_process_with_factory<R: Read, W: Write, F: WorkerAuthenticatorFactory>(
+pub fn run_worker_process_with_dependencies<
+    R: Read,
+    W: Write,
+    F: WorkerAuthenticatorFactory,
+    I: UnixIdentityResolver,
+>(
     reader: &mut R,
     writer: &mut W,
-    factory: &F,
+    dependencies: WorkerDependencies<'_, F, I>,
 ) -> Result<(), SessionError> {
     let envelope = match read_envelope::<WorkerRequest, _>(reader) {
         Ok(envelope) => envelope,
@@ -69,13 +88,21 @@ pub fn run_worker_process_with_factory<R: Read, W: Write, F: WorkerAuthenticator
             request,
             pam_service,
             password,
-        } => run_pam_session(writer, factory, request, pam_service, password),
+        } => run_pam_session(
+            writer,
+            dependencies.authenticator_factory,
+            dependencies.identity_resolver,
+            request,
+            pam_service,
+            password,
+        ),
     }
 }
 
-fn run_pam_session<W: Write, F: WorkerAuthenticatorFactory>(
+fn run_pam_session<W: Write, F: WorkerAuthenticatorFactory, I: UnixIdentityResolver>(
     writer: &mut W,
     factory: &F,
+    identity_resolver: &I,
     request: niralis_session::SessionRequest,
     pam_service: String,
     password: niralis_session::WorkerSecret,
@@ -91,6 +118,33 @@ fn run_pam_session<W: Write, F: WorkerAuthenticatorFactory>(
             return Err(SessionError::AuthenticationFailed);
         }
     };
+    let pam_username = transaction.user().username.clone();
+    let identity = match identity_resolver.resolve(&pam_username) {
+        Ok(identity) => identity,
+        Err(error) => {
+            warn!(
+                username = %pam_username,
+                session = %request.session.id,
+                ?error,
+                "worker failed to resolve canonical Unix identity"
+            );
+            drop(transaction);
+            write_envelope(
+                writer,
+                WorkerResponse::SessionFailed {
+                    code: WorkerSessionFailureCode::IdentityResolutionFailed,
+                },
+            )?;
+            return Err(SessionError::AuthenticatedSessionFailed);
+        }
+    };
+    debug!(
+        username = %identity.username,
+        uid = identity.uid,
+        gid = identity.gid,
+        "resolved canonical Unix identity"
+    );
+    let canonical_username = identity.username.clone();
 
     let open_result = catch_unwind(AssertUnwindSafe(|| transaction.open_session()));
     let session = StartedSession {
@@ -100,13 +154,13 @@ fn run_pam_session<W: Write, F: WorkerAuthenticatorFactory>(
 
     match open_result {
         Ok(Ok(())) => {
-            info!(username = %session.username, session = %session.session.id, "worker PAM session opened");
+            info!(username = %canonical_username, session = %session.session.id, "worker PAM session opened");
             drop(transaction);
-            info!(username = %session.username, session = %session.session.id, "worker PAM transaction closed");
+            info!(username = %canonical_username, session = %session.session.id, "worker PAM transaction closed");
             write_envelope(writer, WorkerResponse::Ready { session })
         }
         Ok(Err(_)) => {
-            warn!(username = %session.username, session = %session.session.id, "worker PAM session open failed");
+            warn!(username = %canonical_username, session = %session.session.id, "worker PAM session open failed");
             drop(transaction);
             write_envelope(
                 writer,
@@ -117,7 +171,7 @@ fn run_pam_session<W: Write, F: WorkerAuthenticatorFactory>(
             Err(SessionError::AuthenticatedSessionFailed)
         }
         Err(_) => {
-            warn!(username = %session.username, session = %session.session.id, "worker PAM session open panicked");
+            warn!(username = %canonical_username, session = %session.session.id, "worker PAM session open panicked");
             drop(transaction);
             write_envelope(
                 writer,

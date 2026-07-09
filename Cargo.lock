@@ -344,6 +344,7 @@ dependencies = [
 name = "niralis-session-worker"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "niralis-auth",
  "niralis-protocol",
  "niralis-session",

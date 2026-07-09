@@ -51,16 +51,47 @@ Inside `niralis-session-worker`, the same authenticated transaction is used for:
 
 1. `authenticate()`
 2. PAM account management performed by the crate
-3. `open_session()`
-4. transaction drop
-5. session close and credential cleanup through RAII
-6. `pam_end`
+3. canonical `PAM_USER` retrieval
+4. canonical Unix identity resolution through NSS
+5. `open_session()`
+6. transaction drop
+7. session close and credential cleanup through RAII
+8. `pam_end`
 
 In this phase, the worker performs a short PAM lifecycle only:
 
 `authenticate -> open_session -> close_session -> exit`
 
 No compositor or session command is started yet.
+
+## Canonical Unix Identity
+
+After PAM authentication succeeds, the worker uses `PAM_USER` from the PAM
+transaction as the authenticated username source of truth.
+
+That post-authentication username is then resolved through NSS using
+`getpwnam_r`, not by parsing `/etc/passwd` and not by spawning `getent`.
+
+The resulting `UnixIdentity` contains:
+
+- canonical username
+- UID
+- primary GID
+- home directory
+- login shell
+
+Home and shell are preserved as Unix paths without lossy UTF-8 conversion.
+
+If NSS resolution fails after authentication, Niralis treats it as a
+post-authentication session failure:
+
+- the PAM session is not opened;
+- the rate limiter is not charged as a bad password;
+- the daemon returns the generic session-start failure response.
+
+This phase still does not change the worker process identity. Real privilege
+drop, supplementary group resolution, and session environment setup remain
+future work.
 
 ## Secret Transport and Memory Hygiene
 
