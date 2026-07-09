@@ -2,6 +2,10 @@ use std::path::PathBuf;
 
 use clap::Parser;
 use niralis_auth::{Authenticator, MockAuthenticator, PamAuthenticator};
+use niralis_discovery::{
+    DesktopSessionDirectory, NssUserDirectory, SessionDirectory, SessionDiscoveryConfig,
+    UserDirectory, UserDiscoveryConfig,
+};
 use niralis_session::MockSessionLauncher;
 use niralisd::config::{AuthBackend, Config, DEFAULT_CONFIG_PATH};
 use niralisd::handler::DaemonHandler;
@@ -32,7 +36,15 @@ fn run() -> MainResult<()> {
     info!(config = %cli.config.display(), "starting niralisd");
 
     let authenticator = build_authenticator(&config);
-    let handler = DaemonHandler::new(config.clone(), authenticator, MockSessionLauncher);
+    let user_directory = build_user_directory(&config);
+    let session_directory = build_session_directory(&config);
+    let handler = DaemonHandler::new(
+        config.clone(),
+        authenticator,
+        MockSessionLauncher,
+        user_directory,
+        session_directory,
+    );
     niralisd::server::run(&config, handler)?;
 
     Ok(())
@@ -43,6 +55,23 @@ fn build_authenticator(config: &Config) -> Box<dyn Authenticator> {
         AuthBackend::Mock => Box::new(MockAuthenticator),
         AuthBackend::Pam => Box::new(PamAuthenticator::new(config.auth.pam_service.clone())),
     }
+}
+
+fn build_user_directory(config: &Config) -> Box<dyn UserDirectory> {
+    Box::new(NssUserDirectory::new(UserDiscoveryConfig {
+        min_uid: config.users.min_uid,
+        allow_root: config.users.allow_root,
+        exclude: config.users.exclude.clone(),
+    }))
+}
+
+fn build_session_directory(config: &Config) -> Box<dyn SessionDirectory> {
+    Box::new(DesktopSessionDirectory::new(SessionDiscoveryConfig {
+        wayland_dirs: config.sessions.wayland_dirs.clone(),
+        include_x11: config.sessions.include_x11,
+        x11_dirs: config.sessions.x11_dirs.clone(),
+        exec_search_path: config.sessions.exec_search_path.clone(),
+    }))
 }
 
 fn init_logging(log_level: &str) -> MainResult<()> {

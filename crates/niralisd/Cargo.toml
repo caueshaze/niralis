@@ -7,6 +7,7 @@ version.workspace = true
 [dependencies]
 clap.workspace = true
 niralis-auth.workspace = true
+niralis-discovery.workspace = true
 niralis-protocol.workspace = true
 niralis-session.workspace = true
 serde.workspace = true

@@ -12,6 +12,22 @@ pam_service = "niralis"
 max_attempts = 5
 cooldown_seconds = 10
 
+[users]
+min_uid = 1000
+allow_root = false
+exclude = ["nobody"]
+
+[sessions]
+wayland_dirs = ["/usr/share/wayland-sessions"]
+include_x11 = false
+x11_dirs = ["/usr/share/xsessions"]
+exec_search_path = [
+  "/usr/local/bin",
+  "/usr/local/sbin",
+  "/usr/bin",
+  "/usr/sbin",
+]
+
 [session]
 default = "niri"
 command = "niri-session"

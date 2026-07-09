@@ -1,0 +1,15 @@
+[package]
+name = "niralis-discovery"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+libc.workspace = true
+niralis-protocol.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+which.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

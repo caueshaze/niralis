@@ -18,7 +18,6 @@ pub enum AuthError {
 
 pub trait Authenticator: Send + Sync {
     fn authenticate(&self, username: &str, password: &str) -> Result<AuthenticatedUser, AuthError>;
-    fn users(&self) -> Result<Vec<AuthenticatedUser>, AuthError>;
 }
 
 impl<T> Authenticator for Box<T>
@@ -27,10 +26,6 @@ where
 {
     fn authenticate(&self, username: &str, password: &str) -> Result<AuthenticatedUser, AuthError> {
         (**self).authenticate(username, password)
-    }
-
-    fn users(&self) -> Result<Vec<AuthenticatedUser>, AuthError> {
-        (**self).users()
     }
 }
 
@@ -47,13 +42,6 @@ impl Authenticator for MockAuthenticator {
         } else {
             Err(AuthError::LoginFailed)
         }
-    }
-
-    fn users(&self) -> Result<Vec<AuthenticatedUser>, AuthError> {
-        Ok(vec![AuthenticatedUser {
-            username: "test".to_owned(),
-            display_name: "Test User".to_owned(),
-        }])
     }
 }
 
@@ -97,10 +85,6 @@ impl Authenticator for PamAuthenticator {
             username: username.to_owned(),
             display_name: username.to_owned(),
         })
-    }
-
-    fn users(&self) -> Result<Vec<AuthenticatedUser>, AuthError> {
-        Ok(Vec::new())
     }
 }
 

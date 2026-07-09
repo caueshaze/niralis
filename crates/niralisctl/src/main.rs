@@ -3,7 +3,7 @@ use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
-use niralis_protocol::{NiralisRequest, NiralisResponse};
+use niralis_protocol::{NiralisRequest, NiralisResponse, SessionKind};
 use thiserror::Error;
 
 const DEFAULT_SOCKET_PATH: &str = "/run/niralis/niralisd.sock";
@@ -21,6 +21,7 @@ struct Cli {
 enum Command {
     Status,
     Users,
+    Sessions,
     Login {
         #[arg(long)]
         user: String,
@@ -51,6 +52,7 @@ fn run() -> Result<(), CliError> {
     let request = match cli.command {
         Command::Status => NiralisRequest::Status,
         Command::Users => NiralisRequest::GetUsers,
+        Command::Sessions => NiralisRequest::GetSessions,
         Command::Login {
             user,
             password,
@@ -94,10 +96,19 @@ fn print_response(response: &NiralisResponse) {
                 println!("{}\t{}", user.username, user.display_name);
             }
         }
+        NiralisResponse::Sessions { sessions } => {
+            for session in sessions {
+                let kind = match session.kind {
+                    SessionKind::Wayland => "wayland",
+                    SessionKind::X11 => "x11",
+                };
+                println!("{}\t{}\t{}", session.id, session.name, kind);
+            }
+        }
         NiralisResponse::LoginOk { session } => {
             println!(
-                "login ok: user={} session={}",
-                session.username, session.session
+                "login ok: session={} name={} kind={:?}",
+                session.id, session.name, session.kind
             );
         }
         NiralisResponse::LoginFailed { message } | NiralisResponse::Error { message } => {

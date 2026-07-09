@@ -3,7 +3,8 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use niralis_auth::Authenticator;
-use niralis_protocol::{DaemonStatus, NiralisRequest, NiralisResponse, SessionInfo, UserInfo};
+use niralis_discovery::{DiscoveryError, SessionDirectory, UserDirectory};
+use niralis_protocol::{DaemonStatus, NiralisRequest, NiralisResponse, SessionInfo, SessionKind};
 use niralis_session::{SessionLauncher, SessionRequest};
 use tracing::{debug, info};
 
@@ -14,15 +15,23 @@ pub trait RequestHandler: Send + Sync {
 }
 
 #[derive(Debug)]
-pub struct DaemonHandler<A, S> {
+pub struct DaemonHandler<A, S, U, D> {
     config: Config,
     authenticator: A,
     session_launcher: S,
+    user_directory: U,
+    session_directory: D,
     rate_limiter: Mutex<LoginRateLimiter>,
 }
 
-impl<A, S> DaemonHandler<A, S> {
-    pub fn new(config: Config, authenticator: A, session_launcher: S) -> Self {
+impl<A, S, U, D> DaemonHandler<A, S, U, D> {
+    pub fn new(
+        config: Config,
+        authenticator: A,
+        session_launcher: S,
+        user_directory: U,
+        session_directory: D,
+    ) -> Self {
         let rate_limiter = LoginRateLimiter::new(
             config.auth.max_attempts,
             Duration::from_secs(config.auth.cooldown_seconds),
@@ -32,15 +41,19 @@ impl<A, S> DaemonHandler<A, S> {
             config,
             authenticator,
             session_launcher,
+            user_directory,
+            session_directory,
             rate_limiter: Mutex::new(rate_limiter),
         }
     }
 }
 
-impl<A, S> RequestHandler for DaemonHandler<A, S>
+impl<A, S, U, D> RequestHandler for DaemonHandler<A, S, U, D>
 where
     A: Authenticator,
     S: SessionLauncher,
+    U: UserDirectory,
+    D: SessionDirectory,
 {
     fn handle(&self, request: NiralisRequest) -> NiralisResponse {
         match request {
@@ -52,19 +65,13 @@ where
                     greeter_user: self.config.greeter.user.clone(),
                 },
             },
-            NiralisRequest::GetUsers => match self.authenticator.users() {
-                Ok(users) => NiralisResponse::Users {
-                    users: users
-                        .into_iter()
-                        .map(|user| UserInfo {
-                            username: user.username,
-                            display_name: user.display_name,
-                        })
-                        .collect(),
-                },
-                Err(_) => NiralisResponse::Error {
-                    message: "failed to load users".to_owned(),
-                },
+            NiralisRequest::GetUsers => match self.user_directory.list_users() {
+                Ok(users) => NiralisResponse::Users { users },
+                Err(error) => discovery_error_response("users", error),
+            },
+            NiralisRequest::GetSessions => match self.session_directory.list_sessions() {
+                Ok(sessions) => NiralisResponse::Sessions { sessions },
+                Err(error) => discovery_error_response("sessions", error),
             },
             NiralisRequest::Login {
                 username,
@@ -78,10 +85,12 @@ where
     }
 }
 
-impl<A, S> DaemonHandler<A, S>
+impl<A, S, U, D> DaemonHandler<A, S, U, D>
 where
     A: Authenticator,
     S: SessionLauncher,
+    U: UserDirectory,
+    D: SessionDirectory,
 {
     fn handle_login(&self, username: String, password: String, session: String) -> NiralisResponse {
         if self.is_rate_limited(&username) {
@@ -95,14 +104,15 @@ where
 
                 let request = SessionRequest {
                     username: user.username,
-                    session,
+                    session: session.clone(),
                 };
 
                 match self.session_launcher.start_session(request) {
-                    Ok(started) => NiralisResponse::LoginOk {
+                    Ok(_started) => NiralisResponse::LoginOk {
                         session: SessionInfo {
-                            username: started.username,
-                            session: started.session,
+                            id: session.clone(),
+                            name: session,
+                            kind: SessionKind::Wayland,
                         },
                     },
                     Err(_) => NiralisResponse::Error {
@@ -139,6 +149,12 @@ where
             Ok(mut limiter) => limiter.reset(username),
             Err(_) => debug!("login rate limiter mutex is poisoned"),
         }
+    }
+}
+
+fn discovery_error_response(scope: &str, error: DiscoveryError) -> NiralisResponse {
+    NiralisResponse::Error {
+        message: format!("failed to discover {scope}: {error}"),
     }
 }
 
@@ -215,15 +231,34 @@ impl LoginRateLimiter {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
     use niralis_auth::{AuthError, AuthenticatedUser, MockAuthenticator};
+    use niralis_discovery::DiscoveryError;
     use niralis_session::MockSessionLauncher;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
 
-    fn handler() -> DaemonHandler<MockAuthenticator, MockSessionLauncher> {
-        DaemonHandler::new(Config::default(), MockAuthenticator, MockSessionLauncher)
+    fn handler() -> DaemonHandler<
+        MockAuthenticator,
+        MockSessionLauncher,
+        StubUserDirectory,
+        StubSessionDirectory,
+    > {
+        DaemonHandler::new(
+            Config::default(),
+            MockAuthenticator,
+            MockSessionLauncher,
+            StubUserDirectory::with_users(vec![niralis_protocol::UserInfo {
+                uid: 1000,
+                username: "test".to_owned(),
+                display_name: "Test User".to_owned(),
+            }]),
+            StubSessionDirectory::with_sessions(vec![SessionInfo {
+                id: "niri".to_owned(),
+                name: "Niri".to_owned(),
+                kind: SessionKind::Wayland,
+            }]),
+        )
     }
 
     fn test_config(max_attempts: u32, cooldown_seconds: u64) -> Config {
@@ -252,9 +287,26 @@ mod tests {
         assert_eq!(
             response,
             NiralisResponse::Users {
-                users: vec![UserInfo {
+                users: vec![niralis_protocol::UserInfo {
+                    uid: 1000,
                     username: "test".to_owned(),
                     display_name: "Test User".to_owned(),
+                }]
+            }
+        );
+    }
+
+    #[test]
+    fn handles_get_sessions() {
+        let response = handler().handle(NiralisRequest::GetSessions);
+
+        assert_eq!(
+            response,
+            NiralisResponse::Sessions {
+                sessions: vec![SessionInfo {
+                    id: "niri".to_owned(),
+                    name: "Niri".to_owned(),
+                    kind: SessionKind::Wayland,
                 }]
             }
         );
@@ -272,8 +324,9 @@ mod tests {
             response,
             NiralisResponse::LoginOk {
                 session: SessionInfo {
-                    username: "test".to_owned(),
-                    session: "niri".to_owned(),
+                    id: "niri".to_owned(),
+                    name: "niri".to_owned(),
+                    kind: SessionKind::Wayland,
                 }
             }
         );
@@ -294,7 +347,13 @@ mod tests {
     fn successive_failures_activate_rate_limit_before_authenticator() {
         let auth = CountingAuthenticator::always_fails();
         let calls = auth.calls.clone();
-        let handler = DaemonHandler::new(test_config(2, 60), auth, MockSessionLauncher);
+        let handler = DaemonHandler::new(
+            test_config(2, 60),
+            auth,
+            MockSessionLauncher,
+            StubUserDirectory::default(),
+            StubSessionDirectory::default(),
+        );
 
         for _ in 0..3 {
             assert_eq!(
@@ -314,7 +373,13 @@ mod tests {
     fn success_resets_rate_limit() {
         let auth = CountingAuthenticator::fails_then_succeeds(1);
         let calls = auth.calls.clone();
-        let handler = DaemonHandler::new(test_config(2, 60), auth, MockSessionLauncher);
+        let handler = DaemonHandler::new(
+            test_config(2, 60),
+            auth,
+            MockSessionLauncher,
+            StubUserDirectory::default(),
+            StubSessionDirectory::default(),
+        );
 
         assert_eq!(
             handler.handle(NiralisRequest::Login {
@@ -349,7 +414,13 @@ mod tests {
     #[test]
     fn rate_limit_response_is_generic() {
         let auth = CountingAuthenticator::always_fails();
-        let handler = DaemonHandler::new(test_config(1, 60), auth, MockSessionLauncher);
+        let handler = DaemonHandler::new(
+            test_config(1, 60),
+            auth,
+            MockSessionLauncher,
+            StubUserDirectory::default(),
+            StubSessionDirectory::default(),
+        );
 
         assert_eq!(
             handler.handle(NiralisRequest::Login {
@@ -394,6 +465,89 @@ mod tests {
         );
     }
 
+    #[test]
+    fn get_users_uses_user_directory_not_auth_backend() {
+        let auth = CountingAuthenticator::always_fails();
+        let calls = auth.calls.clone();
+        let handler = DaemonHandler::new(
+            Config::default(),
+            auth,
+            MockSessionLauncher,
+            StubUserDirectory::with_users(vec![niralis_protocol::UserInfo {
+                uid: 1001,
+                username: "ana".to_owned(),
+                display_name: "Ana".to_owned(),
+            }]),
+            StubSessionDirectory::default(),
+        );
+
+        let response = handler.handle(NiralisRequest::GetUsers);
+
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            response,
+            NiralisResponse::Users {
+                users: vec![niralis_protocol::UserInfo {
+                    uid: 1001,
+                    username: "ana".to_owned(),
+                    display_name: "Ana".to_owned(),
+                }]
+            }
+        );
+    }
+
+    #[test]
+    fn get_sessions_uses_session_directory() {
+        let handler = DaemonHandler::new(
+            Config::default(),
+            MockAuthenticator,
+            MockSessionLauncher,
+            StubUserDirectory::default(),
+            StubSessionDirectory::with_sessions(vec![SessionInfo {
+                id: "plasma".to_owned(),
+                name: "Plasma".to_owned(),
+                kind: SessionKind::X11,
+            }]),
+        );
+
+        let response = handler.handle(NiralisRequest::GetSessions);
+
+        assert_eq!(
+            response,
+            NiralisResponse::Sessions {
+                sessions: vec![SessionInfo {
+                    id: "plasma".to_owned(),
+                    name: "Plasma".to_owned(),
+                    kind: SessionKind::X11,
+                }]
+            }
+        );
+    }
+
+    #[test]
+    fn discovery_errors_return_structured_error_response() {
+        let handler = DaemonHandler::new(
+            Config::default(),
+            MockAuthenticator,
+            MockSessionLauncher,
+            StubUserDirectory::with_error(DiscoveryError::UserEnumeration),
+            StubSessionDirectory::with_error(DiscoveryError::UserEnumeration),
+        );
+
+        assert_eq!(
+            handler.handle(NiralisRequest::GetUsers),
+            NiralisResponse::Error {
+                message: "failed to discover users: failed to enumerate users".to_owned(),
+            }
+        );
+        assert_eq!(
+            handler.handle(NiralisRequest::GetSessions),
+            NiralisResponse::Error {
+                message: "failed to discover sessions: failed to enumerate users".to_owned(),
+            }
+        );
+    }
+
     struct CountingAuthenticator {
         calls: std::sync::Arc<AtomicUsize>,
         failures_before_success: Option<usize>,
@@ -431,9 +585,85 @@ mod tests {
                 _ => Err(AuthError::LoginFailed),
             }
         }
+    }
 
-        fn users(&self) -> Result<Vec<AuthenticatedUser>, AuthError> {
-            Ok(Vec::new())
+    #[derive(Debug, Clone)]
+    struct StubUserDirectory {
+        result: StubUserDirectoryResult,
+    }
+
+    impl StubUserDirectory {
+        fn with_users(users: Vec<niralis_protocol::UserInfo>) -> Self {
+            Self {
+                result: StubUserDirectoryResult::Users(users),
+            }
         }
+
+        fn with_error(_error: DiscoveryError) -> Self {
+            Self {
+                result: StubUserDirectoryResult::Error,
+            }
+        }
+    }
+
+    impl UserDirectory for StubUserDirectory {
+        fn list_users(&self) -> Result<Vec<niralis_protocol::UserInfo>, DiscoveryError> {
+            match &self.result {
+                StubUserDirectoryResult::Users(users) => Ok(users.clone()),
+                StubUserDirectoryResult::Error => Err(DiscoveryError::UserEnumeration),
+            }
+        }
+    }
+
+    impl Default for StubUserDirectory {
+        fn default() -> Self {
+            Self::with_users(Vec::new())
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    enum StubUserDirectoryResult {
+        Users(Vec<niralis_protocol::UserInfo>),
+        Error,
+    }
+
+    #[derive(Debug, Clone)]
+    struct StubSessionDirectory {
+        result: StubSessionDirectoryResult,
+    }
+
+    impl StubSessionDirectory {
+        fn with_sessions(sessions: Vec<SessionInfo>) -> Self {
+            Self {
+                result: StubSessionDirectoryResult::Sessions(sessions),
+            }
+        }
+
+        fn with_error(_error: DiscoveryError) -> Self {
+            Self {
+                result: StubSessionDirectoryResult::Error,
+            }
+        }
+    }
+
+    impl SessionDirectory for StubSessionDirectory {
+        fn list_sessions(&self) -> Result<Vec<SessionInfo>, DiscoveryError> {
+            match &self.result {
+                StubSessionDirectoryResult::Sessions(sessions) => Ok(sessions.clone()),
+                StubSessionDirectoryResult::Error => Err(DiscoveryError::UserEnumeration),
+            }
+        }
+    }
+
+    impl Default for StubSessionDirectory {
+        fn default() -> Self {
+            Self::with_sessions(Vec::new())
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    enum StubSessionDirectoryResult {
+        Sessions(Vec<SessionInfo>),
+        Error,
     }
 }

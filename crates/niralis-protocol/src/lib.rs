@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 pub enum NiralisRequest {
     Status,
     GetUsers,
+    GetSessions,
     Login {
         username: String,
         password: String,
@@ -19,6 +20,7 @@ pub enum NiralisRequest {
 pub enum NiralisResponse {
     Status { status: DaemonStatus },
     Users { users: Vec<UserInfo> },
+    Sessions { sessions: Vec<SessionInfo> },
     LoginOk { session: SessionInfo },
     LoginFailed { message: String },
     Error { message: String },
@@ -34,14 +36,23 @@ pub struct DaemonStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserInfo {
+    pub uid: u32,
     pub username: String,
     pub display_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionInfo {
-    pub username: String,
-    pub session: String,
+    pub id: String,
+    pub name: String,
+    pub kind: SessionKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionKind {
+    Wayland,
+    X11,
 }
 
 #[cfg(test)]
@@ -82,6 +93,39 @@ mod tests {
                     greeter_user: "niralis".to_owned(),
                 }
             }
+        );
+    }
+
+    #[test]
+    fn serializes_get_sessions_request() {
+        let encoded =
+            serde_json::to_string(&NiralisRequest::GetSessions).expect("request should serialize");
+
+        assert_eq!(encoded, r#"{"type":"get_sessions"}"#);
+    }
+
+    #[test]
+    fn serializes_sessions_response() {
+        let response = NiralisResponse::Sessions {
+            sessions: vec![
+                SessionInfo {
+                    id: "niri".to_owned(),
+                    name: "Niri".to_owned(),
+                    kind: SessionKind::Wayland,
+                },
+                SessionInfo {
+                    id: "plasma".to_owned(),
+                    name: "Plasma".to_owned(),
+                    kind: SessionKind::X11,
+                },
+            ],
+        };
+
+        let encoded = serde_json::to_string(&response).expect("response should serialize");
+
+        assert_eq!(
+            encoded,
+            r#"{"type":"sessions","sessions":[{"id":"niri","name":"Niri","kind":"wayland"},{"id":"plasma","name":"Plasma","kind":"x11"}]}"#
         );
     }
 }
