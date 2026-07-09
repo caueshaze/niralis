@@ -22,6 +22,7 @@ pub enum NiralisResponse {
     Users { users: Vec<UserInfo> },
     Sessions { sessions: Vec<SessionInfo> },
     LoginOk { session: SessionInfo },
+    SessionUnavailable { message: String },
     LoginFailed { message: String },
     Error { message: String },
 }
@@ -126,6 +127,35 @@ mod tests {
         assert_eq!(
             encoded,
             r#"{"type":"sessions","sessions":[{"id":"niri","name":"Niri","kind":"wayland"},{"id":"plasma","name":"Plasma","kind":"x11"}]}"#
+        );
+    }
+
+    #[test]
+    fn serializes_session_unavailable_response() {
+        let response = NiralisResponse::SessionUnavailable {
+            message: "session unavailable".to_owned(),
+        };
+
+        let encoded = serde_json::to_string(&response).expect("response should serialize");
+
+        assert_eq!(
+            encoded,
+            r#"{"type":"session_unavailable","message":"session unavailable"}"#
+        );
+    }
+
+    #[test]
+    fn deserializes_session_unavailable_response() {
+        let decoded: NiralisResponse = serde_json::from_str(
+            r#"{"type":"session_unavailable","message":"session unavailable"}"#,
+        )
+        .expect("response should deserialize");
+
+        assert_eq!(
+            decoded,
+            NiralisResponse::SessionUnavailable {
+                message: "session unavailable".to_owned(),
+            }
         );
     }
 }

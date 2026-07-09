@@ -330,6 +330,7 @@ dependencies = [
 name = "niralis-session"
 version = "0.1.0"
 dependencies = [
+ "niralis-protocol",
  "thiserror",
  "tracing",
 ]

@@ -107,9 +107,17 @@ fn print_response(response: &NiralisResponse) {
         }
         NiralisResponse::LoginOk { session } => {
             println!(
-                "login ok: session={} name={} kind={:?}",
-                session.id, session.name, session.kind
+                "login ok: id={} name={} kind={}",
+                session.id,
+                session.name,
+                match session.kind {
+                    SessionKind::Wayland => "wayland",
+                    SessionKind::X11 => "x11",
+                }
             );
+        }
+        NiralisResponse::SessionUnavailable { message } => {
+            eprintln!("niralisctl: {message}");
         }
         NiralisResponse::LoginFailed { message } | NiralisResponse::Error { message } => {
             println!("{message}");

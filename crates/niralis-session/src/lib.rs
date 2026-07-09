@@ -1,16 +1,17 @@
+use niralis_protocol::SessionInfo;
 use thiserror::Error;
 use tracing::info;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionRequest {
     pub username: String,
-    pub session: String,
+    pub session: SessionInfo,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StartedSession {
     pub username: String,
-    pub session: String,
+    pub session: SessionInfo,
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -30,7 +31,7 @@ impl SessionLauncher for MockSessionLauncher {
     fn start_session(&self, request: SessionRequest) -> Result<StartedSession, SessionError> {
         info!(
             username = %request.username,
-            session = %request.session,
+            session = %request.session.id,
             "mock session start requested"
         );
 
@@ -52,7 +53,11 @@ mod tests {
         let started = launcher
             .start_session(SessionRequest {
                 username: "test".to_owned(),
-                session: "niri".to_owned(),
+                session: SessionInfo {
+                    id: "niri".to_owned(),
+                    name: "Niri".to_owned(),
+                    kind: niralis_protocol::SessionKind::Wayland,
+                },
             })
             .expect("mock session launcher should succeed");
 
@@ -60,7 +65,11 @@ mod tests {
             started,
             StartedSession {
                 username: "test".to_owned(),
-                session: "niri".to_owned(),
+                session: SessionInfo {
+                    id: "niri".to_owned(),
+                    name: "Niri".to_owned(),
+                    kind: niralis_protocol::SessionKind::Wayland,
+                },
             }
         );
     }
