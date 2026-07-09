@@ -1,5 +1,6 @@
 use std::io::Cursor;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 
 use niralis_session::{WorkerEnvelope, WorkerResponse};
 
@@ -22,7 +23,7 @@ fn pam_worker_returns_ready_after_short_lifecycle() {
         WorkerDependencies {
             authenticator_factory: &StubFactory {
                 state: state.clone(),
-                authenticate_ok: true,
+                auth_result: Ok(()),
                 open_ok: true,
                 open_panics: false,
                 pam_username: "caue",
@@ -30,6 +31,7 @@ fn pam_worker_returns_ready_after_short_lifecycle() {
             identity_resolver: &StubIdentityResolver {
                 state: state.clone(),
                 result: Ok(identity()),
+                last_username: Arc::new(Mutex::new(None)),
             },
         },
     )
@@ -42,4 +44,43 @@ fn pam_worker_returns_ready_after_short_lifecycle() {
     assert_eq!(state.open_calls.load(Ordering::SeqCst), 1);
     assert_eq!(state.drops.load(Ordering::SeqCst), 1);
     assert!(matches!(response.message, WorkerResponse::Ready { .. }));
+}
+
+#[test]
+fn identity_resolution_uses_pam_user_not_requested_username() {
+    let mut reader = Cursor::new(format!(
+        "{}\n",
+        serde_json::to_string(&request()).expect("json")
+    ));
+    let mut writer = Vec::new();
+    let state = TrackingState::default();
+    let last_username = Arc::new(Mutex::new(None));
+
+    run_worker_process_with_dependencies(
+        &mut reader,
+        &mut writer,
+        WorkerDependencies {
+            authenticator_factory: &StubFactory {
+                state: state.clone(),
+                auth_result: Ok(()),
+                open_ok: true,
+                open_panics: false,
+                pam_username: "caue",
+            },
+            identity_resolver: &StubIdentityResolver {
+                state,
+                result: Ok(identity()),
+                last_username: last_username.clone(),
+            },
+        },
+    )
+    .expect("worker should succeed");
+
+    assert_eq!(
+        last_username
+            .lock()
+            .expect("last_username mutex should lock")
+            .as_deref(),
+        Some("caue")
+    );
 }

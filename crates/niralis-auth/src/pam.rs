@@ -33,7 +33,7 @@ impl Authenticator for PamAuthenticator {
             Client::with_conversation(&self.service, SilentPasswordConversation::new()).map_err(
                 |error| {
                     debug!(service = %self.service, ?error, "failed to initialize PAM client");
-                    AuthError::LoginFailed
+                    AuthError::InfrastructureFailed
                 },
             )?;
 
@@ -55,7 +55,7 @@ impl Authenticator for PamAuthenticator {
                 ?error,
                 "failed to determine PAM authenticated username"
             );
-            AuthError::LoginFailed
+            AuthError::AuthenticatedIdentityUnavailable
         })?;
 
         Ok(Box::new(PamAuthenticatedTransaction {

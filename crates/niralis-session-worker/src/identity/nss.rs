@@ -64,7 +64,7 @@ pub(crate) fn lookup_user_with<L: PasswdLookup>(
     lookup: &L,
 ) -> Result<UnixIdentity, IdentityError> {
     let username = CString::new(username).map_err(|_| IdentityError::InvalidUsername)?;
-    let mut buffer_size = lookup.initial_buffer_size().min(MAX_BUFFER_SIZE);
+    let mut buffer_size = lookup.initial_buffer_size().clamp(1, MAX_BUFFER_SIZE);
 
     loop {
         let mut record = zeroed_passwd();

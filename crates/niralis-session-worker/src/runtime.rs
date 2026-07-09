@@ -1,7 +1,7 @@
 use std::io::{Read, Write};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
-use niralis_auth::{Authenticator, PamAuthenticator};
+use niralis_auth::{AuthError, Authenticator, PamAuthenticator};
 use niralis_session::{
     read_envelope, write_envelope, SessionError, StartedSession, WorkerErrorCode, WorkerRequest,
     WorkerResponse, WorkerSessionFailureCode,
@@ -112,10 +112,33 @@ fn run_pam_session<W: Write, F: WorkerAuthenticatorFactory, I: UnixIdentityResol
     drop(password);
     let mut transaction = match auth_result {
         Ok(transaction) => transaction,
-        Err(_) => {
+        Err(AuthError::LoginFailed) => {
             info!(username = %request.username, session = %request.session.id, "worker PAM authentication failed");
             write_envelope(writer, WorkerResponse::AuthenticationFailed)?;
             return Err(SessionError::AuthenticationFailed);
+        }
+        Err(AuthError::InfrastructureFailed) => {
+            warn!(
+                username = %request.username,
+                session = %request.session.id,
+                "worker PAM infrastructure failed before authentication completed"
+            );
+            write_rejection(writer, WorkerErrorCode::InternalError)?;
+            return Err(SessionError::WorkerRejected);
+        }
+        Err(AuthError::AuthenticatedIdentityUnavailable) => {
+            warn!(
+                username = %request.username,
+                session = %request.session.id,
+                "worker could not determine PAM authenticated identity"
+            );
+            write_envelope(
+                writer,
+                WorkerResponse::SessionFailed {
+                    code: WorkerSessionFailureCode::PamIdentityUnavailable,
+                },
+            )?;
+            return Err(SessionError::AuthenticatedSessionFailed);
         }
     };
     let pam_username = transaction.user().username.clone();

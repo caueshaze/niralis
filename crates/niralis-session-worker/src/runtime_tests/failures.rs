@@ -1,6 +1,8 @@
 use std::io::Cursor;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 
+use niralis_auth::AuthError;
 use niralis_session::{WorkerEnvelope, WorkerResponse, WorkerSessionFailureCode};
 
 use crate::identity::IdentityError;
@@ -21,7 +23,7 @@ fn pam_worker_distinguishes_auth_identity_and_session_failures() {
         drops,
     ) in [
         (
-            false,
+            Err(AuthError::LoginFailed),
             Ok(identity()),
             false,
             false,
@@ -31,7 +33,31 @@ fn pam_worker_distinguishes_auth_identity_and_session_failures() {
             0,
         ),
         (
-            true,
+            Err(AuthError::InfrastructureFailed),
+            Ok(identity()),
+            false,
+            false,
+            WorkerResponse::Rejected {
+                code: niralis_session::WorkerErrorCode::InternalError,
+            },
+            0,
+            0,
+            0,
+        ),
+        (
+            Err(AuthError::AuthenticatedIdentityUnavailable),
+            Ok(identity()),
+            false,
+            false,
+            WorkerResponse::SessionFailed {
+                code: WorkerSessionFailureCode::PamIdentityUnavailable,
+            },
+            0,
+            0,
+            0,
+        ),
+        (
+            Ok(()),
             Err(IdentityError::LookupFailed),
             false,
             false,
@@ -43,7 +69,7 @@ fn pam_worker_distinguishes_auth_identity_and_session_failures() {
             1,
         ),
         (
-            true,
+            Ok(()),
             Ok(identity()),
             false,
             false,
@@ -55,7 +81,7 @@ fn pam_worker_distinguishes_auth_identity_and_session_failures() {
             1,
         ),
         (
-            true,
+            Ok(()),
             Ok(identity()),
             false,
             true,
@@ -80,7 +106,7 @@ fn pam_worker_distinguishes_auth_identity_and_session_failures() {
             WorkerDependencies {
                 authenticator_factory: &StubFactory {
                     state: state.clone(),
-                    authenticate_ok: auth_ok,
+                    auth_result: auth_ok.clone(),
                     open_ok,
                     open_panics,
                     pam_username: "caue",
@@ -88,6 +114,7 @@ fn pam_worker_distinguishes_auth_identity_and_session_failures() {
                 identity_resolver: &StubIdentityResolver {
                     state: state.clone(),
                     result: identity_result.clone(),
+                    last_username: Arc::new(Mutex::new(None)),
                 },
             },
         );

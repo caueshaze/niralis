@@ -18,6 +18,10 @@ pub struct AuthenticatedUser {
 pub enum AuthError {
     #[error("login failed")]
     LoginFailed,
+    #[error("authentication infrastructure failed")]
+    InfrastructureFailed,
+    #[error("authenticated identity unavailable")]
+    AuthenticatedIdentityUnavailable,
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]

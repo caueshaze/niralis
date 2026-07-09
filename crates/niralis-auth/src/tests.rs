@@ -31,6 +31,18 @@ fn rejects_invalid_login_with_generic_error() {
 }
 
 #[test]
+fn auth_error_variants_preserve_semantics() {
+    assert_eq!(
+        AuthError::InfrastructureFailed.to_string(),
+        "authentication infrastructure failed"
+    );
+    assert_eq!(
+        AuthError::AuthenticatedIdentityUnavailable.to_string(),
+        "authenticated identity unavailable"
+    );
+}
+
+#[test]
 fn conversation_clears_password() {
     let mut conversation = SilentPasswordConversation::new();
     conversation.set_credentials("test".to_owned(), "secret".to_owned());

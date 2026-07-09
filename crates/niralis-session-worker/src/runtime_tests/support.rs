@@ -1,5 +1,6 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use niralis_auth::{
     AuthError, AuthSessionError, AuthenticatedTransaction, AuthenticatedUser, Authenticator,
@@ -20,7 +21,7 @@ pub(super) struct TrackingState {
 
 pub(super) struct StubFactory {
     pub(super) state: TrackingState,
-    pub(super) authenticate_ok: bool,
+    pub(super) auth_result: Result<(), AuthError>,
     pub(super) open_ok: bool,
     pub(super) open_panics: bool,
     pub(super) pam_username: &'static str,
@@ -30,7 +31,7 @@ impl WorkerAuthenticatorFactory for StubFactory {
     fn build(&self, _pam_service: &str) -> Box<dyn Authenticator> {
         Box::new(StubAuthenticator {
             state: self.state.clone(),
-            authenticate_ok: self.authenticate_ok,
+            auth_result: self.auth_result.clone(),
             open_ok: self.open_ok,
             open_panics: self.open_panics,
             pam_username: self.pam_username,
@@ -40,7 +41,7 @@ impl WorkerAuthenticatorFactory for StubFactory {
 
 struct StubAuthenticator {
     state: TrackingState,
-    authenticate_ok: bool,
+    auth_result: Result<(), AuthError>,
     open_ok: bool,
     open_panics: bool,
     pam_username: &'static str,
@@ -53,8 +54,8 @@ impl Authenticator for StubAuthenticator {
         _password: &str,
     ) -> Result<Box<dyn AuthenticatedTransaction>, AuthError> {
         self.state.authenticate_calls.fetch_add(1, Ordering::SeqCst);
-        if self.authenticate_ok {
-            Ok(Box::new(StubTransaction {
+        match &self.auth_result {
+            Ok(()) => Ok(Box::new(StubTransaction {
                 user: AuthenticatedUser {
                     username: self.pam_username.to_owned(),
                     display_name: username.to_owned(),
@@ -62,9 +63,8 @@ impl Authenticator for StubAuthenticator {
                 state: self.state.clone(),
                 open_ok: self.open_ok,
                 open_panics: self.open_panics,
-            }))
-        } else {
-            Err(AuthError::LoginFailed)
+            })),
+            Err(error) => Err(error.clone()),
         }
     }
 }
@@ -103,11 +103,16 @@ impl Drop for StubTransaction {
 pub(super) struct StubIdentityResolver {
     pub(super) state: TrackingState,
     pub(super) result: Result<UnixIdentity, IdentityError>,
+    pub(super) last_username: Arc<Mutex<Option<String>>>,
 }
 
 impl UnixIdentityResolver for StubIdentityResolver {
-    fn resolve(&self, _username: &str) -> Result<UnixIdentity, IdentityError> {
+    fn resolve(&self, username: &str) -> Result<UnixIdentity, IdentityError> {
         self.state.resolve_calls.fetch_add(1, Ordering::SeqCst);
+        *self
+            .last_username
+            .lock()
+            .expect("last_username mutex should lock") = Some(username.to_owned());
         self.result.clone()
     }
 }
