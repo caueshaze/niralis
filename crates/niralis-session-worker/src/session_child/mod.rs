@@ -7,9 +7,13 @@ use std::sync::mpsc::{self, Receiver};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use crate::privilege_drop::{
+    AppliedCredentials, LibcPrivilegeDropper, PrivilegeDropError, PrivilegeDropTarget,
+    PrivilegeDropper,
+};
 use protocol::{
     SessionChildEnvelope, SessionChildErrorCode, SessionChildRequest, SessionChildResponse,
-    SESSION_CHILD_PROTOCOL_VERSION,
+    SessionChildUnixCredentials, SESSION_CHILD_PROTOCOL_VERSION,
 };
 
 pub const SESSION_CHILD_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -18,6 +22,7 @@ pub const SESSION_CHILD_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 pub struct SessionChildExpectation {
     pub canonical_username: String,
     pub session_id: String,
+    pub target_credentials: PrivilegeDropTarget,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,6 +30,7 @@ pub struct SessionChildReport {
     pub canonical_username: String,
     pub session_id: String,
     pub child_pid: u32,
+    pub applied_credentials: AppliedCredentials,
 }
 
 #[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
@@ -87,9 +93,10 @@ impl SessionChildRunner for ProcessSessionChildRunner {
         let deadline = Instant::now() + SESSION_CHILD_HANDSHAKE_TIMEOUT;
         let request = SessionChildEnvelope {
             version: SESSION_CHILD_PROTOCOL_VERSION,
-            message: SessionChildRequest::Probe {
+            message: SessionChildRequest::ApplyCredentials {
                 canonical_username: expectation.canonical_username.clone(),
                 session_id: expectation.session_id.clone(),
+                credentials: SessionChildUnixCredentials::from(&expectation.target_credentials),
             },
         };
         let payload = serde_json::to_vec(&request).map_err(|_| SessionChildError::IoFailed)?;
@@ -131,14 +138,22 @@ impl SessionChildRunner for ProcessSessionChildRunner {
                 canonical_username,
                 session_id,
                 child_pid,
+                applied_credentials,
             } if canonical_username == expectation.canonical_username
                 && session_id == expectation.session_id
-                && child_pid == pid =>
+                && child_pid == pid
+                && applied_credentials
+                    == SessionChildUnixCredentials::from(&expectation.target_credentials) =>
             {
                 Ok(SessionChildReport {
                     canonical_username,
                     session_id,
                     child_pid,
+                    applied_credentials: AppliedCredentials {
+                        uid: applied_credentials.uid,
+                        gid: applied_credentials.gid,
+                        supplementary_gids: applied_credentials.supplementary_gids,
+                    },
                 })
             }
             SessionChildResponse::Rejected { .. } => Err(SessionChildError::ProtocolFailed),
@@ -309,9 +324,18 @@ fn kill_and_reap(child: &mut Child) {
 
 pub(crate) fn run_child_process() -> i32 {
     let stdin = std::io::stdin().lock();
-    let mut stdout = std::io::stdout().lock();
+    let stdout = std::io::stdout().lock();
+    run_child_process_with_dropper(stdin, stdout, &LibcPrivilegeDropper, std::process::id())
+}
+
+pub(crate) fn run_child_process_with_dropper(
+    reader: impl Read,
+    mut writer: impl Write,
+    dropper: &impl PrivilegeDropper,
+    child_pid: u32,
+) -> i32 {
     let mut bytes = Vec::new();
-    if stdin
+    if reader
         .take((protocol::MAX_SESSION_CHILD_MESSAGE_BYTES + 1) as u64)
         .read_to_end(&mut bytes)
         .is_err()
@@ -321,29 +345,52 @@ pub(crate) fn run_child_process() -> i32 {
     let request: SessionChildEnvelope<SessionChildRequest> = match parse_request(&bytes) {
         Ok(request) => request,
         Err(code) => {
-            let _ = write_rejection(&mut stdout, code);
+            let _ = write_rejection(&mut writer, code);
             return 1;
         }
     };
     if request.version != SESSION_CHILD_PROTOCOL_VERSION {
-        let _ = write_rejection(&mut stdout, SessionChildErrorCode::UnsupportedVersion);
+        let _ = write_rejection(&mut writer, SessionChildErrorCode::UnsupportedVersion);
         return 1;
     }
-    let SessionChildRequest::Probe {
+    let SessionChildRequest::ApplyCredentials {
         canonical_username,
         session_id,
+        credentials,
     } = request.message;
+    if credentials.uid == 0 {
+        let _ = write_rejection(&mut writer, SessionChildErrorCode::RootUidDisallowed);
+        return 1;
+    }
+    let target = PrivilegeDropTarget::from(credentials);
+    let applied = match dropper.drop_privileges(&target) {
+        Ok(applied) => applied,
+        Err(PrivilegeDropError::RootUidDisallowed) => {
+            let _ = write_rejection(&mut writer, SessionChildErrorCode::RootUidDisallowed);
+            return 1;
+        }
+        Err(_) => {
+            let _ = write_rejection(&mut writer, SessionChildErrorCode::PrivilegeDropFailed);
+            return 1;
+        }
+    };
+    let applied_credentials = SessionChildUnixCredentials::from(&applied);
+    if applied_credentials != SessionChildUnixCredentials::from(&target) {
+        let _ = write_rejection(&mut writer, SessionChildErrorCode::CredentialMismatch);
+        return 1;
+    }
     let response = SessionChildEnvelope {
         version: SESSION_CHILD_PROTOCOL_VERSION,
         message: SessionChildResponse::Ready {
             canonical_username,
             session_id,
-            child_pid: std::process::id(),
+            child_pid,
+            applied_credentials,
         },
     };
-    if serde_json::to_writer(&mut stdout, &response).is_err()
-        || stdout.write_all(b"\n").is_err()
-        || stdout.flush().is_err()
+    if serde_json::to_writer(&mut writer, &response).is_err()
+        || writer.write_all(b"\n").is_err()
+        || writer.flush().is_err()
     {
         return 1;
     }

@@ -5,7 +5,7 @@ use super::libc::{
     bounded_max_observed_groups, HARD_MAX_OBSERVED_GROUPS, HARD_MAX_SUPPLEMENTARY_GROUPS,
 };
 use super::*;
-use crate::{ResolvedUnixCredentials, UnixIdentity};
+use crate::privilege_drop::PrivilegeDropTarget;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Call {
@@ -48,17 +48,27 @@ impl CredentialSyscalls for RecordingSyscalls {
     }
 }
 
-fn credentials(groups: Vec<u32>) -> ResolvedUnixCredentials {
-    ResolvedUnixCredentials {
-        identity: UnixIdentity {
-            username: "user".to_owned(),
-            uid: 1000,
-            gid: 1000,
-            home: "/home/user".into(),
-            shell: "/bin/sh".into(),
-        },
+fn credentials(groups: Vec<u32>) -> PrivilegeDropTarget {
+    PrivilegeDropTarget {
+        uid: 1000,
+        gid: 1000,
         supplementary_gids: groups,
     }
+}
+
+#[test]
+fn root_uid_is_rejected_before_mutation() {
+    let syscalls = success(vec![]);
+    let target = PrivilegeDropTarget {
+        uid: 0,
+        gid: 1000,
+        supplementary_gids: vec![],
+    };
+    assert_eq!(
+        drop_privileges_with(&syscalls, &target),
+        Err(PrivilegeDropError::RootUidDisallowed)
+    );
+    assert!(syscalls.calls.lock().unwrap().is_empty());
 }
 
 fn observed(groups: Vec<gid_t>) -> ObservedCredentials {

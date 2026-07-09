@@ -10,7 +10,8 @@ pub use identity::{
     ResolvedUnixCredentials, SupplementaryGroupsResolver, UnixIdentity, UnixIdentityResolver,
 };
 pub use privilege_drop::{
-    AppliedCredentials, LibcPrivilegeDropper, PrivilegeDropError, PrivilegeDropper,
+    AppliedCredentials, LibcPrivilegeDropper, PrivilegeDropError, PrivilegeDropTarget,
+    PrivilegeDropper,
 };
 pub use runtime::{run_worker_process, WorkerAuthenticatorFactory};
 pub use session_child::{

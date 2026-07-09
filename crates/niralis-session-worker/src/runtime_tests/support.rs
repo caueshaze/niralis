@@ -12,6 +12,7 @@ use crate::identity::{
     GroupResolutionError, IdentityError, SupplementaryGroupsResolver, UnixIdentity,
     UnixIdentityResolver,
 };
+use crate::privilege_drop::AppliedCredentials;
 use crate::runtime::WorkerAuthenticatorFactory;
 use crate::session_child::{
     SessionChildError, SessionChildExpectation, SessionChildReport, SessionChildRunner,
@@ -158,6 +159,11 @@ impl SessionChildRunner for StubChildRunner {
             canonical_username: expectation.canonical_username,
             session_id: expectation.session_id,
             child_pid: 1,
+            applied_credentials: AppliedCredentials {
+                uid: expectation.target_credentials.uid,
+                gid: expectation.target_credentials.gid,
+                supplementary_gids: expectation.target_credentials.supplementary_gids,
+            },
         })
     }
 }

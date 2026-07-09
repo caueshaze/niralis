@@ -15,9 +15,9 @@ pub struct LibcPrivilegeDropper;
 impl super::PrivilegeDropper for LibcPrivilegeDropper {
     fn drop_privileges(
         &self,
-        credentials: &crate::ResolvedUnixCredentials,
+        target: &super::PrivilegeDropTarget,
     ) -> Result<super::AppliedCredentials, super::PrivilegeDropError> {
-        super::drop_privileges_with(self, credentials)
+        super::drop_privileges_with(self, target)
     }
 }
 

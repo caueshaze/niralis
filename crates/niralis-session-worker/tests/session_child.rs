@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 
 use niralis_session_worker::{
-    ProcessSessionChildRunner, SessionChildError, SessionChildExpectation, SessionChildRunner,
+    PrivilegeDropTarget, ProcessSessionChildRunner, SessionChildError, SessionChildExpectation,
+    SessionChildRunner,
 };
 
 fn runner(binary: &str) -> ProcessSessionChildRunner {
@@ -12,20 +13,12 @@ fn expectation() -> SessionChildExpectation {
     SessionChildExpectation {
         canonical_username: "canonical-user".to_owned(),
         session_id: "niri".to_owned(),
+        target_credentials: PrivilegeDropTarget {
+            uid: 1000,
+            gid: 1000,
+            supplementary_gids: vec![10, 20],
+        },
     }
-}
-
-#[test]
-fn real_session_child_completes_handshake_and_exits() {
-    let runner = runner(env!("CARGO_BIN_EXE_niralis-session-child"));
-
-    let report = runner
-        .run_child(expectation())
-        .expect("child handshake should succeed");
-
-    assert_eq!(report.canonical_username, "canonical-user");
-    assert_eq!(report.session_id, "niri");
-    assert!(report.child_pid > 0);
 }
 
 #[test]

@@ -14,6 +14,23 @@ pub struct AppliedCredentials {
     pub supplementary_gids: Vec<u32>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrivilegeDropTarget {
+    pub uid: u32,
+    pub gid: u32,
+    pub supplementary_gids: Vec<u32>,
+}
+
+impl From<&ResolvedUnixCredentials> for PrivilegeDropTarget {
+    fn from(credentials: &ResolvedUnixCredentials) -> Self {
+        Self {
+            uid: credentials.identity.uid,
+            gid: credentials.identity.gid,
+            supplementary_gids: credentials.supplementary_gids.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum PrivilegeDropError {
     #[error("invalid user ID")]
@@ -24,6 +41,8 @@ pub enum PrivilegeDropError {
     InvalidSupplementaryGid,
     #[error("invalid supplementary group invariants")]
     InvalidSupplementaryGroups,
+    #[error("root UID is not a valid privilege-drop target")]
+    RootUidDisallowed,
     #[error("failed to set supplementary groups")]
     SetGroupsFailed,
     #[error("failed to set primary group ID")]
@@ -44,7 +63,7 @@ pub trait PrivilegeDropper: Send + Sync {
     /// It must not run in the privileged PAM supervisor or in the main daemon.
     fn drop_privileges(
         &self,
-        credentials: &ResolvedUnixCredentials,
+        target: &PrivilegeDropTarget,
     ) -> Result<AppliedCredentials, PrivilegeDropError>;
 }
 
@@ -78,31 +97,32 @@ pub(crate) enum SyscallError {
 
 pub(crate) fn drop_privileges_with<S: CredentialSyscalls>(
     syscalls: &S,
-    credentials: &ResolvedUnixCredentials,
+    target: &PrivilegeDropTarget,
 ) -> Result<AppliedCredentials, PrivilegeDropError> {
-    let uid =
-        uid_t::try_from(credentials.identity.uid).map_err(|_| PrivilegeDropError::InvalidUid)?;
-    let gid =
-        gid_t::try_from(credentials.identity.gid).map_err(|_| PrivilegeDropError::InvalidGid)?;
-    let mut supplementary_gids = Vec::with_capacity(credentials.supplementary_gids.len());
-    for supplementary_gid in &credentials.supplementary_gids {
+    if target.uid == 0 {
+        return Err(PrivilegeDropError::RootUidDisallowed);
+    }
+    let uid = uid_t::try_from(target.uid).map_err(|_| PrivilegeDropError::InvalidUid)?;
+    let gid = gid_t::try_from(target.gid).map_err(|_| PrivilegeDropError::InvalidGid)?;
+    let mut supplementary_gids = Vec::with_capacity(target.supplementary_gids.len());
+    for supplementary_gid in &target.supplementary_gids {
         supplementary_gids.push(
             gid_t::try_from(*supplementary_gid)
                 .map_err(|_| PrivilegeDropError::InvalidSupplementaryGid)?,
         );
     }
-    if credentials
+    if target
         .supplementary_gids
         .windows(2)
         .any(|window| window[0] >= window[1])
-        || credentials
+        || target
             .supplementary_gids
             .iter()
-            .any(|supplementary_gid| *supplementary_gid == credentials.identity.gid)
+            .any(|supplementary_gid| *supplementary_gid == target.gid)
     {
         return Err(PrivilegeDropError::InvalidSupplementaryGroups);
     }
-    let max_groups = credentials
+    let max_groups = target
         .supplementary_gids
         .len()
         .checked_add(1)

@@ -13,6 +13,7 @@ use crate::identity::{
     NssSupplementaryGroupsResolver, NssUnixIdentityResolver, ResolvedUnixCredentials,
     SupplementaryGroupsResolver, UnixIdentityResolver,
 };
+use crate::privilege_drop::PrivilegeDropTarget;
 use crate::session_child::{
     ProcessSessionChildRunnerFactory, SessionChildExpectation, SessionChildRunnerFactory,
 };
@@ -244,21 +245,33 @@ fn run_pam_session<
                     return Err(SessionError::AuthenticatedSessionFailed);
                 }
             };
-            let child_result = child_runner.run_child(SessionChildExpectation {
+            let child_report = match child_runner.run_child(SessionChildExpectation {
                 canonical_username: canonical_username.clone(),
                 session_id: session.session.id.clone(),
-            });
-            if let Err(error) = child_result {
-                warn!(username = %canonical_username, session = %session.session.id, ?error, "worker session child failed");
-                drop(transaction);
-                write_envelope(
-                    writer,
-                    WorkerResponse::SessionFailed {
-                        code: WorkerSessionFailureCode::SessionChildFailed,
-                    },
-                )?;
-                return Err(SessionError::AuthenticatedSessionFailed);
-            }
+                target_credentials: PrivilegeDropTarget::from(&credentials),
+            }) {
+                Ok(report) => report,
+                Err(error) => {
+                    warn!(username = %canonical_username, session = %session.session.id, ?error, "worker session child failed");
+                    drop(transaction);
+                    write_envelope(
+                        writer,
+                        WorkerResponse::SessionFailed {
+                            code: WorkerSessionFailureCode::SessionChildFailed,
+                        },
+                    )?;
+                    return Err(SessionError::AuthenticatedSessionFailed);
+                }
+            };
+            info!(
+                username = %canonical_username,
+                session = %session.session.id,
+                pid = child_report.child_pid,
+                uid = child_report.applied_credentials.uid,
+                gid = child_report.applied_credentials.gid,
+                supplementary_group_count = child_report.applied_credentials.supplementary_gids.len(),
+                "worker session child verified privilege drop"
+            );
             drop(transaction);
             info!(username = %canonical_username, session = %session.session.id, "worker PAM transaction closed");
             write_envelope(writer, WorkerResponse::Ready { session })

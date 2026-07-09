@@ -2,8 +2,8 @@
 
 Niralis now validates sessions in the daemon, performs PAM only inside the
 dedicated `niralis-session-worker`, and introduces a supervised
-`niralis-session-child` boundary. Privilege application, compositor execution,
-and final graphical session setup remain out of scope.
+`niralis-session-child` boundary. Compositor execution and final graphical
+session setup remain out of scope.
 
 ## Current Guarantees
 
@@ -187,9 +187,10 @@ Workers that hang are killed and reaped. The timeout covers:
 
 After canonical credentials are resolved and `open_session()` succeeds, the
 worker starts `niralis-session-child` as a separate executable process. The
-child receives only a bounded `Probe` handshake containing the canonical
-username and session ID. It never receives the password, PAM handle,
-transaction, or final credentials.
+child receives only a bounded v2 `ApplyCredentials` handshake containing the
+canonical username, session ID, and numeric UID/GID/supplementary groups. It
+never receives home, shell, password, PAM handle, transaction, or final
+environment.
 
 The child response is bound to the expected canonical username, session ID,
 and real spawned PID. The child must exit successfully; invalid responses,
@@ -204,10 +205,21 @@ always joined before normal return, and cleanup kills and reaps a live child
 before returning an error. The daemon's worker timeout remains an external
 defense, not a substitute for this local supervision.
 
+The child rejects UID 0 before any mutation, then applies and verifies
+`setgroups -> setgid -> setuid`. It checks real/effective/saved UID and GID
+values and supplementary groups before writing `Ready`. The worker compares
+the observed applied credentials with its canonical target and logs only the
+canonical username, session, PID, UID, primary GID, and group count.
+
+This proves Unix credential state only. It does not prove that capabilities,
+securebits, ambient capabilities, inherited privileged file descriptors,
+`no_new_privs`, seccomp, namespaces, or LSM state are hardened. No
+user-controlled code or compositor is executed yet, so those remain separate
+requirements.
+
 The child path is absolute and follows the same root-owned, non-writable trust
-policy as the worker. The child is currently only a process-boundary probe: it
-does not perform privilege drop, execute a compositor, or initialize a desktop
-session.
+policy as the worker. The child performs the real numeric privilege drop but
+does not execute a compositor or initialize a desktop session.
 
 ## Worker Trust Policy
 
