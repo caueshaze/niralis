@@ -34,10 +34,11 @@ where
     };
 
     match handler.authenticator.authenticate(&username, &password) {
-        Ok(user) => {
+        Ok(transaction) => {
             reset_rate_limit(handler, &username);
+            let user = transaction.user();
             let request = SessionRequest {
-                username: user.username,
+                username: user.username.clone(),
                 session: session.clone(),
             };
 

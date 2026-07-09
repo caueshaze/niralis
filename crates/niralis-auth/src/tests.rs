@@ -1,0 +1,44 @@
+use crate::conversation::SilentPasswordConversation;
+use crate::{AuthError, Authenticator, MockAuthenticator, PamAuthenticator};
+
+#[test]
+fn accepts_mock_user_transaction() {
+    let auth = MockAuthenticator;
+
+    let transaction = auth
+        .authenticate("test", "test")
+        .expect("mock credentials should authenticate");
+
+    assert_eq!(transaction.user().username, "test");
+    assert_eq!(transaction.user().display_name, "Test User");
+}
+
+#[test]
+fn rejects_invalid_login_with_generic_error() {
+    let auth = MockAuthenticator;
+
+    let error = match auth.authenticate("test", "wrong-password") {
+        Ok(_) => panic!("invalid credentials should fail"),
+        Err(error) => error,
+    };
+
+    assert_eq!(error, AuthError::LoginFailed);
+    assert!(!error.to_string().contains("wrong-password"));
+}
+
+#[test]
+fn conversation_clears_password() {
+    let mut conversation = SilentPasswordConversation::new();
+    conversation.set_credentials("test".to_owned(), "secret".to_owned());
+
+    conversation.clear_password();
+
+    assert!(conversation.password_is_cleared());
+}
+
+#[test]
+fn constructs_pam_authenticator() {
+    let auth = PamAuthenticator::new("niralis");
+
+    assert_eq!(auth.service(), "niralis");
+}

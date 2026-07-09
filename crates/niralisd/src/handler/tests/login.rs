@@ -6,7 +6,8 @@ use niralis_session::MockSessionLauncher;
 
 use super::support::{
     handler, login_request, niri_session, test_config, CountingAuthenticator,
-    CountingSessionLauncher, StubSessionDirectory, StubUserDirectory,
+    CountingSessionLauncher, StubSessionDirectory, StubUserDirectory, TrackingAuthenticator,
+    TrackingSessionLauncher,
 };
 use crate::config::Config;
 use crate::handler::login::{login_failed, session_unavailable};
@@ -152,4 +153,76 @@ fn launcher_receives_validated_session_and_rate_limit_still_behaves() {
         NiralisResponse::LoginOk { .. }
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 3);
+}
+
+#[test]
+fn authenticated_transaction_stays_alive_during_successful_launch() {
+    let auth = TrackingAuthenticator::succeeds();
+    let state = auth.state.clone();
+    let launcher = TrackingSessionLauncher::succeeds(state.clone());
+    let launch_calls = launcher.calls.clone();
+    let alive_during_launch = launcher.active_during_launch.clone();
+    let handler = DaemonHandler::new(
+        Config::default(),
+        auth,
+        launcher,
+        StubUserDirectory::default(),
+        StubSessionDirectory::default(),
+    );
+
+    assert!(matches!(
+        handler.handle(login_request("test", "niri")),
+        NiralisResponse::LoginOk { .. }
+    ));
+    assert_eq!(launch_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(alive_during_launch.load(Ordering::SeqCst), 1);
+    assert_eq!(state.active.load(Ordering::SeqCst), 0);
+    assert_eq!(state.drops.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn authenticated_transaction_is_dropped_after_launcher_error() {
+    let auth = TrackingAuthenticator::succeeds();
+    let state = auth.state.clone();
+    let launcher = TrackingSessionLauncher::fails(state.clone());
+    let launch_calls = launcher.calls.clone();
+    let alive_during_launch = launcher.active_during_launch.clone();
+    let handler = DaemonHandler::new(
+        Config::default(),
+        auth,
+        launcher,
+        StubUserDirectory::default(),
+        StubSessionDirectory::default(),
+    );
+
+    assert_eq!(
+        handler.handle(login_request("test", "niri")),
+        NiralisResponse::Error {
+            message: "failed to start session".to_owned(),
+        }
+    );
+    assert_eq!(launch_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(alive_during_launch.load(Ordering::SeqCst), 1);
+    assert_eq!(state.active.load(Ordering::SeqCst), 0);
+    assert_eq!(state.drops.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn authentication_failure_does_not_create_transaction() {
+    let auth = TrackingAuthenticator::fails();
+    let state = auth.state.clone();
+    let launcher = TrackingSessionLauncher::succeeds(state.clone());
+    let launch_calls = launcher.calls.clone();
+    let handler = DaemonHandler::new(
+        Config::default(),
+        auth,
+        launcher,
+        StubUserDirectory::default(),
+        StubSessionDirectory::default(),
+    );
+
+    assert_eq!(handler.handle(login_request("bad", "niri")), login_failed());
+    assert_eq!(launch_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(state.active.load(Ordering::SeqCst), 0);
+    assert_eq!(state.drops.load(Ordering::SeqCst), 0);
 }

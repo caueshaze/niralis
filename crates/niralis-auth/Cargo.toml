@@ -8,3 +8,4 @@ version.workspace = true
 pam.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+zeroize.workspace = true
