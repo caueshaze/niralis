@@ -89,9 +89,19 @@ post-authentication session failure:
 - the rate limiter is not charged as a bad password;
 - the daemon returns the generic session-start failure response.
 
-This phase still does not change the worker process identity. Real privilege
-drop, supplementary group resolution, and session environment setup remain
-future work.
+## Canonical Supplementary Groups
+
+After PAM authentication and canonical `UnixIdentity` resolution, the worker
+uses `getgrouplist` through NSS with the canonical `pw_name` and primary GID.
+The primary GID remains in `UnixIdentity.gid`; the supplementary vector is
+sorted, deduplicated, bounded by the system limit, and excludes the primary
+GID. A group lookup failure is a post-authentication session failure, so PAM
+`open_session` is not called and authentication rate limiting is not charged
+as a bad password.
+
+The worker constructs `ResolvedUnixCredentials` before opening the PAM session.
+This phase still does not change the worker process identity: no `setgroups`,
+`initgroups`, `setgid`, or `setuid` operation is performed.
 
 ## Secret Transport and Memory Hygiene
 
@@ -197,7 +207,7 @@ Mock credentials remain:
 - real graphical session startup
 - `.desktop` `Exec` execution
 - compositor or `niri-session` launch
-- `setuid`, `setgid`, `initgroups`, or supplementary groups
+- effective credential changes (`setgroups`, `initgroups`, `setuid`, or `setgid`)
 - logind integration
 - seat, VT, DRM, Wayland, or X11 lifecycle
 - PAM environment import back into the daemon

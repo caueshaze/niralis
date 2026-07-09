@@ -8,15 +8,19 @@ use niralis_session::{
 };
 use tracing::{debug, info, warn};
 
-use crate::identity::{NssUnixIdentityResolver, UnixIdentityResolver};
+use crate::identity::{
+    NssSupplementaryGroupsResolver, NssUnixIdentityResolver, ResolvedUnixCredentials,
+    SupplementaryGroupsResolver, UnixIdentityResolver,
+};
 
 pub trait WorkerAuthenticatorFactory: Send + Sync {
     fn build(&self, pam_service: &str) -> Box<dyn Authenticator>;
 }
 
-pub struct WorkerDependencies<'a, F, I> {
+pub struct WorkerDependencies<'a, F, I, G> {
     pub authenticator_factory: &'a F,
     pub identity_resolver: &'a I,
+    pub supplementary_groups_resolver: &'a G,
 }
 
 #[derive(Debug, Default)]
@@ -38,6 +42,7 @@ pub fn run_worker_process<R: Read, W: Write>(
         WorkerDependencies {
             authenticator_factory: &PamAuthenticatorFactory,
             identity_resolver: &NssUnixIdentityResolver,
+            supplementary_groups_resolver: &NssSupplementaryGroupsResolver,
         },
     )
 }
@@ -47,10 +52,11 @@ pub fn run_worker_process_with_dependencies<
     W: Write,
     F: WorkerAuthenticatorFactory,
     I: UnixIdentityResolver,
+    G: SupplementaryGroupsResolver,
 >(
     reader: &mut R,
     writer: &mut W,
-    dependencies: WorkerDependencies<'_, F, I>,
+    dependencies: WorkerDependencies<'_, F, I, G>,
 ) -> Result<(), SessionError> {
     let envelope = match read_envelope::<WorkerRequest, _>(reader) {
         Ok(envelope) => envelope,
@@ -92,6 +98,7 @@ pub fn run_worker_process_with_dependencies<
             writer,
             dependencies.authenticator_factory,
             dependencies.identity_resolver,
+            dependencies.supplementary_groups_resolver,
             request,
             pam_service,
             password,
@@ -99,10 +106,16 @@ pub fn run_worker_process_with_dependencies<
     }
 }
 
-fn run_pam_session<W: Write, F: WorkerAuthenticatorFactory, I: UnixIdentityResolver>(
+fn run_pam_session<
+    W: Write,
+    F: WorkerAuthenticatorFactory,
+    I: UnixIdentityResolver,
+    G: SupplementaryGroupsResolver,
+>(
     writer: &mut W,
     factory: &F,
     identity_resolver: &I,
+    supplementary_groups_resolver: &G,
     request: niralis_session::SessionRequest,
     pam_service: String,
     password: niralis_session::WorkerSecret,
@@ -161,13 +174,37 @@ fn run_pam_session<W: Write, F: WorkerAuthenticatorFactory, I: UnixIdentityResol
             return Err(SessionError::AuthenticatedSessionFailed);
         }
     };
+    let supplementary_gids = match supplementary_groups_resolver.resolve(&identity) {
+        Ok(groups) => groups,
+        Err(error) => {
+            warn!(
+                username = %identity.username,
+                session = %request.session.id,
+                ?error,
+                "worker failed to resolve supplementary Unix groups"
+            );
+            drop(transaction);
+            write_envelope(
+                writer,
+                WorkerResponse::SessionFailed {
+                    code: WorkerSessionFailureCode::SupplementaryGroupsResolutionFailed,
+                },
+            )?;
+            return Err(SessionError::AuthenticatedSessionFailed);
+        }
+    };
+    let credentials = ResolvedUnixCredentials {
+        identity,
+        supplementary_gids,
+    };
     debug!(
-        username = %identity.username,
-        uid = identity.uid,
-        gid = identity.gid,
-        "resolved canonical Unix identity"
+        username = %credentials.identity.username,
+        uid = credentials.identity.uid,
+        gid = credentials.identity.gid,
+        supplementary_group_count = credentials.supplementary_gids.len(),
+        "resolved canonical Unix credentials"
     );
-    let canonical_username = identity.username.clone();
+    let canonical_username = credentials.identity.username.clone();
 
     let open_result = catch_unwind(AssertUnwindSafe(|| transaction.open_session()));
     let session = StartedSession {

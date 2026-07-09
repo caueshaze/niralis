@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{SessionRequest, StartedSession, WorkerSecret};
 
-pub const WORKER_PROTOCOL_VERSION: u32 = 2;
+pub const WORKER_PROTOCOL_VERSION: u32 = 3;
 pub const MAX_WORKER_MESSAGE_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -44,6 +44,7 @@ pub enum WorkerErrorCode {
 pub enum WorkerSessionFailureCode {
     PamIdentityUnavailable,
     IdentityResolutionFailed,
+    SupplementaryGroupsResolutionFailed,
     OpenFailed,
     InternalPanic,
 }

@@ -3,5 +3,8 @@ mod runtime;
 #[cfg(test)]
 mod runtime_tests;
 
-pub use identity::{IdentityError, NssUnixIdentityResolver, UnixIdentity, UnixIdentityResolver};
+pub use identity::{
+    GroupResolutionError, IdentityError, NssSupplementaryGroupsResolver, NssUnixIdentityResolver,
+    ResolvedUnixCredentials, SupplementaryGroupsResolver, UnixIdentity, UnixIdentityResolver,
+};
 pub use runtime::{run_worker_process, WorkerAuthenticatorFactory};

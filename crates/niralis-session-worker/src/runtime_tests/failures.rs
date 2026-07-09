@@ -8,7 +8,9 @@ use niralis_session::{WorkerEnvelope, WorkerResponse, WorkerSessionFailureCode};
 use crate::identity::IdentityError;
 use crate::runtime::{run_worker_process_with_dependencies, WorkerDependencies};
 
-use super::support::{identity, request, StubFactory, StubIdentityResolver, TrackingState};
+use super::support::{
+    identity, request, StubFactory, StubGroupsResolver, StubIdentityResolver, TrackingState,
+};
 
 #[test]
 fn pam_worker_distinguishes_auth_identity_and_session_failures() {
@@ -21,6 +23,8 @@ fn pam_worker_distinguishes_auth_identity_and_session_failures() {
         resolve_calls,
         open_calls,
         drops,
+        groups_result,
+        groups_calls,
     ) in [
         (
             Err(AuthError::LoginFailed),
@@ -30,6 +34,8 @@ fn pam_worker_distinguishes_auth_identity_and_session_failures() {
             WorkerResponse::AuthenticationFailed,
             0,
             0,
+            0,
+            Ok(vec![]),
             0,
         ),
         (
@@ -43,6 +49,8 @@ fn pam_worker_distinguishes_auth_identity_and_session_failures() {
             0,
             0,
             0,
+            Ok(vec![]),
+            0,
         ),
         (
             Err(AuthError::AuthenticatedIdentityUnavailable),
@@ -54,6 +62,8 @@ fn pam_worker_distinguishes_auth_identity_and_session_failures() {
             },
             0,
             0,
+            0,
+            Ok(vec![]),
             0,
         ),
         (
@@ -67,6 +77,22 @@ fn pam_worker_distinguishes_auth_identity_and_session_failures() {
             1,
             0,
             1,
+            Ok(vec![]),
+            0,
+        ),
+        (
+            Ok(()),
+            Ok(identity()),
+            false,
+            false,
+            WorkerResponse::SessionFailed {
+                code: WorkerSessionFailureCode::SupplementaryGroupsResolutionFailed,
+            },
+            1,
+            0,
+            1,
+            Err(crate::identity::GroupResolutionError::LookupFailed),
+            1,
         ),
         (
             Ok(()),
@@ -79,6 +105,8 @@ fn pam_worker_distinguishes_auth_identity_and_session_failures() {
             1,
             1,
             1,
+            Ok(vec![]),
+            1,
         ),
         (
             Ok(()),
@@ -90,6 +118,8 @@ fn pam_worker_distinguishes_auth_identity_and_session_failures() {
             },
             1,
             1,
+            1,
+            Ok(vec![]),
             1,
         ),
     ] {
@@ -116,6 +146,11 @@ fn pam_worker_distinguishes_auth_identity_and_session_failures() {
                     result: identity_result.clone(),
                     last_username: Arc::new(Mutex::new(None)),
                 },
+                supplementary_groups_resolver: &StubGroupsResolver {
+                    state: state.clone(),
+                    result: groups_result.clone(),
+                    last_username: Arc::new(Mutex::new(None)),
+                },
             },
         );
 
@@ -125,6 +160,7 @@ fn pam_worker_distinguishes_auth_identity_and_session_failures() {
         assert_eq!(response.message, expected);
         assert_eq!(state.authenticate_calls.load(Ordering::SeqCst), 1);
         assert_eq!(state.resolve_calls.load(Ordering::SeqCst), resolve_calls);
+        assert_eq!(state.groups_calls.load(Ordering::SeqCst), groups_calls);
         assert_eq!(state.open_calls.load(Ordering::SeqCst), open_calls);
         assert_eq!(state.drops.load(Ordering::SeqCst), drops);
     }

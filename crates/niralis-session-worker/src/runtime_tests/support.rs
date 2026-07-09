@@ -8,13 +8,17 @@ use niralis_auth::{
 use niralis_protocol::{SessionInfo, SessionKind};
 use niralis_session::{SessionRequest, WorkerEnvelope, WorkerRequest, WorkerSecret};
 
-use crate::identity::{IdentityError, UnixIdentity, UnixIdentityResolver};
+use crate::identity::{
+    GroupResolutionError, IdentityError, SupplementaryGroupsResolver, UnixIdentity,
+    UnixIdentityResolver,
+};
 use crate::runtime::WorkerAuthenticatorFactory;
 
 #[derive(Clone, Default)]
 pub(super) struct TrackingState {
     pub(super) authenticate_calls: Arc<AtomicUsize>,
     pub(super) resolve_calls: Arc<AtomicUsize>,
+    pub(super) groups_calls: Arc<AtomicUsize>,
     pub(super) open_calls: Arc<AtomicUsize>,
     pub(super) drops: Arc<AtomicUsize>,
 }
@@ -104,6 +108,23 @@ pub(super) struct StubIdentityResolver {
     pub(super) state: TrackingState,
     pub(super) result: Result<UnixIdentity, IdentityError>,
     pub(super) last_username: Arc<Mutex<Option<String>>>,
+}
+
+pub(super) struct StubGroupsResolver {
+    pub(super) state: TrackingState,
+    pub(super) result: Result<Vec<u32>, GroupResolutionError>,
+    pub(super) last_username: Arc<Mutex<Option<String>>>,
+}
+
+impl SupplementaryGroupsResolver for StubGroupsResolver {
+    fn resolve(&self, identity: &UnixIdentity) -> Result<Vec<u32>, GroupResolutionError> {
+        self.state.groups_calls.fetch_add(1, Ordering::SeqCst);
+        *self
+            .last_username
+            .lock()
+            .expect("last_username mutex should lock") = Some(identity.username.clone());
+        self.result.clone()
+    }
 }
 
 impl UnixIdentityResolver for StubIdentityResolver {
