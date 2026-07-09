@@ -133,32 +133,40 @@ impl SessionChildRunner for ProcessSessionChildRunner {
         if response.version != SESSION_CHILD_PROTOCOL_VERSION {
             return Err(SessionChildError::ProtocolFailed);
         }
-        match response.message {
-            SessionChildResponse::Ready {
+        validate_ready_response(response.message, &expectation, pid)
+    }
+}
+
+fn validate_ready_response(
+    response: SessionChildResponse,
+    expectation: &SessionChildExpectation,
+    pid: u32,
+) -> Result<SessionChildReport, SessionChildError> {
+    match response {
+        SessionChildResponse::Ready {
+            canonical_username,
+            session_id,
+            child_pid,
+            applied_credentials,
+        } if canonical_username == expectation.canonical_username
+            && session_id == expectation.session_id
+            && child_pid == pid
+            && applied_credentials
+                == SessionChildUnixCredentials::from(&expectation.target_credentials) =>
+        {
+            Ok(SessionChildReport {
                 canonical_username,
                 session_id,
                 child_pid,
-                applied_credentials,
-            } if canonical_username == expectation.canonical_username
-                && session_id == expectation.session_id
-                && child_pid == pid
-                && applied_credentials
-                    == SessionChildUnixCredentials::from(&expectation.target_credentials) =>
-            {
-                Ok(SessionChildReport {
-                    canonical_username,
-                    session_id,
-                    child_pid,
-                    applied_credentials: AppliedCredentials {
-                        uid: applied_credentials.uid,
-                        gid: applied_credentials.gid,
-                        supplementary_gids: applied_credentials.supplementary_gids,
-                    },
-                })
-            }
-            SessionChildResponse::Rejected { .. } => Err(SessionChildError::ProtocolFailed),
-            SessionChildResponse::Ready { .. } => Err(SessionChildError::ProtocolFailed),
+                applied_credentials: AppliedCredentials {
+                    uid: applied_credentials.uid,
+                    gid: applied_credentials.gid,
+                    supplementary_gids: applied_credentials.supplementary_gids,
+                },
+            })
         }
+        SessionChildResponse::Rejected { .. } => Err(SessionChildError::ProtocolFailed),
+        SessionChildResponse::Ready { .. } => Err(SessionChildError::ProtocolFailed),
     }
 }
 

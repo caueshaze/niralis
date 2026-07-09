@@ -1,6 +1,6 @@
 use super::protocol::{
     SessionChildEnvelope, SessionChildErrorCode, SessionChildRequest, SessionChildResponse,
-    SESSION_CHILD_PROTOCOL_VERSION,
+    SessionChildUnixCredentials, SESSION_CHILD_PROTOCOL_VERSION,
 };
 use crate::privilege_drop::{
     AppliedCredentials, PrivilegeDropError, PrivilegeDropTarget, PrivilegeDropper,
@@ -173,4 +173,81 @@ fn maximum_supported_credentials_fit_the_child_protocol() {
     };
     let payload = serde_json::to_vec(&envelope).expect("maximum request should serialize");
     assert!(payload.len() + 1 <= super::protocol::MAX_SESSION_CHILD_MESSAGE_BYTES);
+}
+
+#[test]
+fn ready_binding_rejects_each_identity_or_credential_mismatch() {
+    let expectation = super::SessionChildExpectation {
+        canonical_username: "canonical-user".to_owned(),
+        session_id: "niri".to_owned(),
+        target_credentials: PrivilegeDropTarget {
+            uid: 1000,
+            gid: 1000,
+            supplementary_gids: vec![10, 20],
+        },
+    };
+    let expected = SessionChildUnixCredentials {
+        uid: 1000,
+        gid: 1000,
+        supplementary_gids: vec![10, 20],
+    };
+
+    let cases = [
+        ("username", "wrong-user".to_owned(), expected.clone()),
+        ("session", "wrong-session".to_owned(), expected.clone()),
+        (
+            "pid",
+            "canonical-user".to_owned(),
+            SessionChildUnixCredentials {
+                uid: expected.uid,
+                gid: expected.gid,
+                supplementary_gids: expected.supplementary_gids.clone(),
+            },
+        ),
+        (
+            "uid",
+            "canonical-user".to_owned(),
+            SessionChildUnixCredentials {
+                uid: 999,
+                ..expected.clone()
+            },
+        ),
+        (
+            "gid",
+            "canonical-user".to_owned(),
+            SessionChildUnixCredentials {
+                gid: 999,
+                ..expected.clone()
+            },
+        ),
+        (
+            "supplementary-gids",
+            "canonical-user".to_owned(),
+            SessionChildUnixCredentials {
+                supplementary_gids: vec![10, 30],
+                ..expected.clone()
+            },
+        ),
+    ];
+
+    for (field, username, applied_credentials) in cases {
+        let session_id = if field == "session" {
+            "wrong-session".to_owned()
+        } else {
+            "niri".to_owned()
+        };
+        let child_pid = if field == "pid" { 43 } else { 42 };
+        let response = SessionChildResponse::Ready {
+            canonical_username: username,
+            session_id,
+            child_pid,
+            applied_credentials,
+        };
+
+        assert_eq!(
+            super::validate_ready_response(response, &expectation, 42),
+            Err(super::SessionChildError::ProtocolFailed),
+            "mismatch in {field} must be rejected"
+        );
+    }
 }
