@@ -85,8 +85,17 @@ internal request, return at most one internal response, and then terminate.
 The internal worker protocol is versioned, size-limited, and does not contain
 passwords, PAM handles, or other secret material.
 
-Workers that hang are killed and reaped after a timeout; no worker can block
-the login flow indefinitely.
+Workers that hang are killed and reaped after a timeout; the timeout covers both
+waiting for a response and waiting for the worker process to exit after
+responding, so no worker can block the login flow indefinitely.
+
+The worker must answer with the same canonical username and `SessionInfo` that
+the daemon sent. A worker that returns different session data is treated as a
+protocol violation.
+
+When the PAM authenticator is selected, the configured worker binary must come
+from a trusted path: no symlink at the worker node, root ownership, and no
+group/other write bits on the worker file or its parent directories.
 
 ## Mock Session Startup
 

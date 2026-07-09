@@ -22,8 +22,12 @@ pub enum NiralisdError {
     InvalidSocketPath(PathBuf),
     #[error("invalid worker path: {0}")]
     InvalidWorkerPath(PathBuf),
+    #[error("invalid worker timeout: {0}")]
+    InvalidWorkerTimeout(u64),
     #[error("worker binary is unavailable: {0}")]
     WorkerUnavailable(PathBuf),
+    #[error("worker binary is untrusted: {0}")]
+    WorkerUntrusted(PathBuf),
 }
 
 pub type Result<T> = std::result::Result<T, NiralisdError>;

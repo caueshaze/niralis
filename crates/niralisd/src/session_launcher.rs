@@ -4,14 +4,15 @@ use std::time::Duration;
 
 use niralis_session::{MockSessionLauncher, SessionLauncher, WorkerSessionLauncher};
 
-use crate::config::{Config, SessionLauncherBackend};
+use crate::config::{AuthBackend, Config, SessionLauncherBackend};
 use crate::error::{NiralisdError, Result};
 
 pub fn build_session_launcher(config: &Config) -> Result<Box<dyn SessionLauncher>> {
     match config.session.launcher {
         SessionLauncherBackend::Mock => Ok(Box::new(MockSessionLauncher)),
         SessionLauncherBackend::Worker => {
-            validate_worker_binary(&config.session.worker_path)?;
+            validate_worker_timeout(config.session.worker_timeout_seconds)?;
+            validate_worker_binary(config)?;
             WorkerSessionLauncher::new(
                 config.session.worker_path.clone(),
                 Duration::from_secs(config.session.worker_timeout_seconds),
@@ -22,17 +23,64 @@ pub fn build_session_launcher(config: &Config) -> Result<Box<dyn SessionLauncher
     }
 }
 
-fn validate_worker_binary(path: &Path) -> Result<()> {
+fn validate_worker_timeout(timeout_seconds: u64) -> Result<()> {
+    if (1..=60).contains(&timeout_seconds) {
+        Ok(())
+    } else {
+        Err(NiralisdError::InvalidWorkerTimeout(timeout_seconds))
+    }
+}
+
+fn validate_worker_binary(config: &Config) -> Result<()> {
+    let path = &config.session.worker_path;
     if !path.is_absolute() {
         return Err(NiralisdError::InvalidWorkerPath(path.to_path_buf()));
     }
 
-    let metadata = std::fs::metadata(path)
+    let metadata = std::fs::symlink_metadata(path)
         .map_err(|_| NiralisdError::WorkerUnavailable(path.to_path_buf()))?;
+    if metadata.file_type().is_symlink() {
+        return Err(NiralisdError::WorkerUntrusted(path.to_path_buf()));
+    }
     if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
         return Err(NiralisdError::WorkerUnavailable(path.to_path_buf()));
     }
+    if matches!(config.auth.backend, AuthBackend::Pam) {
+        validate_trusted_path(path)?;
+    }
 
+    Ok(())
+}
+
+fn validate_trusted_path(path: &Path) -> Result<()> {
+    validate_trusted_node(path, true)?;
+
+    let mut current = path.parent();
+    while let Some(parent) = current {
+        validate_trusted_node(parent, false)?;
+        current = parent.parent();
+    }
+
+    Ok(())
+}
+
+fn validate_trusted_node(path: &Path, expect_file: bool) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|_| NiralisdError::WorkerUnavailable(path.to_path_buf()))?;
+    if metadata.file_type().is_symlink() {
+        return Err(NiralisdError::WorkerUntrusted(path.to_path_buf()));
+    }
+    if expect_file && !metadata.is_file() {
+        return Err(NiralisdError::WorkerUnavailable(path.to_path_buf()));
+    }
+    if !expect_file && !metadata.is_dir() {
+        return Err(NiralisdError::WorkerUnavailable(path.to_path_buf()));
+    }
+    if metadata.uid() != 0 || metadata.permissions().mode() & 0o022 != 0 {
+        return Err(NiralisdError::WorkerUntrusted(path.to_path_buf()));
+    }
     Ok(())
 }
 
@@ -84,7 +132,63 @@ mod tests {
         let mut config = Config::default();
         config.session.launcher = SessionLauncherBackend::Worker;
         config.session.worker_path = path;
+        config.auth.backend = AuthBackend::Mock;
 
         build_session_launcher(&config).expect("executable worker should pass validation");
+    }
+
+    #[test]
+    fn rejects_zero_worker_timeout() {
+        let mut config = Config::default();
+        config.session.launcher = SessionLauncherBackend::Worker;
+        config.session.worker_timeout_seconds = 0;
+
+        let error = match build_session_launcher(&config) {
+            Ok(_) => panic!("zero timeout should fail"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, NiralisdError::InvalidWorkerTimeout(0)));
+    }
+
+    #[test]
+    fn rejects_symlink_worker_in_pam_mode() {
+        let dir = tempdir().expect("tempdir should exist");
+        let worker = dir.path().join("worker");
+        let link = dir.path().join("worker-link");
+        std::fs::write(&worker, b"binary").expect("worker should be written");
+        std::fs::set_permissions(&worker, std::fs::Permissions::from_mode(0o755))
+            .expect("permissions should apply");
+        std::os::unix::fs::symlink(&worker, &link).expect("symlink should be created");
+
+        let mut config = Config::default();
+        config.session.launcher = SessionLauncherBackend::Worker;
+        config.session.worker_path = link;
+        config.auth.backend = AuthBackend::Pam;
+
+        let error = match build_session_launcher(&config) {
+            Ok(_) => panic!("symlink should fail in pam mode"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, NiralisdError::WorkerUntrusted(_)));
+    }
+
+    #[test]
+    fn rejects_untrusted_permissions_in_pam_mode() {
+        let dir = tempdir().expect("tempdir should exist");
+        let worker = dir.path().join("worker");
+        std::fs::write(&worker, b"binary").expect("worker should be written");
+        std::fs::set_permissions(&worker, std::fs::Permissions::from_mode(0o777))
+            .expect("permissions should apply");
+
+        let mut config = Config::default();
+        config.session.launcher = SessionLauncherBackend::Worker;
+        config.session.worker_path = worker;
+        config.auth.backend = AuthBackend::Pam;
+
+        let error = match build_session_launcher(&config) {
+            Ok(_) => panic!("world-writable worker should fail in pam mode"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, NiralisdError::WorkerUntrusted(_)));
     }
 }

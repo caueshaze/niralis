@@ -80,11 +80,29 @@ fn invalid_response_version_is_rejected() {
 }
 
 #[test]
+fn mismatched_ready_response_is_rejected() {
+    let launcher = launcher_for(env!("CARGO_BIN_EXE_fixture-mismatched-ready"));
+    let error = launcher
+        .start_session(request())
+        .expect_err("mismatched ready should fail");
+    assert_eq!(error, SessionError::WorkerProtocolFailed);
+}
+
+#[test]
 fn timeout_worker_is_killed() {
     let launcher = launcher_for(env!("CARGO_BIN_EXE_fixture-timeout"));
     let error = launcher
         .start_session(request())
         .expect_err("timeout worker should fail");
+    assert_eq!(error, SessionError::WorkerTimedOut);
+}
+
+#[test]
+fn ready_then_hang_times_out() {
+    let launcher = launcher_for(env!("CARGO_BIN_EXE_fixture-ready-then-hang"));
+    let error = launcher
+        .start_session(request())
+        .expect_err("ready then hang should time out");
     assert_eq!(error, SessionError::WorkerTimedOut);
 }
 
