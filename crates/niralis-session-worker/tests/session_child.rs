@@ -37,7 +37,7 @@ fn child_without_response_times_out_and_is_reaped() {
 }
 
 #[test]
-fn child_that_never_reads_is_supervised_by_the_deadline() {
+fn child_that_never_reads_still_times_out() {
     let error = runner(env!("CARGO_BIN_EXE_fixture-child-no-read"))
         .run_child(expectation())
         .expect_err("non-reading child should time out");

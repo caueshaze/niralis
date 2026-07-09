@@ -197,6 +197,13 @@ timeouts, and non-zero exits are post-authentication session failures. The
 runner kills and reaps the child on failure, and the PAM transaction is dropped
 only after the child has terminated.
 
+The entire handshake uses one absolute two-second deadline covering request
+write, response read, and child exit. A child that sends a valid `Ready` and
+then remains alive is still a timeout. Writer and reader helper threads are
+always joined before normal return, and cleanup kills and reaps a live child
+before returning an error. The daemon's worker timeout remains an external
+defense, not a substitute for this local supervision.
+
 The child path is absolute and follows the same root-owned, non-writable trust
 policy as the worker. The child is currently only a process-boundary probe: it
 does not perform privilege drop, execute a compositor, or initialize a desktop

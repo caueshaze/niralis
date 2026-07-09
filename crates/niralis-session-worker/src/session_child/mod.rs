@@ -220,11 +220,13 @@ impl SessionChildAttempt {
         deadline: Instant,
     ) -> Result<Option<std::process::ExitStatus>, SessionChildError> {
         loop {
+            remaining(deadline)?;
             if let Some(status) = self
                 .child
                 .try_wait()
                 .map_err(|_| SessionChildError::IoFailed)?
             {
+                remaining(deadline)?;
                 return Ok(Some(status));
             }
             let remaining = remaining(deadline)?;
