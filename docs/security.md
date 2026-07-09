@@ -103,6 +103,32 @@ The worker constructs `ResolvedUnixCredentials` before opening the PAM session.
 This phase still does not change the worker process identity: no `setgroups`,
 `initgroups`, `setgid`, or `setuid` operation is performed.
 
+## Privilege Drop Primitive
+
+The privilege-drop primitive is implemented separately for a future dedicated
+session child. It pre-validates every UID and GID, explicitly replaces the
+inherited supplementary groups, and applies credentials in this irreversible
+order:
+
+`setgroups -> setgid -> setuid`
+
+It then verifies real, effective, and saved UIDs and GIDs, plus the observed
+supplementary groups. The primary GID is removed from the observed group list
+before comparison because Linux does not guarantee whether `getgroups` includes
+the effective GID. Verification also bounds the `getgroups` allocation before
+using the returned count.
+
+The primitive has a strict architectural precondition: it may run only in a
+dedicated, single-threaded session child before user-controlled code. It must
+not run in `niralisd` or in the privileged PAM worker that owns the PAM
+transaction. A successful mutation followed by a later failure is fatal for
+that process; no rollback is attempted.
+
+`AppliedCredentials` confirms the requested Unix UID, GID, and supplementary
+group state. It does not prove that Linux capabilities or unusual `securebits`
+state are absent. Capability hardening remains a separate requirement before
+executing the final graphical session.
+
 ## Secret Transport and Memory Hygiene
 
 The password currently travels only through:
