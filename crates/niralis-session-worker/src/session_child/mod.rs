@@ -3,9 +3,9 @@ mod protocol;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::mpsc;
-use std::thread;
-use std::time::Duration;
+use std::sync::mpsc::{self, Receiver};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 use protocol::{
     SessionChildEnvelope, SessionChildErrorCode, SessionChildRequest, SessionChildResponse,
@@ -84,26 +84,7 @@ impl SessionChildRunner for ProcessSessionChildRunner {
         &self,
         expectation: SessionChildExpectation,
     ) -> Result<SessionChildReport, SessionChildError> {
-        let child = Command::new(&self.path)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .env_clear()
-            .current_dir("/")
-            .spawn()
-            .map_err(|_| SessionChildError::SpawnFailed)?;
-        let mut attempt = ChildAttempt { child };
-        let pid = attempt.child.id();
-        let stdin = attempt
-            .child
-            .stdin
-            .take()
-            .ok_or(SessionChildError::IoFailed)?;
-        let mut stdout = attempt
-            .child
-            .stdout
-            .take()
-            .ok_or(SessionChildError::IoFailed)?;
+        let deadline = Instant::now() + SESSION_CHILD_HANDSHAKE_TIMEOUT;
         let request = SessionChildEnvelope {
             version: SESSION_CHILD_PROTOCOL_VERSION,
             message: SessionChildRequest::Probe {
@@ -115,31 +96,29 @@ impl SessionChildRunner for ProcessSessionChildRunner {
         if payload.len() + 1 > protocol::MAX_SESSION_CHILD_MESSAGE_BYTES {
             return Err(SessionChildError::ProtocolFailed);
         }
-        let (sender, receiver) = mpsc::channel();
-        thread::spawn(move || {
-            let result = read_child_response(&mut stdout);
-            let _ = sender.send(result);
-        });
-        let mut stdin = stdin;
-        stdin
-            .write_all(&payload)
-            .and_then(|_| stdin.write_all(b"\n"))
-            .and_then(|_| stdin.flush())
-            .map_err(|_| SessionChildError::IoFailed)?;
-        drop(stdin);
-        let bytes = match receiver.recv_timeout(SESSION_CHILD_HANDSHAKE_TIMEOUT) {
-            Ok(result) => result?,
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                return Err(SessionChildError::TimedOut);
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                return Err(SessionChildError::IoFailed);
-            }
+        let mut attempt = SessionChildAttempt::spawn(&self.path, payload)?;
+        let pid = attempt.child.id();
+        let writer_result = attempt.wait_writer(deadline);
+        let reader_result = match &writer_result {
+            Ok(()) => attempt.wait_reader(deadline),
+            Err(error) => Err(error.clone()),
         };
-        let status = attempt
-            .child
-            .wait()
-            .map_err(|_| SessionChildError::IoFailed)?;
+        let status_result = if writer_result.is_ok() && reader_result.is_ok() {
+            attempt.wait_child(deadline)
+        } else {
+            Ok(None)
+        };
+        let needs_cleanup = writer_result.is_err()
+            || reader_result.is_err()
+            || status_result.is_err()
+            || matches!(status_result, Ok(None));
+        if needs_cleanup {
+            attempt.kill_and_reap();
+        }
+        attempt.finish();
+        writer_result?;
+        let bytes = reader_result?;
+        let status = status_result?.ok_or(SessionChildError::TimedOut)?;
         if !status.success() {
             return Err(SessionChildError::ExitFailed);
         }
@@ -165,6 +144,130 @@ impl SessionChildRunner for ProcessSessionChildRunner {
             SessionChildResponse::Rejected { .. } => Err(SessionChildError::ProtocolFailed),
             SessionChildResponse::Ready { .. } => Err(SessionChildError::ProtocolFailed),
         }
+    }
+}
+
+const CHILD_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+struct SessionChildAttempt {
+    child: Child,
+    writer: Option<JoinHandle<Result<(), SessionChildError>>>,
+    writer_rx: Receiver<Result<(), SessionChildError>>,
+    reader: Option<JoinHandle<()>>,
+    response_rx: Receiver<Result<Vec<u8>, SessionChildError>>,
+}
+
+impl SessionChildAttempt {
+    fn spawn(path: &Path, payload: Vec<u8>) -> Result<Self, SessionChildError> {
+        let child = Command::new(path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .env_clear()
+            .current_dir("/")
+            .spawn()
+            .map_err(|_| SessionChildError::SpawnFailed)?;
+        let mut child = child;
+        let stdin = match child.stdin.take() {
+            Some(stdin) => stdin,
+            None => {
+                kill_and_reap(&mut child);
+                return Err(SessionChildError::IoFailed);
+            }
+        };
+        let mut stdout = match child.stdout.take() {
+            Some(stdout) => stdout,
+            None => {
+                kill_and_reap(&mut child);
+                return Err(SessionChildError::IoFailed);
+            }
+        };
+        let (writer_tx, writer_rx) = mpsc::channel();
+        let writer = thread::spawn(move || {
+            let mut stdin = stdin;
+            let result = stdin
+                .write_all(&payload)
+                .and_then(|_| stdin.write_all(b"\n"))
+                .and_then(|_| stdin.flush())
+                .map_err(|_| SessionChildError::IoFailed);
+            drop(stdin);
+            let _ = writer_tx.send(result.clone());
+            result
+        });
+        let (response_tx, response_rx) = mpsc::channel();
+        let reader = thread::spawn(move || {
+            let _ = response_tx.send(read_child_response(&mut stdout));
+        });
+        Ok(Self {
+            child,
+            writer: Some(writer),
+            writer_rx,
+            reader: Some(reader),
+            response_rx,
+        })
+    }
+
+    fn wait_writer(&self, deadline: Instant) -> Result<(), SessionChildError> {
+        wait_result(&self.writer_rx, deadline)
+    }
+
+    fn wait_reader(&self, deadline: Instant) -> Result<Vec<u8>, SessionChildError> {
+        wait_result(&self.response_rx, deadline)
+    }
+
+    fn wait_child(
+        &mut self,
+        deadline: Instant,
+    ) -> Result<Option<std::process::ExitStatus>, SessionChildError> {
+        loop {
+            if let Some(status) = self
+                .child
+                .try_wait()
+                .map_err(|_| SessionChildError::IoFailed)?
+            {
+                return Ok(Some(status));
+            }
+            let remaining = remaining(deadline)?;
+            thread::sleep(CHILD_WAIT_POLL_INTERVAL.min(remaining));
+        }
+    }
+
+    fn kill_and_reap(&mut self) {
+        kill_and_reap(&mut self.child);
+    }
+
+    fn finish(&mut self) {
+        if let Some(writer) = self.writer.take() {
+            let _ = writer.join();
+        }
+        if let Some(reader) = self.reader.take() {
+            let _ = reader.join();
+        }
+    }
+}
+
+impl Drop for SessionChildAttempt {
+    fn drop(&mut self) {
+        self.kill_and_reap();
+        self.finish();
+    }
+}
+
+fn remaining(deadline: Instant) -> Result<Duration, SessionChildError> {
+    deadline
+        .checked_duration_since(Instant::now())
+        .ok_or(SessionChildError::TimedOut)
+}
+
+fn wait_result<T: Send + 'static>(
+    receiver: &Receiver<Result<T, SessionChildError>>,
+    deadline: Instant,
+) -> Result<T, SessionChildError> {
+    let timeout = remaining(deadline)?;
+    match receiver.recv_timeout(timeout) {
+        Ok(result) => result,
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(SessionChildError::TimedOut),
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err(SessionChildError::IoFailed),
     }
 }
 
@@ -200,16 +303,6 @@ fn kill_and_reap(child: &mut Child) {
     }
     let _ = child.kill();
     let _ = child.wait();
-}
-
-struct ChildAttempt {
-    child: Child,
-}
-
-impl Drop for ChildAttempt {
-    fn drop(&mut self) {
-        kill_and_reap(&mut self.child);
-    }
 }
 
 pub(crate) fn run_child_process() -> i32 {
