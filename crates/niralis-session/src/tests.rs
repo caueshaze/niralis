@@ -1,4 +1,5 @@
 use niralis_protocol::{SessionInfo, SessionKind};
+use std::path::PathBuf;
 
 use crate::{
     SessionRequest, StartedSession, WorkerEnvelope, WorkerRequest, WorkerResponse, WorkerSecret,
@@ -35,6 +36,7 @@ fn worker_request_round_trip_preserves_wayland_x11_and_secret() {
                 },
                 pam_service: "niralis".to_owned(),
                 password: WorkerSecret::new("secret".to_owned()),
+                session_child_path: PathBuf::from("/usr/libexec/niralis-session-child"),
             },
         })
         .expect("request should serialize");
@@ -47,11 +49,16 @@ fn worker_request_round_trip_preserves_wayland_x11_and_secret() {
                 request,
                 pam_service,
                 password,
+                session_child_path,
             } => {
                 assert_eq!(request.username, "test");
                 assert_eq!(request.session, session(kind));
                 assert_eq!(pam_service, "niralis");
                 assert_eq!(password.expose(), "secret");
+                assert_eq!(
+                    session_child_path,
+                    PathBuf::from("/usr/libexec/niralis-session-child")
+                );
             }
             other => panic!("unexpected request: {other:?}"),
         }

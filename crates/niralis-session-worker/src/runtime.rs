@@ -1,5 +1,6 @@
 use std::io::{Read, Write};
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::path::Path;
 
 use niralis_auth::{AuthError, Authenticator, PamAuthenticator};
 use niralis_session::{
@@ -12,15 +13,19 @@ use crate::identity::{
     NssSupplementaryGroupsResolver, NssUnixIdentityResolver, ResolvedUnixCredentials,
     SupplementaryGroupsResolver, UnixIdentityResolver,
 };
+use crate::session_child::{
+    ProcessSessionChildRunnerFactory, SessionChildExpectation, SessionChildRunnerFactory,
+};
 
 pub trait WorkerAuthenticatorFactory: Send + Sync {
     fn build(&self, pam_service: &str) -> Box<dyn Authenticator>;
 }
 
-pub struct WorkerDependencies<'a, F, I, G> {
+pub struct WorkerDependencies<'a, F, I, G, C> {
     pub authenticator_factory: &'a F,
     pub identity_resolver: &'a I,
     pub supplementary_groups_resolver: &'a G,
+    pub session_child_runner_factory: &'a C,
 }
 
 #[derive(Debug, Default)]
@@ -43,6 +48,7 @@ pub fn run_worker_process<R: Read, W: Write>(
             authenticator_factory: &PamAuthenticatorFactory,
             identity_resolver: &NssUnixIdentityResolver,
             supplementary_groups_resolver: &NssSupplementaryGroupsResolver,
+            session_child_runner_factory: &ProcessSessionChildRunnerFactory,
         },
     )
 }
@@ -53,10 +59,11 @@ pub fn run_worker_process_with_dependencies<
     F: WorkerAuthenticatorFactory,
     I: UnixIdentityResolver,
     G: SupplementaryGroupsResolver,
+    C: SessionChildRunnerFactory,
 >(
     reader: &mut R,
     writer: &mut W,
-    dependencies: WorkerDependencies<'_, F, I, G>,
+    dependencies: WorkerDependencies<'_, F, I, G, C>,
 ) -> Result<(), SessionError> {
     let envelope = match read_envelope::<WorkerRequest, _>(reader) {
         Ok(envelope) => envelope,
@@ -94,14 +101,17 @@ pub fn run_worker_process_with_dependencies<
             request,
             pam_service,
             password,
+            session_child_path,
         } => run_pam_session(
             writer,
             dependencies.authenticator_factory,
             dependencies.identity_resolver,
             dependencies.supplementary_groups_resolver,
+            dependencies.session_child_runner_factory,
             request,
             pam_service,
             password,
+            session_child_path,
         ),
     }
 }
@@ -111,14 +121,17 @@ fn run_pam_session<
     F: WorkerAuthenticatorFactory,
     I: UnixIdentityResolver,
     G: SupplementaryGroupsResolver,
+    C: SessionChildRunnerFactory,
 >(
     writer: &mut W,
     factory: &F,
     identity_resolver: &I,
     supplementary_groups_resolver: &G,
+    session_child_runner_factory: &C,
     request: niralis_session::SessionRequest,
     pam_service: String,
     password: niralis_session::WorkerSecret,
+    session_child_path: std::path::PathBuf,
 ) -> Result<(), SessionError> {
     let authenticator = factory.build(&pam_service);
     let auth_result = authenticator.authenticate(&request.username, password.expose());
@@ -215,6 +228,37 @@ fn run_pam_session<
     match open_result {
         Ok(Ok(())) => {
             info!(username = %canonical_username, session = %session.session.id, "worker PAM session opened");
+            let child_runner = match session_child_runner_factory
+                .build(Path::new(&session_child_path))
+            {
+                Ok(runner) => runner,
+                Err(error) => {
+                    warn!(username = %canonical_username, session = %session.session.id, ?error, "worker failed to build session child runner");
+                    drop(transaction);
+                    write_envelope(
+                        writer,
+                        WorkerResponse::SessionFailed {
+                            code: WorkerSessionFailureCode::SessionChildFailed,
+                        },
+                    )?;
+                    return Err(SessionError::AuthenticatedSessionFailed);
+                }
+            };
+            let child_result = child_runner.run_child(SessionChildExpectation {
+                canonical_username: canonical_username.clone(),
+                session_id: session.session.id.clone(),
+            });
+            if let Err(error) = child_result {
+                warn!(username = %canonical_username, session = %session.session.id, ?error, "worker session child failed");
+                drop(transaction);
+                write_envelope(
+                    writer,
+                    WorkerResponse::SessionFailed {
+                        code: WorkerSessionFailureCode::SessionChildFailed,
+                    },
+                )?;
+                return Err(SessionError::AuthenticatedSessionFailed);
+            }
             drop(transaction);
             info!(username = %canonical_username, session = %session.session.id, "worker PAM transaction closed");
             write_envelope(writer, WorkerResponse::Ready { session })

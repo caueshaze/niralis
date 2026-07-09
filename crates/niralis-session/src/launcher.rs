@@ -12,16 +12,22 @@ use crate::{
 #[derive(Debug, Clone)]
 pub struct WorkerSessionLauncher {
     worker_path: PathBuf,
+    session_child_path: PathBuf,
     timeout: Duration,
 }
 
 impl WorkerSessionLauncher {
-    pub fn new(worker_path: PathBuf, timeout: Duration) -> Result<Self, SessionError> {
-        if !worker_path.is_absolute() {
+    pub fn new(
+        worker_path: PathBuf,
+        session_child_path: PathBuf,
+        timeout: Duration,
+    ) -> Result<Self, SessionError> {
+        if !worker_path.is_absolute() || !session_child_path.is_absolute() {
             return Err(SessionError::InvalidWorkerPath);
         }
         Ok(Self {
             worker_path,
+            session_child_path,
             timeout,
         })
     }
@@ -41,6 +47,7 @@ impl WorkerSessionLauncher {
                 request: request.clone(),
                 pam_service,
                 password,
+                session_child_path: self.session_child_path.clone(),
             },
             expected_started_session(&request),
         )

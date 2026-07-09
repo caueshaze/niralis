@@ -1,9 +1,9 @@
 # Niralisd Security Notes
 
 Niralis now validates sessions in the daemon, performs PAM only inside the
-dedicated `niralis-session-worker`, and keeps graphical session startup,
-privilege transitions, compositor execution, and greeter lifecycle out of
-scope.
+dedicated `niralis-session-worker`, and introduces a supervised
+`niralis-session-child` boundary. Privilege application, compositor execution,
+and final graphical session setup remain out of scope.
 
 ## Current Guarantees
 
@@ -20,6 +20,8 @@ scope.
 - Sessions are resolved canonically through discovery before any login backend
   is called.
 - Worker launches are versioned, size-limited, supervised, and shell-free.
+- Session child launches use an explicit trusted executable path and a separate
+  versioned, size-limited handshake.
 
 ## PAM Authority Migration
 
@@ -58,11 +60,12 @@ Inside `niralis-session-worker`, the same authenticated transaction is used for:
 7. session close and credential cleanup through RAII
 8. `pam_end`
 
-In this phase, the worker performs a short PAM lifecycle only:
+In this phase, the worker performs a short PAM lifecycle with a child boundary:
 
-`authenticate -> open_session -> close_session -> exit`
+`authenticate -> open_session -> child handshake -> child exit -> close_session -> exit`
 
-No compositor or session command is started yet.
+The worker remains the owner of the PAM transaction while the child exists. No
+compositor or session command is started yet.
 
 ## Canonical Unix Identity
 
@@ -180,10 +183,29 @@ Workers that hang are killed and reaped. The timeout covers:
 - response read
 - worker process exit
 
+## Session Child Boundary
+
+After canonical credentials are resolved and `open_session()` succeeds, the
+worker starts `niralis-session-child` as a separate executable process. The
+child receives only a bounded `Probe` handshake containing the canonical
+username and session ID. It never receives the password, PAM handle,
+transaction, or final credentials.
+
+The child response is bound to the expected canonical username, session ID,
+and real spawned PID. The child must exit successfully; invalid responses,
+timeouts, and non-zero exits are post-authentication session failures. The
+runner kills and reaps the child on failure, and the PAM transaction is dropped
+only after the child has terminated.
+
+The child path is absolute and follows the same root-owned, non-writable trust
+policy as the worker. The child is currently only a process-boundary probe: it
+does not perform privilege drop, execute a compositor, or initialize a desktop
+session.
+
 ## Worker Trust Policy
 
-When PAM is enabled, the worker binary must be trusted before the daemon is
-allowed to send credentials to it.
+When PAM is enabled, both the worker and session child binaries must be
+trusted before the daemon is allowed to send credentials to the worker.
 
 Required properties:
 
@@ -194,6 +216,10 @@ Required properties:
 - not writable by group or others
 - every parent directory is real, root-owned, and not writable by group or
   others
+
+The worker-to-child handshake uses the same no-shell, cleared-environment and
+`cwd = /` process policy, but it is a separate internal protocol from the
+daemon-to-worker protocol.
 
 `auth = "pam"` with `launcher = "mock"` is rejected at daemon startup.
 

@@ -31,3 +31,7 @@ exec_search_path = [
 [session]
 default = "niri"
 command = "niri-session"
+launcher = "worker"
+worker_path = "/usr/libexec/niralis-session-worker"
+child_path = "/usr/libexec/niralis-session-child"
+worker_timeout_seconds = 5

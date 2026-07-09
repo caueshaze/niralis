@@ -19,8 +19,12 @@ fn request() -> SessionRequest {
 }
 
 fn launcher_for(bin: &str) -> WorkerSessionLauncher {
-    WorkerSessionLauncher::new(PathBuf::from(bin), Duration::from_millis(200))
-        .expect("launcher should build")
+    WorkerSessionLauncher::new(
+        PathBuf::from(bin),
+        PathBuf::from("/usr/libexec/niralis-session-child"),
+        Duration::from_millis(200),
+    )
+    .expect("launcher should build")
 }
 
 #[test]
@@ -46,9 +50,12 @@ fn worker_launcher_returns_started_session() {
 
 #[test]
 fn relative_worker_path_is_rejected() {
-    let error =
-        WorkerSessionLauncher::new(PathBuf::from("relative-worker"), Duration::from_millis(200))
-            .expect_err("relative path should be rejected");
+    let error = WorkerSessionLauncher::new(
+        PathBuf::from("relative-worker"),
+        PathBuf::from("/usr/libexec/niralis-session-child"),
+        Duration::from_millis(200),
+    )
+    .expect_err("relative path should be rejected");
 
     assert_eq!(error, SessionError::InvalidWorkerPath);
 }

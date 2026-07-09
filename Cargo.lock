@@ -348,6 +348,7 @@ dependencies = [
  "niralis-auth",
  "niralis-protocol",
  "niralis-session",
+ "serde",
  "serde_json",
  "thiserror",
  "tracing",

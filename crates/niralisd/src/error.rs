@@ -28,6 +28,12 @@ pub enum NiralisdError {
     WorkerUnavailable(PathBuf),
     #[error("worker binary is untrusted: {0}")]
     WorkerUntrusted(PathBuf),
+    #[error("invalid session child path: {0}")]
+    InvalidSessionChildPath(PathBuf),
+    #[error("session child is unavailable: {0}")]
+    SessionChildUnavailable(PathBuf),
+    #[error("session child is untrusted: {0}")]
+    SessionChildUntrusted(PathBuf),
     #[error("PAM authentication requires the worker session launcher")]
     InvalidAuthLauncherCombination,
 }

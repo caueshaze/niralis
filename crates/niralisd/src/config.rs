@@ -99,6 +99,8 @@ pub struct SessionConfig {
     pub worker_path: PathBuf,
     #[serde(default = "default_worker_timeout_seconds")]
     pub worker_timeout_seconds: u64,
+    #[serde(default = "default_session_child_path")]
+    pub child_path: PathBuf,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -115,6 +117,10 @@ fn default_worker_path() -> PathBuf {
 
 fn default_worker_timeout_seconds() -> u64 {
     5
+}
+
+fn default_session_child_path() -> PathBuf {
+    PathBuf::from("/usr/libexec/niralis-session-child")
 }
 
 impl Config {
@@ -169,6 +175,7 @@ impl Default for Config {
                 launcher: SessionLauncherBackend::Worker,
                 worker_path: default_worker_path(),
                 worker_timeout_seconds: default_worker_timeout_seconds(),
+                child_path: default_session_child_path(),
             },
         }
     }

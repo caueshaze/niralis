@@ -13,6 +13,10 @@ use crate::identity::{
     UnixIdentityResolver,
 };
 use crate::runtime::WorkerAuthenticatorFactory;
+use crate::session_child::{
+    SessionChildError, SessionChildExpectation, SessionChildReport, SessionChildRunner,
+    SessionChildRunnerFactory,
+};
 
 #[derive(Clone, Default)]
 pub(super) struct TrackingState {
@@ -21,6 +25,8 @@ pub(super) struct TrackingState {
     pub(super) groups_calls: Arc<AtomicUsize>,
     pub(super) open_calls: Arc<AtomicUsize>,
     pub(super) drops: Arc<AtomicUsize>,
+    pub(super) child_calls: Arc<AtomicUsize>,
+    pub(super) child_drop_observations: Arc<AtomicUsize>,
 }
 
 pub(super) struct StubFactory {
@@ -116,6 +122,46 @@ pub(super) struct StubGroupsResolver {
     pub(super) last_username: Arc<Mutex<Option<String>>>,
 }
 
+pub(super) struct StubChildFactory {
+    pub(super) state: TrackingState,
+    pub(super) result: Result<(), SessionChildError>,
+}
+
+impl SessionChildRunnerFactory for StubChildFactory {
+    fn build(
+        &self,
+        _path: &std::path::Path,
+    ) -> Result<Box<dyn SessionChildRunner>, SessionChildError> {
+        Ok(Box::new(StubChildRunner {
+            state: self.state.clone(),
+            result: self.result.clone(),
+        }))
+    }
+}
+
+struct StubChildRunner {
+    state: TrackingState,
+    result: Result<(), SessionChildError>,
+}
+
+impl SessionChildRunner for StubChildRunner {
+    fn run_child(
+        &self,
+        expectation: SessionChildExpectation,
+    ) -> Result<SessionChildReport, SessionChildError> {
+        self.state.child_calls.fetch_add(1, Ordering::SeqCst);
+        self.state
+            .child_drop_observations
+            .fetch_add(self.state.drops.load(Ordering::SeqCst), Ordering::SeqCst);
+        self.result.clone()?;
+        Ok(SessionChildReport {
+            canonical_username: expectation.canonical_username,
+            session_id: expectation.session_id,
+            child_pid: 1,
+        })
+    }
+}
+
 impl SupplementaryGroupsResolver for StubGroupsResolver {
     fn resolve(&self, identity: &UnixIdentity) -> Result<Vec<u32>, GroupResolutionError> {
         self.state.groups_calls.fetch_add(1, Ordering::SeqCst);
@@ -152,6 +198,7 @@ pub(super) fn request() -> WorkerEnvelope<WorkerRequest> {
             },
             pam_service: "niralis".to_owned(),
             password: WorkerSecret::new("secret".to_owned()),
+            session_child_path: "/usr/libexec/niralis-session-child".into(),
         },
     }
 }

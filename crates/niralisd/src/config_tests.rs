@@ -54,6 +54,10 @@ fn parses_pam_backend_shape() {
     assert_eq!(config.users.min_uid, 1000);
     assert_eq!(config.sessions.exec_search_path.len(), 4);
     assert_eq!(config.session.default, "niri");
+    assert_eq!(
+        config.session.child_path,
+        PathBuf::from("/usr/libexec/niralis-session-child")
+    );
     assert_eq!(config.session.launcher, SessionLauncherBackend::Mock);
 }
 
@@ -108,6 +112,10 @@ fn missing_backend_and_discovery_sections_use_defaults() {
         PathBuf::from("/usr/libexec/niralis-session-worker")
     );
     assert_eq!(config.session.worker_timeout_seconds, 5);
+    assert_eq!(
+        config.session.child_path,
+        PathBuf::from("/usr/libexec/niralis-session-child")
+    );
 }
 
 #[test]

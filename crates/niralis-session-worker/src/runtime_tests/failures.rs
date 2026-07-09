@@ -9,7 +9,8 @@ use crate::identity::IdentityError;
 use crate::runtime::{run_worker_process_with_dependencies, WorkerDependencies};
 
 use super::support::{
-    identity, request, StubFactory, StubGroupsResolver, StubIdentityResolver, TrackingState,
+    identity, request, StubChildFactory, StubFactory, StubGroupsResolver, StubIdentityResolver,
+    TrackingState,
 };
 
 #[test]
@@ -151,6 +152,13 @@ fn pam_worker_distinguishes_auth_identity_and_session_failures() {
                     result: groups_result.clone(),
                     last_username: Arc::new(Mutex::new(None)),
                 },
+                session_child_runner_factory: &StubChildFactory {
+                    state: state.clone(),
+                    result: groups_result
+                        .as_ref()
+                        .map(|_| ())
+                        .map_err(|_| crate::session_child::SessionChildError::ProtocolFailed),
+                },
             },
         );
 
@@ -163,5 +171,9 @@ fn pam_worker_distinguishes_auth_identity_and_session_failures() {
         assert_eq!(state.groups_calls.load(Ordering::SeqCst), groups_calls);
         assert_eq!(state.open_calls.load(Ordering::SeqCst), open_calls);
         assert_eq!(state.drops.load(Ordering::SeqCst), drops);
+        assert_eq!(
+            state.child_calls.load(Ordering::SeqCst),
+            if open_ok { 1 } else { 0 }
+        );
     }
 }
