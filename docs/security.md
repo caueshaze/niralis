@@ -1,8 +1,9 @@
 # Niralisd Security Notes
 
-This phase preserves the authenticated PAM transaction with RAII while keeping
-graphical session startup, greeter management, Wayland UI, privilege
-transitions, and full session lifecycle semantics out of scope.
+This phase preserves the authenticated PAM transaction with RAII and introduces
+an isolated, one-shot session worker process boundary while keeping graphical
+session startup, greeter management, Wayland UI, privilege transitions, and
+full session lifecycle semantics out of scope.
 
 ## Current Guarantees
 
@@ -18,6 +19,8 @@ transitions, and full session lifecycle semantics out of scope.
 - Login attempts are rate-limited per username before PAM is called.
 - Successful login resets that user's rate limit state.
 - Requested sessions are validated through discovery before PAM is called.
+- Session startup can be delegated to an isolated `niralis-session-worker`
+  process using a private, versioned internal protocol.
 - Daemon, protocol, authentication, session startup, and CLI code live in
   separate crates.
 - Request handling is isolated from socket handling so it can be tested without
@@ -53,6 +56,14 @@ of the authenticated transaction.
 Future PAM session opening must happen inside an isolated session context so
 user environment changes do not contaminate the privileged daemon process.
 
+In phase 4C, the authenticated transaction still remains in the main
+`niralisd` process while the worker runs. The PAM transaction is not serialized
+or transferred across the worker boundary.
+
+If Niralis later needs one PAM context to own
+`pam_authenticate -> pam_acct_mgmt -> pam_open_session -> pam_close_session ->
+pam_end`, that authentication flow must move into the worker in a later phase.
+
 ## Mock Authentication
 
 `MockAuthenticator` remains available for unit tests and local smoke tests:
@@ -62,11 +73,29 @@ user environment changes do not contaminate the privileged daemon process.
 
 Use it only with `backend = "mock"`. It is not the default runtime backend.
 
+## Session Worker Boundary
+
+`niralis-session-worker` is a dedicated, ephemeral process created per session
+launch attempt when the worker backend is enabled.
+
+The daemon spawns it directly without a shell, with piped stdin/stdout,
+inherited stderr, `cwd = /`, and a cleared environment. Workers receive one
+internal request, return at most one internal response, and then terminate.
+
+The internal worker protocol is versioned, size-limited, and does not contain
+passwords, PAM handles, or other secret material.
+
+Workers that hang are killed and reaped after a timeout; no worker can block
+the login flow indefinitely.
+
 ## Mock Session Startup
 
-`niralis-session` accepts a username and requested session, logs that a session
-would be started, and returns success. It does not call `setuid`, open PAM
-sessions, talk to logind, or spawn a graphical session in this phase.
+`niralis-session` can either return success immediately through the mock
+launcher or delegate to `niralis-session-worker`, which currently performs only
+mock session preparation and returns canonical session data.
+
+Neither launcher calls `setuid`, opens PAM sessions, talks to logind, or
+spawns a graphical session in this phase.
 
 ## Out of Scope for This Phase
 
@@ -74,7 +103,12 @@ sessions, talk to logind, or spawn a graphical session in this phase.
 - Wayland protocol or UI work.
 - Real graphical session spawning.
 - `pam_open_session` or `pam_close_session`.
+- Passwords or PAM state inside the worker protocol.
 - Shutdown or reboot execution.
 - Privilege dropping or user switching.
 - UID/GID switching, `initgroups`, or logind session creation.
+- PAM environment import, `pam_getenvlist`, or user environment application to
+  the main daemon.
+- `Exec` execution from `.desktop` sessions.
+- Real compositor, Wayland, X11, seat, DRM, or VT handling.
 - Interactive password prompt in `niralisctl`.

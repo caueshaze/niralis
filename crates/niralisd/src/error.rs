@@ -20,6 +20,10 @@ pub enum NiralisdError {
     Json(#[from] serde_json::Error),
     #[error("invalid socket path: {0}")]
     InvalidSocketPath(PathBuf),
+    #[error("invalid worker path: {0}")]
+    InvalidWorkerPath(PathBuf),
+    #[error("worker binary is unavailable: {0}")]
+    WorkerUnavailable(PathBuf),
 }
 
 pub type Result<T> = std::result::Result<T, NiralisdError>;

@@ -4,6 +4,7 @@ members = [
     "crates/niralis-discovery",
     "crates/niralis-protocol",
     "crates/niralis-session",
+    "crates/niralis-session-worker",
     "crates/niralisctl",
     "crates/niralisd",
 ]

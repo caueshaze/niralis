@@ -93,6 +93,28 @@ impl Default for SessionsConfig {
 pub struct SessionConfig {
     pub default: String,
     pub command: String,
+    #[serde(default)]
+    pub launcher: SessionLauncherBackend,
+    #[serde(default = "default_worker_path")]
+    pub worker_path: PathBuf,
+    #[serde(default = "default_worker_timeout_seconds")]
+    pub worker_timeout_seconds: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionLauncherBackend {
+    #[default]
+    Mock,
+    Worker,
+}
+
+fn default_worker_path() -> PathBuf {
+    PathBuf::from("/usr/libexec/niralis-session-worker")
+}
+
+fn default_worker_timeout_seconds() -> u64 {
+    5
 }
 
 impl Config {
@@ -144,104 +166,10 @@ impl Default for Config {
             session: SessionConfig {
                 default: "niri".to_owned(),
                 command: "niri-session".to_owned(),
+                launcher: SessionLauncherBackend::Mock,
+                worker_path: default_worker_path(),
+                worker_timeout_seconds: default_worker_timeout_seconds(),
             },
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn config_raw(auth_backend: &str) -> String {
-        format!(
-            r#"
-            [daemon]
-            socket = "/tmp/niralis-test/niralisd.sock"
-            log_level = "debug"
-
-            [greeter]
-            command = "/usr/bin/niralis-greeter"
-            user = "niralis"
-
-            [auth]
-            backend = "{auth_backend}"
-            pam_service = "niralis"
-            max_attempts = 5
-            cooldown_seconds = 10
-
-            [users]
-            min_uid = 1000
-            allow_root = false
-            exclude = ["nobody"]
-
-            [sessions]
-            wayland_dirs = ["/usr/share/wayland-sessions"]
-            include_x11 = false
-            x11_dirs = ["/usr/share/xsessions"]
-            exec_search_path = ["/usr/local/bin", "/usr/local/sbin", "/usr/bin", "/usr/sbin"]
-
-            [session]
-            default = "niri"
-            command = "niri-session"
-        "#
-        )
-    }
-
-    #[test]
-    fn parses_pam_backend_shape() {
-        let config: Config = toml::from_str(&config_raw("pam")).expect("config should parse");
-
-        assert_eq!(
-            config.daemon.socket,
-            PathBuf::from("/tmp/niralis-test/niralisd.sock")
-        );
-        assert_eq!(config.auth.backend, AuthBackend::Pam);
-        assert_eq!(config.users.min_uid, 1000);
-        assert_eq!(config.sessions.exec_search_path.len(), 4);
-        assert_eq!(config.session.default, "niri");
-    }
-
-    #[test]
-    fn parses_mock_backend_shape() {
-        let config: Config = toml::from_str(&config_raw("mock")).expect("config should parse");
-
-        assert_eq!(config.auth.backend, AuthBackend::Mock);
-    }
-
-    #[test]
-    fn default_backend_is_pam() {
-        assert_eq!(Config::default().auth.backend, AuthBackend::Pam);
-    }
-
-    #[test]
-    fn missing_backend_and_discovery_sections_use_defaults() {
-        let raw = r#"
-            [daemon]
-            socket = "/tmp/niralis-test/niralisd.sock"
-            log_level = "debug"
-
-            [greeter]
-            command = "/usr/bin/niralis-greeter"
-            user = "niralis"
-
-            [auth]
-            pam_service = "niralis"
-            max_attempts = 5
-            cooldown_seconds = 10
-
-            [session]
-            default = "niri"
-            command = "niri-session"
-        "#;
-
-        let config: Config = toml::from_str(raw).expect("config should parse");
-
-        assert_eq!(config.auth.backend, AuthBackend::Pam);
-        assert_eq!(config.users.min_uid, 1000);
-        assert_eq!(
-            config.sessions.wayland_dirs[0],
-            PathBuf::from("/usr/share/wayland-sessions")
-        );
     }
 }

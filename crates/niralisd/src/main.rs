@@ -6,9 +6,9 @@ use niralis_discovery::{
     DesktopSessionDirectory, NssUserDirectory, SessionDirectory, SessionDiscoveryConfig,
     UserDirectory, UserDiscoveryConfig,
 };
-use niralis_session::MockSessionLauncher;
 use niralisd::config::{AuthBackend, Config, DEFAULT_CONFIG_PATH};
 use niralisd::handler::DaemonHandler;
+use niralisd::session_launcher::build_session_launcher;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -38,10 +38,11 @@ fn run() -> MainResult<()> {
     let authenticator = build_authenticator(&config);
     let user_directory = build_user_directory(&config);
     let session_directory = build_session_directory(&config);
+    let session_launcher = build_session_launcher(&config)?;
     let handler = DaemonHandler::new(
         config.clone(),
         authenticator,
-        MockSessionLauncher,
+        session_launcher,
         user_directory,
         session_directory,
     );

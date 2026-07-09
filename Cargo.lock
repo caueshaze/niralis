@@ -332,8 +332,22 @@ name = "niralis-session"
 version = "0.1.0"
 dependencies = [
  "niralis-protocol",
+ "serde",
+ "serde_json",
+ "tempfile",
  "thiserror",
  "tracing",
+]
+
+[[package]]
+name = "niralis-session-worker"
+version = "0.1.0"
+dependencies = [
+ "niralis-protocol",
+ "niralis-session",
+ "serde_json",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
