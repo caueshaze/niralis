@@ -1,6 +1,9 @@
 use ::libc::{gid_t, uid_t};
 use std::sync::Mutex;
 
+use super::libc::{
+    bounded_max_observed_groups, HARD_MAX_OBSERVED_GROUPS, HARD_MAX_SUPPLEMENTARY_GROUPS,
+};
 use super::*;
 use crate::{ResolvedUnixCredentials, UnixIdentity};
 
@@ -127,36 +130,29 @@ fn setter_failures_stop_the_sequence() {
 
 #[test]
 fn mismatches_are_rejected_after_inspection() {
-    let mut mismatch = observed(vec![1000, 20, 10]);
-    mismatch.effective_uid = 1001;
-    let syscalls = RecordingSyscalls {
-        calls: Mutex::new(Vec::new()),
-        setgroups: Ok(()),
-        setgid: Ok(()),
-        setuid: Ok(()),
-        observed: Ok(mismatch),
-    };
-    assert_eq!(
-        drop_privileges_with(&syscalls, &credentials(vec![10, 20])),
-        Err(PrivilegeDropError::CredentialMismatch)
-    );
-}
-
-#[test]
-fn gid_mismatch_is_rejected() {
-    let mut mismatch = observed(vec![1000]);
-    mismatch.effective_gid = 1001;
-    let syscalls = RecordingSyscalls {
-        calls: Mutex::new(Vec::new()),
-        setgroups: Ok(()),
-        setgid: Ok(()),
-        setuid: Ok(()),
-        observed: Ok(mismatch),
-    };
-    assert_eq!(
-        drop_privileges_with(&syscalls, &credentials(vec![])),
-        Err(PrivilegeDropError::CredentialMismatch)
-    );
+    let fields: [fn(&mut ObservedCredentials); 6] = [
+        |value| value.real_uid = 1001,
+        |value| value.effective_uid = 1001,
+        |value| value.saved_uid = 1001,
+        |value| value.real_gid = 1001,
+        |value| value.effective_gid = 1001,
+        |value| value.saved_gid = 1001,
+    ];
+    for mutate in fields {
+        let mut mismatch = observed(vec![1000]);
+        mutate(&mut mismatch);
+        let syscalls = RecordingSyscalls {
+            calls: Mutex::new(Vec::new()),
+            setgroups: Ok(()),
+            setgid: Ok(()),
+            setuid: Ok(()),
+            observed: Ok(mismatch),
+        };
+        assert_eq!(
+            drop_privileges_with(&syscalls, &credentials(vec![])),
+            Err(PrivilegeDropError::CredentialMismatch)
+        );
+    }
 }
 
 #[test]
@@ -175,11 +171,20 @@ fn excessive_observed_group_count_fails_verification() {
         setgroups: Ok(()),
         setgid: Ok(()),
         setuid: Ok(()),
-        observed: Err(SyscallError::TooManyGroups),
+        observed: Err(SyscallError::ObservedGroupCountExceeded),
     };
     assert_eq!(
         drop_privileges_with(&syscalls, &credentials(vec![10, 20])),
-        Err(PrivilegeDropError::VerificationFailed)
+        Err(PrivilegeDropError::CredentialMismatch)
+    );
+}
+
+#[test]
+fn observed_group_limit_allows_primary_gid_entry() {
+    assert_eq!(HARD_MAX_OBSERVED_GROUPS, 65_537);
+    assert_eq!(
+        bounded_max_observed_groups(HARD_MAX_SUPPLEMENTARY_GROUPS + 1),
+        HARD_MAX_OBSERVED_GROUPS
     );
 }
 

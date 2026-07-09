@@ -73,7 +73,7 @@ pub(crate) struct ObservedCredentials {
 pub(crate) enum SyscallError {
     Failed,
     InvalidCount,
-    TooManyGroups,
+    ObservedGroupCountExceeded,
 }
 
 pub(crate) fn drop_privileges_with<S: CredentialSyscalls>(
@@ -117,9 +117,13 @@ pub(crate) fn drop_privileges_with<S: CredentialSyscalls>(
     syscalls
         .set_uid(uid)
         .map_err(|_| PrivilegeDropError::SetUidFailed)?;
-    let observed = syscalls
-        .inspect_credentials(max_groups)
-        .map_err(|_| PrivilegeDropError::VerificationFailed)?;
+    let observed = match syscalls.inspect_credentials(max_groups) {
+        Ok(observed) => observed,
+        Err(SyscallError::ObservedGroupCountExceeded) => {
+            return Err(PrivilegeDropError::CredentialMismatch)
+        }
+        Err(_) => return Err(PrivilegeDropError::VerificationFailed),
+    };
 
     if observed.real_uid != uid
         || observed.effective_uid != uid

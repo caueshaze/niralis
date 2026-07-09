@@ -2,7 +2,12 @@ use std::ptr;
 
 use super::{CredentialSyscalls, ObservedCredentials, SyscallError};
 
-const HARD_MAX_OBSERVED_GROUPS: usize = 65_536;
+pub(crate) const HARD_MAX_SUPPLEMENTARY_GROUPS: usize = 65_536;
+pub(crate) const HARD_MAX_OBSERVED_GROUPS: usize = HARD_MAX_SUPPLEMENTARY_GROUPS + 1;
+
+pub(crate) fn bounded_max_observed_groups(expected: usize) -> usize {
+    expected.min(HARD_MAX_OBSERVED_GROUPS)
+}
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct LibcPrivilegeDropper;
@@ -23,7 +28,7 @@ impl CredentialSyscalls for LibcPrivilegeDropper {
         } else {
             (groups.len(), groups.as_ptr())
         };
-        let size = ::libc::size_t::try_from(size).map_err(|_| SyscallError::TooManyGroups)?;
+        let size = ::libc::size_t::try_from(size).map_err(|_| SyscallError::InvalidCount)?;
         let result = unsafe { ::libc::setgroups(size, pointer) };
         if result == 0 {
             Ok(())
@@ -49,7 +54,7 @@ impl CredentialSyscalls for LibcPrivilegeDropper {
     }
 
     fn inspect_credentials(&self, max_groups: usize) -> Result<ObservedCredentials, SyscallError> {
-        let max_groups = max_groups.min(HARD_MAX_OBSERVED_GROUPS);
+        let max_groups = bounded_max_observed_groups(max_groups);
         let mut real_uid = 0;
         let mut effective_uid = 0;
         let mut saved_uid = 0;
@@ -65,7 +70,7 @@ impl CredentialSyscalls for LibcPrivilegeDropper {
         let count = unsafe { ::libc::getgroups(0, ptr::null_mut()) };
         let count = usize::try_from(count).map_err(|_| SyscallError::InvalidCount)?;
         if count > max_groups {
-            return Err(SyscallError::TooManyGroups);
+            return Err(SyscallError::ObservedGroupCountExceeded);
         }
         let mut supplementary_gids = vec![0; count];
         let observed_count = if supplementary_gids.is_empty() {

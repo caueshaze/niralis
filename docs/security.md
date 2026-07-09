@@ -100,8 +100,8 @@ GID. A group lookup failure is a post-authentication session failure, so PAM
 as a bad password.
 
 The worker constructs `ResolvedUnixCredentials` before opening the PAM session.
-This phase still does not change the worker process identity: no `setgroups`,
-`initgroups`, `setgid`, or `setuid` operation is performed.
+The PAM runtime still does not change the worker process identity: it does not
+call `setgroups`, `initgroups`, `setgid`, or `setuid`.
 
 ## Privilege Drop Primitive
 
@@ -233,7 +233,7 @@ Mock credentials remain:
 - real graphical session startup
 - `.desktop` `Exec` execution
 - compositor or `niri-session` launch
-- effective credential changes (`setgroups`, `initgroups`, `setuid`, or `setgid`)
+- runtime application of credential changes by a real session child
 - logind integration
 - seat, VT, DRM, Wayland, or X11 lifecycle
 - PAM environment import back into the daemon
