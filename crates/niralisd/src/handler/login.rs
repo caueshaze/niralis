@@ -5,6 +5,7 @@ use niralis_discovery::{SessionDirectory, UserDirectory};
 use niralis_protocol::NiralisResponse;
 use niralis_session::{SessionLauncher, SessionRequest};
 use tracing::{debug, info};
+use zeroize::Zeroizing;
 
 use super::DaemonHandler;
 
@@ -33,7 +34,12 @@ where
         return session_unavailable();
     };
 
-    match handler.authenticator.authenticate(&username, &password) {
+    let password = Zeroizing::new(password);
+
+    match handler
+        .authenticator
+        .authenticate(&username, password.as_str())
+    {
         Ok(transaction) => {
             reset_rate_limit(handler, &username);
             let user = transaction.user();
