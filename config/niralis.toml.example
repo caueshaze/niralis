@@ -1,0 +1,16 @@
+[daemon]
+socket = "/run/niralis/niralisd.sock"
+log_level = "info"
+
+[greeter]
+command = "/usr/bin/niralis-greeter"
+user = "niralis"
+
+[auth]
+pam_service = "niralis"
+max_attempts = 5
+cooldown_seconds = 10
+
+[session]
+default = "niri"
+command = "niri-session"

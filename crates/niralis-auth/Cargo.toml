@@ -1,0 +1,8 @@
+[package]
+name = "niralis-auth"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+thiserror.workspace = true

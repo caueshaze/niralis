@@ -1,0 +1,67 @@
+# Rust build artifacts
+/target/
+
+# Cargo-generated files
+/.cargo/
+
+# Keep Cargo.lock tracked for this application workspace.
+
+# Local runtime and smoke-test files
+/run/
+/tmp/
+*.sock
+*.pid
+
+# Local configuration and secrets
+*.local
+*.local.*
+*.env
+*.env.*
+!/config/*.example
+!/config/*.toml.example
+
+# Logs and diagnostics
+*.log
+*.trace
+*.profraw
+*.profdata
+
+# Coverage output
+/coverage/
+/tarpaulin-report.html
+cobertura.xml
+lcov.info
+
+# Rust tooling scratch files
+*.rs.bk
+rust-project.json
+
+# Editor and IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS metadata
+.DS_Store
+Thumbs.db
+
+# Backup and temporary files
+*.bak
+*.backup
+*.orig
+*.rej
+*.tmp
+*.temp
+
+# Archive artifacts
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+*.7z
+
+# Generated binaries copied into the repository root
+/niralisd
+/niralisctl

@@ -1,0 +1,27 @@
+[workspace]
+members = [
+    "crates/niralis-auth",
+    "crates/niralis-protocol",
+    "crates/niralis-session",
+    "crates/niralisctl",
+    "crates/niralisd",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "MIT OR Apache-2.0"
+version = "0.1.0"
+
+[workspace.dependencies]
+clap = { version = "4.5.41", features = ["derive", "env"] }
+niralis-auth = { path = "crates/niralis-auth" }
+niralis-protocol = { path = "crates/niralis-protocol" }
+niralis-session = { path = "crates/niralis-session" }
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.140"
+tempfile = "3.20.0"
+thiserror = "2.0.12"
+toml = "0.8.23"
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }

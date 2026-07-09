@@ -1,0 +1,14 @@
+[Unit]
+Description=Niralis Display Manager Daemon
+Documentation=man:niralisd(8)
+After=systemd-user-sessions.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/niralisd --config /etc/niralis/niralis.toml
+Restart=on-failure
+RuntimeDirectory=niralis
+RuntimeDirectoryMode=0755
+
+[Install]
+WantedBy=graphical.target

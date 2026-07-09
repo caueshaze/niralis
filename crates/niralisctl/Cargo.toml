@@ -1,0 +1,11 @@
+[package]
+name = "niralisctl"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+clap.workspace = true
+niralis-protocol.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
