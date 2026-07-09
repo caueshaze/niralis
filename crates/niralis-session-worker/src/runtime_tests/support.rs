@@ -143,7 +143,7 @@ pub(super) fn request() -> WorkerEnvelope<WorkerRequest> {
         version: niralis_session::WORKER_PROTOCOL_VERSION,
         message: WorkerRequest::PamSession {
             request: SessionRequest {
-                username: "test".to_owned(),
+                username: "login-alias".to_owned(),
                 session: SessionInfo {
                     id: "niri".to_owned(),
                     name: "Niri".to_owned(),

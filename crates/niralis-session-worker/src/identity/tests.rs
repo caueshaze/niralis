@@ -154,6 +154,24 @@ fn fails_when_buffer_limit_is_exceeded() {
     assert_eq!(error, IdentityError::BufferLimitExceeded);
 }
 
+#[test]
+fn classifies_getgrouplist_results() {
+    use super::groups::classify_getgrouplist_result;
+
+    assert_eq!(classify_getgrouplist_result(0), GroupLookupResult::Success);
+    assert_eq!(classify_getgrouplist_result(1), GroupLookupResult::Success);
+    assert_eq!(classify_getgrouplist_result(5), GroupLookupResult::Success);
+    assert_eq!(
+        classify_getgrouplist_result(libc::c_int::MAX),
+        GroupLookupResult::Success
+    );
+    assert_eq!(
+        classify_getgrouplist_result(-1),
+        GroupLookupResult::BufferTooSmall
+    );
+    assert_eq!(classify_getgrouplist_result(-2), GroupLookupResult::Failure);
+}
+
 struct GroupStub {
     calls: Cell<usize>,
     responses: Vec<(GroupLookupResult, libc::c_int, Vec<libc::gid_t>)>,

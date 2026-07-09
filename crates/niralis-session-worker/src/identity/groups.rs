@@ -34,6 +34,14 @@ pub(crate) enum GroupLookupResult {
     Failure,
 }
 
+pub(crate) fn classify_getgrouplist_result(result: c_int) -> GroupLookupResult {
+    match result {
+        -1 => GroupLookupResult::BufferTooSmall,
+        value if value >= 0 => GroupLookupResult::Success,
+        _ => GroupLookupResult::Failure,
+    }
+}
+
 struct LibcGroupListLookup;
 
 impl GroupListLookup for LibcGroupListLookup {
@@ -54,11 +62,7 @@ impl GroupListLookup for LibcGroupListLookup {
             )
         };
         *ngroups = count;
-        match result {
-            0 => GroupLookupResult::Success,
-            -1 => GroupLookupResult::BufferTooSmall,
-            _ => GroupLookupResult::Failure,
-        }
+        classify_getgrouplist_result(result)
     }
 }
 

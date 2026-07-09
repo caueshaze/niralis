@@ -64,6 +64,8 @@ fn identity_resolution_uses_pam_user_not_requested_username() {
     let state = TrackingState::default();
     let last_username = Arc::new(Mutex::new(None));
     let last_group_username = Arc::new(Mutex::new(None));
+    let mut canonical_identity = identity();
+    canonical_identity.username = "canonical-user".to_owned();
 
     run_worker_process_with_dependencies(
         &mut reader,
@@ -74,11 +76,11 @@ fn identity_resolution_uses_pam_user_not_requested_username() {
                 auth_result: Ok(()),
                 open_ok: true,
                 open_panics: false,
-                pam_username: "caue",
+                pam_username: "pam-user",
             },
             identity_resolver: &StubIdentityResolver {
                 state: state.clone(),
-                result: Ok(identity()),
+                result: Ok(canonical_identity),
                 last_username: last_username.clone(),
             },
             supplementary_groups_resolver: &StubGroupsResolver {
@@ -95,13 +97,13 @@ fn identity_resolution_uses_pam_user_not_requested_username() {
             .lock()
             .expect("last_username mutex should lock")
             .as_deref(),
-        Some("caue")
+        Some("pam-user")
     );
     assert_eq!(
         last_group_username
             .lock()
             .expect("last_group_username mutex should lock")
             .as_deref(),
-        Some("caue")
+        Some("canonical-user")
     );
 }
