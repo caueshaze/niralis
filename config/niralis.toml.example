@@ -7,6 +7,7 @@ command = "/usr/bin/niralis-greeter"
 user = "niralis"
 
 [auth]
+backend = "pam"
 pam_service = "niralis"
 max_attempts = 5
 cooldown_seconds = 10

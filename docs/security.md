@@ -1,32 +1,52 @@
 # Niralisd Security Notes
 
-This phase intentionally builds only the daemon foundation. Authentication,
-session startup, greeter management, PAM, logind integration, Wayland UI, and
-privilege transitions are not implemented yet.
+This phase adds real PAM authentication while keeping graphical session startup,
+greeter management, Wayland UI, privilege transitions, and full login semantics
+out of scope.
 
 ## Current Guarantees
 
-- Passwords are accepted only as IPC input for the mock login path and are never
-  written to logs.
-- Login failure responses are generic and do not reveal whether the username or
-  password was wrong.
+- Passwords are accepted only as IPC input for login and are never written to
+  logs.
+- Login failure responses are generic and do not reveal whether the username,
+  password, PAM service, account policy, or rate limit caused the failure.
+- PAM failures return `LoginFailed` to the client.
+- PAM detail, if logged at all, is restricted to `debug` or `trace`; `info` and
+  `warn` logs must not contain raw PAM messages, PAM codes, or password data.
 - IPC is local-only through a Unix socket.
 - The daemon creates the socket with restricted permissions (`0660`).
+- Login attempts are rate-limited per username before PAM is called.
+- Successful login resets that user's rate limit state.
 - Daemon, protocol, authentication, session startup, and CLI code live in
   separate crates.
 - Request handling is isolated from socket handling so it can be tested without
   opening a real socket.
 
+## PAM Authentication
+
+`niralis-auth` provides `PamAuthenticator`, selected by default with:
+
+```toml
+[auth]
+backend = "pam"
+pam_service = "niralis"
+```
+
+The PAM service file must be installed manually at `/etc/pam.d/niralis`. An
+openSUSE-oriented example is available at `config/pam/niralis`.
+
+The PAM conversation is non-interactive and silent: it supplies the username and
+password already received through IPC and does not echo PAM text back to stdout,
+stderr, logs, or the client.
+
 ## Mock Authentication
 
-`niralis-auth` currently accepts only:
+`MockAuthenticator` remains available for unit tests and local smoke tests:
 
 - user: `test`
 - password: `test`
 
-This is a mock implementation. PAM support should be added behind the existing
-`Authenticator` trait so the daemon does not need to know which authentication
-backend is active.
+Use it only with `backend = "mock"`. It is not the default runtime backend.
 
 ## Mock Session Startup
 
@@ -34,12 +54,13 @@ backend is active.
 would be started, and returns success. It does not call `setuid`, open PAM
 sessions, talk to logind, or spawn a graphical session in this phase.
 
-## Out of Scope for Phase 1
+## Out of Scope for This Phase
 
-- PAM authentication.
 - Greeter process supervision.
 - Wayland protocol or UI work.
 - Real graphical session spawning.
+- `pam_open_session` or credential/session establishment.
 - Shutdown or reboot execution.
-- Attempt rate limiting and cooldown enforcement.
 - Privilege dropping or user switching.
+- System user enumeration for the PAM backend.
+- Interactive password prompt in `niralisctl`.

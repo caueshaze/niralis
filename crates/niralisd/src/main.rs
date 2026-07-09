@@ -1,9 +1,9 @@
 use std::path::PathBuf;
 
 use clap::Parser;
-use niralis_auth::MockAuthenticator;
+use niralis_auth::{Authenticator, MockAuthenticator, PamAuthenticator};
 use niralis_session::MockSessionLauncher;
-use niralisd::config::{Config, DEFAULT_CONFIG_PATH};
+use niralisd::config::{AuthBackend, Config, DEFAULT_CONFIG_PATH};
 use niralisd::handler::DaemonHandler;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -31,10 +31,18 @@ fn run() -> MainResult<()> {
     init_logging(&config.daemon.log_level)?;
     info!(config = %cli.config.display(), "starting niralisd");
 
-    let handler = DaemonHandler::new(config.clone(), MockAuthenticator, MockSessionLauncher);
+    let authenticator = build_authenticator(&config);
+    let handler = DaemonHandler::new(config.clone(), authenticator, MockSessionLauncher);
     niralisd::server::run(&config, handler)?;
 
     Ok(())
+}
+
+fn build_authenticator(config: &Config) -> Box<dyn Authenticator> {
+    match config.auth.backend {
+        AuthBackend::Mock => Box::new(MockAuthenticator),
+        AuthBackend::Pam => Box::new(PamAuthenticator::new(config.auth.pam_service.clone())),
+    }
 }
 
 fn init_logging(log_level: &str) -> MainResult<()> {

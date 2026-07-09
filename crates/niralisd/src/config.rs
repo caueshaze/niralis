@@ -27,8 +27,18 @@ pub struct GreeterConfig {
     pub user: String,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthBackend {
+    Mock,
+    #[default]
+    Pam,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct AuthConfig {
+    #[serde(default)]
+    pub backend: AuthBackend,
     pub pam_service: String,
     pub max_attempts: u32,
     pub cooldown_seconds: u64,
@@ -79,6 +89,7 @@ impl Default for Config {
                 user: "niralis".to_owned(),
             },
             auth: AuthConfig {
+                backend: AuthBackend::Pam,
                 pam_service: "niralis".to_owned(),
                 max_attempts: 5,
                 cooldown_seconds: 10,
@@ -96,7 +107,71 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_example_shape() {
+    fn parses_pam_backend_shape() {
+        let raw = r#"
+            [daemon]
+            socket = "/tmp/niralis-test/niralisd.sock"
+            log_level = "debug"
+
+            [greeter]
+            command = "/usr/bin/niralis-greeter"
+            user = "niralis"
+
+            [auth]
+            backend = "pam"
+            pam_service = "niralis"
+            max_attempts = 5
+            cooldown_seconds = 10
+
+            [session]
+            default = "niri"
+            command = "niri-session"
+        "#;
+
+        let config: Config = toml::from_str(raw).expect("config should parse");
+
+        assert_eq!(
+            config.daemon.socket,
+            PathBuf::from("/tmp/niralis-test/niralisd.sock")
+        );
+        assert_eq!(config.auth.backend, AuthBackend::Pam);
+        assert_eq!(config.session.default, "niri");
+    }
+
+    #[test]
+    fn parses_mock_backend_shape() {
+        let raw = r#"
+            [daemon]
+            socket = "/tmp/niralis-test/niralisd.sock"
+            log_level = "debug"
+
+            [greeter]
+            command = "/usr/bin/niralis-greeter"
+            user = "niralis"
+
+            [auth]
+            backend = "mock"
+            pam_service = "niralis"
+            max_attempts = 5
+            cooldown_seconds = 10
+
+            [session]
+            default = "niri"
+            command = "niri-session"
+        "#;
+
+        let config: Config = toml::from_str(raw).expect("config should parse");
+
+        assert_eq!(config.auth.backend, AuthBackend::Mock);
+    }
+
+    #[test]
+    fn default_backend_is_pam() {
+        assert_eq!(Config::default().auth.backend, AuthBackend::Pam);
+    }
+
+    #[test]
+    fn missing_backend_defaults_to_pam() {
         let raw = r#"
             [daemon]
             socket = "/tmp/niralis-test/niralisd.sock"
@@ -118,10 +193,6 @@ mod tests {
 
         let config: Config = toml::from_str(raw).expect("config should parse");
 
-        assert_eq!(
-            config.daemon.socket,
-            PathBuf::from("/tmp/niralis-test/niralisd.sock")
-        );
-        assert_eq!(config.session.default, "niri");
+        assert_eq!(config.auth.backend, AuthBackend::Pam);
     }
 }
