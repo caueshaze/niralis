@@ -50,44 +50,14 @@ impl SessionLauncher for WorkerSessionLauncher {
             .map_err(|_| SessionError::WorkerSpawnFailed)?;
         info!(path = %self.worker_path.display(), "spawned session worker");
 
-        let mut stdin = child.stdin.take().ok_or(SessionError::WorkerIoFailed)?;
-        if write_envelope(
-            &mut stdin,
-            WorkerRequest::PrepareSession {
-                request: request.clone(),
-            },
-        )
-        .is_err()
-        {
-            let _ = kill_and_reap(&mut child);
-            return Err(SessionError::WorkerIoFailed);
-        }
-        drop(stdin);
-
-        let stdout = child.stdout.take().ok_or(SessionError::WorkerIoFailed)?;
-        let (sender, receiver) = mpsc::channel();
-        let reader = thread::spawn(move || {
-            let mut stdout = stdout;
-            let result = read_envelope::<WorkerResponse, _>(&mut stdout);
-            let _ = sender.send(result);
-        });
         let deadline = Instant::now() + self.timeout;
+        let stdin = child.stdin.take().ok_or(SessionError::WorkerIoFailed)?;
+        let stdout = child.stdout.take().ok_or(SessionError::WorkerIoFailed)?;
+        let writer = spawn_writer(stdin, request.clone());
+        let reader = spawn_reader(stdout);
 
-        let response = match receiver.recv_timeout(remaining(deadline)?) {
-            Ok(result) => result,
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                kill_and_reap(&mut child);
-                let _ = reader.join();
-                return Err(SessionError::WorkerTimedOut);
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                let _ = reap_child(&mut child);
-                let _ = reader.join();
-                return Err(SessionError::WorkerProtocolFailed);
-            }
-        }?;
-
-        reader.join().map_err(|_| SessionError::WorkerIoFailed)?;
+        let _ = await_worker_result(writer, deadline, &mut child)?;
+        let response = await_worker_result(reader, deadline, &mut child)??;
         let status = wait_for_exit(&mut child, deadline)?;
         debug!(?status, "session worker exited");
         if response.version != crate::WORKER_PROTOCOL_VERSION {
@@ -104,10 +74,56 @@ impl SessionLauncher for WorkerSessionLauncher {
     }
 }
 
+fn spawn_writer(
+    stdin: std::process::ChildStdin,
+    request: SessionRequest,
+) -> thread::JoinHandle<Result<(), SessionError>> {
+    thread::spawn(move || {
+        let mut stdin = stdin;
+        write_envelope(&mut stdin, WorkerRequest::PrepareSession { request })
+    })
+}
+
+fn spawn_reader(
+    stdout: std::process::ChildStdout,
+) -> thread::JoinHandle<Result<crate::WorkerEnvelope<WorkerResponse>, SessionError>> {
+    thread::spawn(move || {
+        let mut stdout = stdout;
+        read_envelope::<WorkerResponse, _>(&mut stdout)
+    })
+}
+
 fn remaining(deadline: Instant) -> Result<Duration, SessionError> {
     deadline
         .checked_duration_since(Instant::now())
         .ok_or(SessionError::WorkerTimedOut)
+}
+
+fn await_worker_result<T: Send + 'static>(
+    handle: thread::JoinHandle<Result<T, SessionError>>,
+    deadline: Instant,
+    child: &mut Child,
+) -> Result<Result<T, SessionError>, SessionError> {
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let _ = sender.send(handle.join());
+    });
+
+    match receiver.recv_timeout(remaining(deadline)?) {
+        Ok(Ok(result)) => Ok(result),
+        Ok(Err(_)) => {
+            let _ = kill_and_reap(child);
+            Err(SessionError::WorkerIoFailed)
+        }
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            let _ = kill_and_reap(child);
+            Err(SessionError::WorkerTimedOut)
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            let _ = reap_child(child);
+            Err(SessionError::WorkerProtocolFailed)
+        }
+    }
 }
 
 fn wait_for_exit(

@@ -78,10 +78,14 @@ fn validate_trusted_node(path: &Path, expect_file: bool) -> Result<()> {
     if !expect_file && !metadata.is_dir() {
         return Err(NiralisdError::WorkerUnavailable(path.to_path_buf()));
     }
-    if metadata.uid() != 0 || metadata.permissions().mode() & 0o022 != 0 {
+    if !has_trusted_owner_and_permissions(metadata.uid(), metadata.permissions().mode()) {
         return Err(NiralisdError::WorkerUntrusted(path.to_path_buf()));
     }
     Ok(())
+}
+
+fn has_trusted_owner_and_permissions(uid: u32, mode: u32) -> bool {
+    uid == 0 && mode & 0o022 == 0
 }
 
 #[cfg(test)]
@@ -174,21 +178,16 @@ mod tests {
 
     #[test]
     fn rejects_untrusted_permissions_in_pam_mode() {
-        let dir = tempdir().expect("tempdir should exist");
-        let worker = dir.path().join("worker");
-        std::fs::write(&worker, b"binary").expect("worker should be written");
-        std::fs::set_permissions(&worker, std::fs::Permissions::from_mode(0o777))
-            .expect("permissions should apply");
+        assert!(!has_trusted_owner_and_permissions(0, 0o777));
+    }
 
-        let mut config = Config::default();
-        config.session.launcher = SessionLauncherBackend::Worker;
-        config.session.worker_path = worker;
-        config.auth.backend = AuthBackend::Pam;
+    #[test]
+    fn rejects_non_root_owned_worker_in_trust_policy() {
+        assert!(!has_trusted_owner_and_permissions(1000, 0o755));
+    }
 
-        let error = match build_session_launcher(&config) {
-            Ok(_) => panic!("world-writable worker should fail in pam mode"),
-            Err(error) => error,
-        };
-        assert!(matches!(error, NiralisdError::WorkerUntrusted(_)));
+    #[test]
+    fn accepts_root_owned_non_writable_worker_in_trust_policy() {
+        assert!(has_trusted_owner_and_permissions(0, 0o755));
     }
 }
