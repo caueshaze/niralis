@@ -104,8 +104,8 @@ pub struct SessionConfig {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionLauncherBackend {
-    #[default]
     Mock,
+    #[default]
     Worker,
 }
 
@@ -166,7 +166,7 @@ impl Default for Config {
             session: SessionConfig {
                 default: "niri".to_owned(),
                 command: "niri-session".to_owned(),
-                launcher: SessionLauncherBackend::Mock,
+                launcher: SessionLauncherBackend::Worker,
                 worker_path: default_worker_path(),
                 worker_timeout_seconds: default_worker_timeout_seconds(),
             },

@@ -141,6 +141,10 @@ Known limitations:
   process;
 - session close happens through `Client` drop, so close failures are not
   observable through the current API;
+- in `pam = "0.8.0"`, `open_session()` can partially succeed before
+  `PAM_REINITIALIZE_CRED` fails; in that edge case the crate may not mark the
+  session as open for later `Drop` cleanup, so Niralis documents and accepts
+  that upstream limitation in this phase;
 - internal `open_session()` paths may panic during environment initialization;
   the worker catches unwind panics, but this does not protect builds compiled
   with `panic = "abort"`.

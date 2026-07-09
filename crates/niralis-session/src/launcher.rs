@@ -1,15 +1,12 @@
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
-use std::sync::mpsc::{self, Receiver};
-use std::thread::{self, JoinHandle};
+use std::process::ExitStatus;
 use std::time::{Duration, Instant};
 
-use tracing::{debug, info};
+use tracing::debug;
 
 use crate::{
-    worker_io::{read_envelope, write_envelope},
-    SessionError, SessionLauncher, SessionRequest, StartedSession, WorkerRequest, WorkerResponse,
-    WorkerSecret,
+    worker_attempt::WorkerAttempt, SessionError, SessionLauncher, SessionRequest, StartedSession,
+    WorkerEnvelope, WorkerRequest, WorkerResponse, WorkerSecret,
 };
 
 #[derive(Debug, Clone)]
@@ -55,28 +52,28 @@ impl WorkerSessionLauncher {
         expected: StartedSession,
     ) -> Result<StartedSession, SessionError> {
         let deadline = Instant::now() + self.timeout;
-        let mut child = spawn_worker(&self.worker_path)?;
-        let stdin = child.stdin.take().ok_or(SessionError::WorkerIoFailed)?;
-        let stdout = child.stdout.take().ok_or(SessionError::WorkerIoFailed)?;
-        let (writer, writer_rx) = spawn_writer(stdin, request);
-        let (reader, reader_rx) = spawn_reader(stdout);
-
-        let writer_result = wait_thread_result(&writer_rx, deadline, &mut child)?;
-        let response_result = wait_thread_result(&reader_rx, deadline, &mut child)?;
+        let mut attempt = WorkerAttempt::spawn(&self.worker_path, request)?;
+        let writer_result = attempt.wait_writer(deadline);
+        let response_result = attempt.wait_reader(deadline);
         let status_result = if response_result.is_ok() {
-            Some(wait_for_exit(&mut child, deadline))
+            attempt.wait_child(deadline)
         } else {
-            None
+            Ok(None)
         };
 
-        join_thread(writer);
-        join_thread(reader);
+        let writer_failed = matches!(writer_result, Err(SessionError::WorkerIoFailed));
+        let reader_failed = matches!(response_result, Err(SessionError::WorkerIoFailed));
+        let status_failed = matches!(status_result, Err(SessionError::WorkerIoFailed));
+        if writer_failed || reader_failed || status_failed {
+            attempt.kill_and_reap();
+        }
+        attempt.finish();
 
-        if !matches!(writer_result, Err(SessionError::WorkerIoFailed)) {
+        if !writer_failed {
             writer_result?;
         }
         let response = response_result?;
-        let status = status_result.ok_or(SessionError::WorkerProtocolFailed)??;
+        let status = status_result?.ok_or(SessionError::WorkerProtocolFailed)?;
         debug!(?status, "session worker exited");
         map_response(response, status, expected)
     }
@@ -100,84 +97,8 @@ fn expected_started_session(request: &SessionRequest) -> StartedSession {
     }
 }
 
-fn spawn_worker(worker_path: &Path) -> Result<Child, SessionError> {
-    let child = Command::new(worker_path)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .env_clear()
-        .current_dir("/")
-        .spawn()
-        .map_err(|_| SessionError::WorkerSpawnFailed)?;
-    info!(path = %worker_path.display(), "spawned session worker");
-    Ok(child)
-}
-
-fn spawn_writer(
-    stdin: ChildStdin,
-    request: WorkerRequest,
-) -> (JoinHandle<()>, Receiver<Result<(), SessionError>>) {
-    let (sender, receiver) = mpsc::channel();
-    let handle = thread::spawn(move || {
-        let mut stdin = stdin;
-        let _ = sender.send(write_envelope(&mut stdin, request));
-    });
-    (handle, receiver)
-}
-
-fn spawn_reader(
-    stdout: ChildStdout,
-) -> (
-    JoinHandle<()>,
-    Receiver<Result<crate::WorkerEnvelope<WorkerResponse>, SessionError>>,
-) {
-    let (sender, receiver) = mpsc::channel();
-    let handle = thread::spawn(move || {
-        let mut stdout = stdout;
-        let _ = sender.send(read_envelope::<WorkerResponse, _>(&mut stdout));
-    });
-    (handle, receiver)
-}
-
-fn wait_thread_result<T>(
-    receiver: &Receiver<Result<T, SessionError>>,
-    deadline: Instant,
-    child: &mut Child,
-) -> Result<Result<T, SessionError>, SessionError> {
-    match receiver.recv_timeout(remaining(deadline)?) {
-        Ok(result) => Ok(result),
-        Err(mpsc::RecvTimeoutError::Timeout) => {
-            kill_and_reap(child);
-            Err(SessionError::WorkerTimedOut)
-        }
-        Err(mpsc::RecvTimeoutError::Disconnected) => {
-            let _ = reap_child(child);
-            Err(SessionError::WorkerIoFailed)
-        }
-    }
-}
-
-fn remaining(deadline: Instant) -> Result<Duration, SessionError> {
-    deadline
-        .checked_duration_since(Instant::now())
-        .ok_or(SessionError::WorkerTimedOut)
-}
-
-fn wait_for_exit(child: &mut Child, deadline: Instant) -> Result<ExitStatus, SessionError> {
-    loop {
-        if let Some(status) = child.try_wait().map_err(|_| SessionError::WorkerIoFailed)? {
-            return Ok(status);
-        }
-        if Instant::now() >= deadline {
-            kill_and_reap(child);
-            return Err(SessionError::WorkerTimedOut);
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
-}
-
 fn map_response(
-    response: crate::WorkerEnvelope<WorkerResponse>,
+    response: WorkerEnvelope<WorkerResponse>,
     status: ExitStatus,
     expected: StartedSession,
 ) -> Result<StartedSession, SessionError> {
@@ -197,25 +118,4 @@ fn map_response(
         WorkerResponse::Rejected { .. } if !status.success() => Err(SessionError::WorkerRejected),
         _ => Err(SessionError::WorkerProtocolFailed),
     }
-}
-
-fn kill_and_reap(child: &mut Child) {
-    match child.try_wait() {
-        Ok(Some(_)) => return,
-        Ok(None) | Err(_) => {}
-    }
-
-    let _ = child.kill();
-    let _ = reap_child(child);
-}
-
-fn reap_child(child: &mut Child) -> Result<(), SessionError> {
-    child
-        .wait()
-        .map(|_| ())
-        .map_err(|_| SessionError::WorkerIoFailed)
-}
-
-fn join_thread(handle: JoinHandle<()>) {
-    let _ = handle.join();
 }

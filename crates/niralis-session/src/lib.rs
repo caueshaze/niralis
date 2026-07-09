@@ -6,6 +6,7 @@ mod secret;
 #[cfg(test)]
 mod tests;
 mod types;
+mod worker_attempt;
 mod worker_io;
 
 pub use error::SessionError;

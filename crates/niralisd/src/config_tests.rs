@@ -67,6 +67,10 @@ fn parses_mock_backend_shape() {
 #[test]
 fn default_backend_is_pam() {
     assert_eq!(Config::default().auth.backend, AuthBackend::Pam);
+    assert_eq!(
+        Config::default().session.launcher,
+        SessionLauncherBackend::Worker
+    );
 }
 
 #[test]
@@ -98,7 +102,7 @@ fn missing_backend_and_discovery_sections_use_defaults() {
         config.sessions.wayland_dirs[0],
         PathBuf::from("/usr/share/wayland-sessions")
     );
-    assert_eq!(config.session.launcher, SessionLauncherBackend::Mock);
+    assert_eq!(config.session.launcher, SessionLauncherBackend::Worker);
     assert_eq!(
         config.session.worker_path,
         PathBuf::from("/usr/libexec/niralis-session-worker")
