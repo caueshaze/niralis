@@ -163,7 +163,16 @@ impl SessionChildRunner for StubChildRunner {
             applied_credentials: AppliedCredentials {
                 uid: expectation.target_credentials.uid,
                 gid: expectation.target_credentials.gid,
-                supplementary_gids: expectation.target_credentials.supplementary_gids,
+                supplementary_gids: expectation.target_credentials.supplementary_gids.clone(),
+            },
+            credential_proof: crate::session_child::SessionChildCredentialProof {
+                real_uid: expectation.target_credentials.uid,
+                effective_uid: expectation.target_credentials.uid,
+                saved_uid: expectation.target_credentials.uid,
+                real_gid: expectation.target_credentials.gid,
+                effective_gid: expectation.target_credentials.gid,
+                saved_gid: expectation.target_credentials.gid,
+                supplementary_gids: expectation.target_credentials.supplementary_gids.clone(),
             },
             isolation_proof: PostDropIsolationProof {
                 capabilities: CapabilityState {

@@ -15,6 +15,17 @@ pub struct SessionChildUnixCredentials {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionChildCredentialProof {
+    pub real_uid: u32,
+    pub effective_uid: u32,
+    pub saved_uid: u32,
+    pub real_gid: u32,
+    pub effective_gid: u32,
+    pub saved_gid: u32,
+    pub supplementary_gids: Vec<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionChildUnixPath {
     pub bytes: Vec<u8>,
 }
@@ -165,6 +176,7 @@ pub enum SessionChildResponse {
         session_id: String,
         child_pid: u32,
         applied_credentials: SessionChildUnixCredentials,
+        credential_proof: SessionChildCredentialProof,
         isolation_proof: SessionChildIsolationProof,
         process_identity: SessionProcessIdentityProof,
         runtime_environment: SessionRuntimeEnvironmentProof,

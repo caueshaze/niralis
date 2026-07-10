@@ -279,6 +279,15 @@ fn ready_binding_rejects_each_identity_or_credential_mismatch() {
             session_id,
             child_pid,
             applied_credentials,
+            credential_proof: super::protocol::SessionChildCredentialProof {
+                real_uid: 1000,
+                effective_uid: 1000,
+                saved_uid: 1000,
+                real_gid: 1000,
+                effective_gid: 1000,
+                saved_gid: 1000,
+                supplementary_gids: vec![10, 20],
+            },
             isolation_proof: proof(),
             process_identity: SessionProcessIdentityProof {
                 pid: child_pid,

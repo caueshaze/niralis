@@ -1,8 +1,8 @@
 use niralis_session_worker::{
-    LinuxPostDropAuditor, PostDropAuditor, SessionChildEnvelope, SessionChildIsolationProof,
-    SessionChildResponse, SessionChildUnixCredentials, SessionChildUnixPath,
-    SessionProcessIdentityProof, SessionRuntimeEnvironmentProof, SESSION_CHILD_PROTOCOL_VERSION,
-    SESSION_EXEC_PROBE_VERSION,
+    LinuxPostDropAuditor, PostDropAuditor, SessionChildCredentialProof, SessionChildEnvelope,
+    SessionChildIsolationProof, SessionChildResponse, SessionChildUnixCredentials,
+    SessionChildUnixPath, SessionProcessIdentityProof, SessionRuntimeEnvironmentProof,
+    SESSION_CHILD_PROTOCOL_VERSION, SESSION_EXEC_PROBE_VERSION,
 };
 use std::io::Write;
 
@@ -23,6 +23,18 @@ fn main() {
         std::process::exit(1);
     }
     groups.truncate(count as usize);
+    groups.sort_unstable();
+    groups.dedup();
+    let gid = unsafe { libc::getgid() as u32 };
+    groups.retain(|group| *group as u32 != gid);
+    let groups: Vec<u32> = groups.into_iter().map(|group| group as u32).collect();
+    let (mut ruid, mut euid, mut suid) = (0, 0, 0);
+    let (mut rgid, mut egid, mut sgid) = (0, 0, 0);
+    if unsafe { libc::getresuid(&mut ruid, &mut euid, &mut suid) } != 0
+        || unsafe { libc::getresgid(&mut rgid, &mut egid, &mut sgid) } != 0
+    {
+        std::process::exit(1);
+    }
     let path = |name: &str| {
         std::env::var_os(name)
             .and_then(|p| SessionChildUnixPath::new(std::path::Path::new(&p)).ok())
@@ -55,16 +67,31 @@ fn main() {
             session_id,
             child_pid: pid,
             applied_credentials: SessionChildUnixCredentials {
-                uid: unsafe { libc::getuid() },
-                gid: unsafe { libc::getgid() },
-                supplementary_gids: groups.into_iter().map(|g| g as u32).collect(),
+                uid: ruid,
+                gid: rgid,
+                supplementary_gids: groups.clone(),
+            },
+            credential_proof: SessionChildCredentialProof {
+                real_uid: ruid,
+                effective_uid: euid,
+                saved_uid: suid,
+                real_gid: rgid,
+                effective_gid: egid,
+                saved_gid: sgid,
+                supplementary_gids: groups,
             },
             isolation_proof: SessionChildIsolationProof::from(&audit),
             process_identity: SessionProcessIdentityProof { pid, sid, pgid },
             runtime_environment: SessionRuntimeEnvironmentProof {
                 home,
-                user: username.clone(),
-                logname: username,
+                user: match std::env::var("USER") {
+                    Ok(value) => value,
+                    Err(_) => std::process::exit(1),
+                },
+                logname: match std::env::var("LOGNAME") {
+                    Ok(value) => value,
+                    Err(_) => std::process::exit(1),
+                },
                 shell,
                 path: std::env::var("PATH").unwrap_or_default(),
                 session_type: std::env::var("XDG_SESSION_TYPE").unwrap_or_default(),

@@ -1,8 +1,9 @@
 mod protocol;
 pub use protocol::{
-    SessionChildEnvelope, SessionChildErrorCode, SessionChildIsolationProof, SessionChildResponse,
-    SessionChildUnixCredentials, SessionProcessIdentityProof, SessionRuntimeEnvironmentProof,
-    SESSION_CHILD_PROTOCOL_VERSION, SESSION_EXEC_PROBE_VERSION,
+    SessionChildCredentialProof, SessionChildEnvelope, SessionChildErrorCode,
+    SessionChildIsolationProof, SessionChildResponse, SessionChildUnixCredentials,
+    SessionProcessIdentityProof, SessionRuntimeEnvironmentProof, SESSION_CHILD_PROTOCOL_VERSION,
+    SESSION_EXEC_PROBE_VERSION,
 };
 pub use protocol::{SessionChildRuntimeContext, SessionChildUnixPath};
 
@@ -43,6 +44,7 @@ pub struct SessionChildReport {
     pub process_identity: ProcessIdentityProof,
     pub runtime_environment: RuntimeEnvironmentProof,
     pub exec_probe_version: u32,
+    pub credential_proof: SessionChildCredentialProof,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -178,6 +180,7 @@ fn validate_ready_response(
             session_id,
             child_pid,
             applied_credentials,
+            credential_proof,
             isolation_proof,
             process_identity,
             runtime_environment,
@@ -189,6 +192,16 @@ fn validate_ready_response(
                 == SessionChildUnixCredentials::from(&expectation.target_credentials)
             && validate_isolation_proof(&PostDropIsolationProof::from(isolation_proof.clone()))
                 .is_ok()
+            && credential_proof.real_uid == expectation.target_credentials.uid
+            && credential_proof.effective_uid == expectation.target_credentials.uid
+            && credential_proof.saved_uid == expectation.target_credentials.uid
+            && credential_proof.real_gid == expectation.target_credentials.gid
+            && credential_proof.effective_gid == expectation.target_credentials.gid
+            && credential_proof.saved_gid == expectation.target_credentials.gid
+            && normalized_groups(
+                credential_proof.supplementary_gids.clone(),
+                expectation.target_credentials.gid,
+            ) == expectation.target_credentials.supplementary_gids
             && exec_probe_version == SESSION_EXEC_PROBE_VERSION
             && process_identity.pid == pid
             && process_identity.sid == pid
@@ -226,11 +239,19 @@ fn validate_ready_response(
                     cwd: runtime_environment.cwd,
                 },
                 exec_probe_version,
+                credential_proof,
             })
         }
         SessionChildResponse::Rejected { .. } => Err(SessionChildError::ProtocolFailed),
         SessionChildResponse::Ready { .. } => Err(SessionChildError::ProtocolFailed),
     }
+}
+
+fn normalized_groups(mut groups: Vec<u32>, primary_gid: u32) -> Vec<u32> {
+    groups.sort_unstable();
+    groups.dedup();
+    groups.retain(|gid| *gid != primary_gid);
+    groups
 }
 
 pub const DEFAULT_SESSION_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
@@ -559,7 +580,16 @@ pub(crate) fn run_child_process_with_dependencies(
             canonical_username: canonical_username.clone(),
             session_id,
             child_pid,
-            applied_credentials,
+            applied_credentials: applied_credentials.clone(),
+            credential_proof: SessionChildCredentialProof {
+                real_uid: applied_credentials.uid,
+                effective_uid: applied_credentials.uid,
+                saved_uid: applied_credentials.uid,
+                real_gid: applied_credentials.gid,
+                effective_gid: applied_credentials.gid,
+                saved_gid: applied_credentials.gid,
+                supplementary_gids: applied_credentials.supplementary_gids.clone(),
+            },
             isolation_proof: SessionChildIsolationProof::from(&proof),
             process_identity: SessionProcessIdentityProof {
                 pid: child_pid,
