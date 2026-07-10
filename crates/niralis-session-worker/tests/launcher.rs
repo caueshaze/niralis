@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use niralis_protocol::{SessionInfo, SessionKind};
 use niralis_session::{
-    SessionError, SessionLauncher, SessionRequest, StartedSession, WorkerSecret,
+    SessionError, SessionExecPlan, SessionLauncher, SessionRequest, StartedSession, WorkerSecret,
     WorkerSessionLauncher,
 };
 
@@ -15,6 +15,14 @@ fn request() -> SessionRequest {
             name: "Niri".to_owned(),
             kind: SessionKind::Wayland,
         },
+    }
+}
+
+fn plan() -> SessionExecPlan {
+    SessionExecPlan {
+        source_path: b"/source.desktop".to_vec(),
+        executable: b"/bin/true".to_vec(),
+        argv: vec![b"true".to_vec()],
     }
 }
 
@@ -82,6 +90,7 @@ fn test_control_smoke_graceful_terminates_owned_runtime() {
     let (started, runtime_id) = launcher
         .start_pam_session_for_test(
             request(),
+            plan(),
             "test".to_owned(),
             WorkerSecret::new("test".to_owned()),
         )
@@ -99,6 +108,7 @@ fn test_control_smoke_stubborn_escalates_after_grace_period() {
     let (_, runtime_id) = launcher
         .start_pam_session_for_test(
             request(),
+            plan(),
             "test".to_owned(),
             WorkerSecret::new("test".to_owned()),
         )
@@ -181,6 +191,7 @@ fn authentication_failed_is_reported() {
     let error = launcher
         .start_pam_session(
             request(),
+            plan(),
             "niralis".to_owned(),
             WorkerSecret::new("secret".to_owned()),
         )
@@ -194,6 +205,7 @@ fn session_failed_is_reported() {
     let error = launcher
         .start_pam_session(
             request(),
+            plan(),
             "niralis".to_owned(),
             WorkerSecret::new("secret".to_owned()),
         )
@@ -207,6 +219,7 @@ fn auth_failure_with_exit_zero_is_protocol_error() {
     let error = launcher
         .start_pam_session(
             request(),
+            plan(),
             "niralis".to_owned(),
             WorkerSecret::new("secret".to_owned()),
         )

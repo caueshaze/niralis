@@ -1,6 +1,6 @@
 use std::io::{Read, Write};
 use std::os::unix::ffi::OsStringExt;
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::io::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -165,6 +165,7 @@ pub fn run_worker_process_with_dependencies<
         }
         WorkerRequest::PamSession {
             request,
+            launch_plan,
             pam_service,
             password,
             session_child_path,
@@ -187,6 +188,7 @@ pub fn run_worker_process_with_dependencies<
             worker_id,
             dependencies.virtual_terminal_allocator,
             dependencies.runtime_dir_validator,
+            launch_plan,
         ),
     }
 }
@@ -214,7 +216,39 @@ fn run_pam_session<
     worker_id: String,
     virtual_terminal_allocator: &dyn VirtualTerminalAllocator,
     runtime_dir_validator: &dyn RuntimeDirValidator,
+    launch_plan: niralis_session::SessionExecPlan,
 ) -> Result<(), SessionError> {
+    if launch_plan.validate().is_err() {
+        write_envelope(
+            writer,
+            WorkerResponse::SessionFailed {
+                code: WorkerSessionFailureCode::LaunchSpecMalformed,
+            },
+        )?;
+        return Err(SessionError::AuthenticatedSessionFailed);
+    }
+    let executable =
+        std::path::PathBuf::from(std::ffi::OsString::from_vec(launch_plan.executable.clone()));
+    let executable_metadata = std::fs::metadata(&executable);
+    let executable_ok = executable_metadata
+        .as_ref()
+        .map(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false);
+    if !executable_ok {
+        write_envelope(
+            writer,
+            WorkerResponse::SessionFailed {
+                code: WorkerSessionFailureCode::ExecutableUnavailable,
+            },
+        )?;
+        return Err(SessionError::AuthenticatedSessionFailed);
+    }
+    info!(
+        source_path = ?launch_plan.source_path,
+        executable = ?launch_plan.executable,
+        argc = launch_plan.argv.len(),
+        "canonical session execution plan accepted"
+    );
     let control_listener = if control_path.as_os_str().is_empty() {
         None
     } else {
@@ -461,6 +495,7 @@ fn run_pam_session<
                     dbus_session_bus_address: None,
                     imported_locale: pam_environment.imported_locale,
                     probe_path,
+                    exec_plan: launch_plan,
                 },
                 _ => {
                     drop(transaction);

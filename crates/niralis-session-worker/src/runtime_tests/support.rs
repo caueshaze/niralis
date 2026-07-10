@@ -298,6 +298,7 @@ impl SessionChildRunner for StubChildRunner {
                 forbidden_variables_present: Vec::new(),
                 user_bus_connected: true,
                 cwd: expectation.runtime.home.clone(),
+                exec_plan: expectation.runtime.exec_plan.clone(),
             },
             exec_probe_version: crate::session_child::SESSION_EXEC_PROBE_VERSION,
             terminal_proof: expectation.terminal.as_ref().map(|terminal| {
@@ -355,6 +356,11 @@ pub(super) fn request() -> WorkerEnvelope<WorkerRequest> {
             session_probe_path: "/usr/libexec/niralis-session-probe".into(),
             control_path: std::path::PathBuf::new(),
             worker_id: String::new(),
+            launch_plan: niralis_session::SessionExecPlan {
+                source_path: b"/source.desktop".to_vec(),
+                executable: b"/bin/true".to_vec(),
+                argv: vec![b"true".to_vec()],
+            },
         },
     }
 }

@@ -1,4 +1,5 @@
-use niralis_session::{SessionRequest, StartedSession, WorkerSessionLauncher};
+use niralis_session::{SessionExecPlan, SessionRequest, StartedSession, WorkerSessionLauncher};
+use std::os::unix::ffi::OsStrExt;
 
 use super::{into_worker_secret, map_session_error, LoginAttempt, LoginBackend, LoginBackendError};
 
@@ -23,6 +24,26 @@ impl LoginBackend for PamWorkerLoginBackend {
                 SessionRequest {
                     username: attempt.username,
                     session: attempt.session,
+                },
+                SessionExecPlan {
+                    source_path: attempt
+                        .launch_spec
+                        .source_path
+                        .as_os_str()
+                        .as_bytes()
+                        .to_vec(),
+                    executable: attempt
+                        .launch_spec
+                        .executable
+                        .as_os_str()
+                        .as_bytes()
+                        .to_vec(),
+                    argv: attempt
+                        .launch_spec
+                        .argv
+                        .iter()
+                        .map(|arg| arg.as_bytes().to_vec())
+                        .collect(),
                 },
                 self.pam_service.clone(),
                 into_worker_secret(attempt.password),

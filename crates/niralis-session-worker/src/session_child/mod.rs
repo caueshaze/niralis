@@ -1,24 +1,25 @@
 mod protocol;
 pub use protocol::{
-    SessionChildCredentialProof, SessionChildEnvelope, SessionChildErrorCode,
-    SessionChildIsolationProof, SessionChildResponse, SessionChildTerminalContext,
-    SessionChildTerminalProof, SessionChildUnixCredentials, SessionProcessIdentityProof,
-    SessionRuntimeEnvironmentProof, SESSION_CHILD_PROTOCOL_VERSION, SESSION_EXEC_PROBE_VERSION,
+    FinalExecFailure, SessionChildCommit, SessionChildCredentialProof, SessionChildEnvelope,
+    SessionChildErrorCode, SessionChildIsolationProof, SessionChildResponse,
+    SessionChildTerminalContext, SessionChildTerminalProof, SessionChildUnixCredentials,
+    SessionProcessIdentityProof, SessionRuntimeEnvironmentProof, SESSION_CHILD_PROTOCOL_VERSION,
+    SESSION_EXEC_PROBE_VERSION,
 };
 pub use protocol::{SessionChildRuntimeContext, SessionChildUnixPath};
 
 use std::io::{Read, Write};
-use std::os::fd::OwnedFd;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::{
     mpsc::{self, Receiver},
     Arc, Mutex,
 };
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::isolation::{
     validate_isolation_proof, validate_isolation_proof_with_allowed_fds, InheritedFdSanitizer,
@@ -80,6 +81,7 @@ pub struct RuntimeEnvironmentProof {
     pub forbidden_variables_present: Vec<String>,
     pub user_bus_connected: bool,
     pub cwd: SessionChildUnixPath,
+    pub exec_plan: niralis_session::SessionExecPlan,
 }
 
 #[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
@@ -227,17 +229,11 @@ impl SessionChildRunner for ProcessSessionChildRunner {
             .take();
         let mut attempt = SessionChildAttempt::spawn(&self.path, payload, terminal_fd)?;
         let pid = attempt.child.as_ref().expect("child exists").id();
-        let writer_result = attempt.wait_writer(deadline);
-        let reader_result = match &writer_result {
-            Ok(()) => attempt.wait_reader(deadline),
-            Err(error) => Err(error.clone()),
-        };
-        let needs_cleanup = writer_result.is_err() || reader_result.is_err();
-        if needs_cleanup {
+        let reader_result = attempt.wait_reader(deadline);
+        if reader_result.is_err() {
             attempt.kill_and_reap();
         }
         attempt.finish();
-        writer_result?;
         let bytes = reader_result?;
         let response: SessionChildEnvelope<SessionChildResponse> = parse_response(&bytes)?;
         if response.version != SESSION_CHILD_PROTOCOL_VERSION {
@@ -256,6 +252,26 @@ impl SessionChildRunner for ProcessSessionChildRunner {
             return Err(SessionChildError::ExitFailed);
         }
         let report = validate_ready_response(response.message, &expectation, pid)?;
+        attempt.send_commit(deadline)?;
+        match attempt.wait_exec_status(deadline)? {
+            ExecStatus::Success => {}
+            ExecStatus::Failure(failure) => {
+                warn!(stage = %failure.stage, errno = failure.errno, "final execve failed");
+                attempt.kill_and_reap();
+                return Err(SessionChildError::ExitFailed);
+            }
+        }
+        if attempt
+            .child
+            .as_mut()
+            .expect("child exists")
+            .try_wait()
+            .map_err(|_| SessionChildError::IoFailed)?
+            .is_some()
+        {
+            attempt.kill_and_reap();
+            return Err(SessionChildError::ExitFailed);
+        }
         let child = attempt.take_child();
         let pgid = report.process_identity.pgid;
         *self
@@ -395,6 +411,8 @@ fn validate_ready_response(
             && runtime_environment.logname == expectation.canonical_username
             && runtime_environment.path == DEFAULT_SESSION_PATH
             && runtime_environment.cwd == expectation.runtime.home
+            && (expectation.runtime.session_id.is_empty()
+                || runtime_environment.exec_plan == expectation.runtime.exec_plan)
             && match (&expectation.terminal, &terminal_proof) {
                 (None, None) => true,
                 (Some(expected), Some(actual)) => {
@@ -442,6 +460,7 @@ fn validate_ready_response(
                     forbidden_variables_present: runtime_environment.forbidden_variables_present,
                     user_bus_connected: runtime_environment.user_bus_connected,
                     cwd: runtime_environment.cwd,
+                    exec_plan: runtime_environment.exec_plan,
                 },
                 exec_probe_version,
                 credential_proof,
@@ -464,10 +483,10 @@ pub const DEFAULT_SESSION_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
 
 struct SessionChildAttempt {
     child: Option<Child>,
-    writer: Option<JoinHandle<Result<(), SessionChildError>>>,
-    writer_rx: Receiver<Result<(), SessionChildError>>,
+    stdin: Option<ChildStdin>,
     reader: Option<JoinHandle<()>>,
     response_rx: Receiver<Result<Vec<u8>, SessionChildError>>,
+    status_read: Option<OwnedFd>,
 }
 
 impl SessionChildAttempt {
@@ -483,6 +502,20 @@ impl SessionChildAttempt {
         terminal_fd: Option<OwnedFd>,
     ) -> Result<Self, SessionChildError> {
         let mut command = Command::new(path);
+        let (status_read, status_write) = make_status_pipe()?;
+        let status_raw = status_write.as_raw_fd();
+        unsafe {
+            use std::os::unix::process::CommandExt;
+            command.pre_exec(move || {
+                if libc::dup2(status_raw, 4) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::fcntl(4, libc::F_SETFD, libc::FD_CLOEXEC) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
         let terminal_fd_keepalive = terminal_fd;
         if let Some(terminal_fd) = terminal_fd_keepalive.as_ref() {
             let source_fd = std::os::fd::AsRawFd::as_raw_fd(terminal_fd);
@@ -522,37 +555,46 @@ impl SessionChildAttempt {
                 return Err(SessionChildError::IoFailed);
             }
         };
-        let (writer_tx, writer_rx) = mpsc::channel();
-        let writer = thread::spawn(move || {
-            let mut stdin = stdin;
-            let result = stdin
-                .write_all(&payload)
-                .and_then(|_| stdin.write_all(b"\n"))
-                .and_then(|_| stdin.flush())
-                .map_err(|_| SessionChildError::IoFailed);
-            drop(stdin);
-            let _ = writer_tx.send(result.clone());
-            result
-        });
+        let mut stdin = stdin;
+        stdin
+            .write_all(&payload)
+            .and_then(|_| stdin.write_all(b"\n"))
+            .and_then(|_| stdin.flush())
+            .map_err(|_| SessionChildError::IoFailed)?;
         let (response_tx, response_rx) = mpsc::channel();
         let reader = thread::spawn(move || {
             let _ = response_tx.send(read_child_response(&mut stdout));
         });
         Ok(Self {
             child: Some(child),
-            writer: Some(writer),
-            writer_rx,
+            stdin: Some(stdin),
             reader: Some(reader),
             response_rx,
+            status_read: Some(status_read),
         })
-    }
-
-    fn wait_writer(&self, deadline: Instant) -> Result<(), SessionChildError> {
-        wait_result(&self.writer_rx, deadline)
     }
 
     fn wait_reader(&self, deadline: Instant) -> Result<Vec<u8>, SessionChildError> {
         wait_result(&self.response_rx, deadline)
+    }
+
+    fn send_commit(&mut self, _deadline: Instant) -> Result<(), SessionChildError> {
+        let mut stdin = self.stdin.take().ok_or(SessionChildError::IoFailed)?;
+        let message = SessionChildEnvelope {
+            version: SESSION_CHILD_PROTOCOL_VERSION,
+            message: SessionChildCommit::Exec,
+        };
+        serde_json::to_writer(&mut stdin, &message).map_err(|_| SessionChildError::IoFailed)?;
+        stdin
+            .write_all(b"\n")
+            .map_err(|_| SessionChildError::IoFailed)?;
+        stdin.flush().map_err(|_| SessionChildError::IoFailed)
+    }
+
+    fn wait_exec_status(&mut self, deadline: Instant) -> Result<ExecStatus, SessionChildError> {
+        let fd = self.status_read.take().ok_or(SessionChildError::IoFailed)?;
+        let timeout = remaining(deadline)?;
+        read_exec_status(fd, timeout)
     }
 
     fn kill_and_reap(&mut self) {
@@ -562,13 +604,52 @@ impl SessionChildAttempt {
     }
 
     fn finish(&mut self) {
-        if let Some(writer) = self.writer.take() {
-            let _ = writer.join();
-        }
         if let Some(reader) = self.reader.take() {
             let _ = reader.join();
         }
     }
+}
+
+fn make_status_pipe() -> Result<(OwnedFd, OwnedFd), SessionChildError> {
+    let mut fds = [0; 2];
+    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+        return Err(SessionChildError::IoFailed);
+    }
+    Ok((unsafe { OwnedFd::from_raw_fd(fds[0]) }, unsafe {
+        OwnedFd::from_raw_fd(fds[1])
+    }))
+}
+
+enum ExecStatus {
+    Success,
+    Failure(FinalExecFailure),
+}
+
+fn read_exec_status(fd: OwnedFd, timeout: Duration) -> Result<ExecStatus, SessionChildError> {
+    let mut pollfd = libc::pollfd {
+        fd: fd.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let millis = timeout.as_millis().min(i32::MAX as u128) as i32;
+    let ready = unsafe { libc::poll(&mut pollfd, 1, millis) };
+    if ready == 0 {
+        return Err(SessionChildError::TimedOut);
+    }
+    if ready < 0 || pollfd.revents & (libc::POLLERR | libc::POLLNVAL) != 0 {
+        return Err(SessionChildError::IoFailed);
+    }
+    let mut payload = [0_u8; 512];
+    let count = unsafe { libc::read(fd.as_raw_fd(), payload.as_mut_ptr().cast(), payload.len()) };
+    if count == 0 {
+        return Ok(ExecStatus::Success);
+    }
+    if count < 0 {
+        return Err(SessionChildError::IoFailed);
+    }
+    let failure = serde_json::from_slice::<FinalExecFailure>(&payload[..count as usize])
+        .map_err(|_| SessionChildError::ProtocolFailed)?;
+    Ok(ExecStatus::Failure(failure))
 }
 
 impl Drop for SessionChildAttempt {
@@ -670,21 +751,17 @@ pub(crate) fn run_child_process_with_dropper(
 }
 
 pub(crate) fn run_child_process_with_dependencies(
-    reader: impl Read,
+    mut reader: impl Read,
     mut writer: impl Write,
     dropper: &impl PrivilegeDropper,
     fd_sanitizer: &impl InheritedFdSanitizer,
     auditor: &impl PostDropAuditor,
     child_pid: u32,
 ) -> i32 {
-    let mut bytes = Vec::new();
-    if reader
-        .take((protocol::MAX_SESSION_CHILD_MESSAGE_BYTES + 1) as u64)
-        .read_to_end(&mut bytes)
-        .is_err()
-    {
-        return 1;
-    }
+    let bytes = match read_child_response(&mut reader) {
+        Ok(bytes) => bytes,
+        Err(_) => return 1,
+    };
     let request: SessionChildEnvelope<SessionChildRequest> = match parse_request(&bytes) {
         Ok(request) => request,
         Err(code) => {
@@ -822,64 +899,14 @@ pub(crate) fn run_child_process_with_dependencies(
             let _ = write_rejection(&mut writer, SessionChildErrorCode::HomeDirectoryUnavailable);
             return 1;
         }
-        let probe = match runtime.probe_path.to_path_buf() {
-            Ok(path) if path.is_absolute() => path,
-            _ => {
-                let _ = write_rejection(&mut writer, SessionChildErrorCode::InvalidRuntimeContext);
-                return 1;
-            }
-        };
-        let mut command = std::process::Command::new(probe);
-        command
-            .arg(&canonical_username)
-            .arg(&session_id)
-            .stdin(std::process::Stdio::inherit())
-            .stdout(std::process::Stdio::inherit())
-            .stderr(std::process::Stdio::inherit())
-            .env_clear()
-            .env("HOME", home)
-            .env("USER", &canonical_username)
-            .env("LOGNAME", &canonical_username)
-            .env(
-                "SHELL",
-                runtime.shell.to_path_buf().ok().unwrap_or_default(),
-            )
-            .env("PATH", DEFAULT_SESSION_PATH)
-            .env("XDG_SESSION_TYPE", &runtime.session_type)
-            .env("XDG_SESSION_CLASS", &runtime.session_class)
-            .env("XDG_SESSION_DESKTOP", &runtime.session_desktop)
-            .env("XDG_SESSION_ID", &runtime.session_id)
-            .env(
-                "XDG_RUNTIME_DIR",
-                runtime
-                    .runtime_dir
-                    .to_path_buf()
-                    .map_err(|_| SessionChildErrorCode::InvalidRuntimeContext)
-                    .unwrap(),
-            )
-            .env("XDG_SEAT", &runtime.seat)
-            .env("XDG_VTNR", runtime.vtnr.to_string());
-        if let Some(address) = &runtime.dbus_session_bus_address {
-            command.env("DBUS_SESSION_BUS_ADDRESS", address);
+        if install_runtime_environment(&runtime, &canonical_username).is_err() {
+            let _ = write_rejection(&mut writer, SessionChildErrorCode::InvalidRuntimeContext);
+            return 1;
         }
-        for (key, value) in &runtime.imported_locale {
-            command.env(key, value);
+        if crate::prove_user_bus().is_err() {
+            let _ = write_rejection(&mut writer, SessionChildErrorCode::RuntimeProbeFailed);
+            return 1;
         }
-        if let Some(terminal) = terminal.as_ref() {
-            command
-                .arg("--terminal-seat")
-                .arg(&terminal.seat)
-                .arg("--terminal-vtnr")
-                .arg(terminal.vtnr.to_string())
-                .arg("--terminal-major")
-                .arg(terminal.device_major.to_string())
-                .arg("--terminal-minor")
-                .arg(terminal.device_minor.to_string());
-        }
-        let error = std::os::unix::process::CommandExt::exec(&mut command);
-        let _ = write_rejection(&mut writer, SessionChildErrorCode::ExecFailed);
-        let _ = error;
-        return 1;
     }
     let response = SessionChildEnvelope {
         version: SESSION_CHILD_PROTOCOL_VERSION,
@@ -919,8 +946,9 @@ pub(crate) fn run_child_process_with_dependencies(
                 dbus_session_bus_address: runtime.dbus_session_bus_address.clone(),
                 imported_locale: runtime.imported_locale.clone(),
                 forbidden_variables_present: Vec::new(),
-                user_bus_connected: false,
+                user_bus_connected: true,
                 cwd: runtime.home,
+                exec_plan: runtime.exec_plan.clone(),
             },
             exec_probe_version: SESSION_EXEC_PROBE_VERSION,
             terminal_proof,
@@ -932,7 +960,145 @@ pub(crate) fn run_child_process_with_dependencies(
     {
         return 1;
     }
+    if child_pid == std::process::id() {
+        let commit_bytes = match read_child_response(&mut reader) {
+            Ok(bytes) => bytes,
+            Err(_) => return 1,
+        };
+        let commit: SessionChildEnvelope<SessionChildCommit> =
+            match serde_json::from_slice::<SessionChildEnvelope<SessionChildCommit>>(
+                &commit_bytes[..commit_bytes.len().saturating_sub(1)],
+            ) {
+                Ok(commit) if commit.version == SESSION_CHILD_PROTOCOL_VERSION => commit,
+                _ => return 1,
+            };
+        if !matches!(commit.message, SessionChildCommit::Exec) {
+            return 1;
+        }
+        if exec_final(&runtime.exec_plan).is_err() {
+            let failure = FinalExecFailure {
+                stage: "execve".to_owned(),
+                errno: std::io::Error::last_os_error()
+                    .raw_os_error()
+                    .unwrap_or(libc::EIO),
+            };
+            if let Ok(bytes) = serde_json::to_vec(&failure) {
+                unsafe {
+                    libc::write(4, bytes.as_ptr().cast(), bytes.len());
+                }
+            }
+            return 1;
+        }
+        return 1;
+    }
     0
+}
+
+fn install_runtime_environment(
+    runtime: &SessionChildRuntimeContext,
+    username: &str,
+) -> Result<(), ()> {
+    unsafe {
+        libc::clearenv();
+    }
+    let mut entries = vec![
+        (
+            "HOME".to_owned(),
+            runtime.home.to_path_buf().map_err(|_| ())?,
+        ),
+        ("USER".to_owned(), std::path::PathBuf::from(username)),
+        ("LOGNAME".to_owned(), std::path::PathBuf::from(username)),
+        (
+            "SHELL".to_owned(),
+            runtime.shell.to_path_buf().map_err(|_| ())?,
+        ),
+        (
+            "PATH".to_owned(),
+            std::path::PathBuf::from(DEFAULT_SESSION_PATH),
+        ),
+        (
+            "XDG_SESSION_TYPE".to_owned(),
+            std::path::PathBuf::from(&runtime.session_type),
+        ),
+        (
+            "XDG_SESSION_CLASS".to_owned(),
+            std::path::PathBuf::from(&runtime.session_class),
+        ),
+        (
+            "XDG_SESSION_DESKTOP".to_owned(),
+            std::path::PathBuf::from(&runtime.session_desktop),
+        ),
+        (
+            "XDG_SESSION_ID".to_owned(),
+            std::path::PathBuf::from(&runtime.session_id),
+        ),
+        (
+            "XDG_RUNTIME_DIR".to_owned(),
+            runtime.runtime_dir.to_path_buf().map_err(|_| ())?,
+        ),
+        (
+            "XDG_SEAT".to_owned(),
+            std::path::PathBuf::from(&runtime.seat),
+        ),
+        (
+            "XDG_VTNR".to_owned(),
+            std::path::PathBuf::from(runtime.vtnr.to_string()),
+        ),
+    ];
+    if let Some(address) = &runtime.dbus_session_bus_address {
+        entries.push((
+            "DBUS_SESSION_BUS_ADDRESS".to_owned(),
+            std::path::PathBuf::from(address),
+        ));
+    }
+    for (key, value) in &runtime.imported_locale {
+        entries.push((key.clone(), std::path::PathBuf::from(value)));
+    }
+    use std::os::unix::ffi::OsStrExt;
+    for (key, value) in entries {
+        let key = std::ffi::CString::new(key).map_err(|_| ())?;
+        let value = std::ffi::CString::new(value.as_os_str().as_bytes()).map_err(|_| ())?;
+        if unsafe { libc::setenv(key.as_ptr(), value.as_ptr(), 1) } != 0 {
+            return Err(());
+        }
+    }
+    Ok(())
+}
+
+fn exec_final(plan: &niralis_session::SessionExecPlan) -> Result<(), ()> {
+    plan.validate()?;
+    let executable_path =
+        std::path::PathBuf::from(std::ffi::OsString::from_vec(plan.executable.clone()));
+    use std::os::unix::ffi::OsStringExt;
+    use std::os::unix::fs::PermissionsExt;
+    let metadata = std::fs::metadata(&executable_path).map_err(|_| ())?;
+    if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
+        return Err(());
+    }
+    let executable = std::ffi::CString::new(plan.executable.clone()).map_err(|_| ())?;
+    let args = plan
+        .argv
+        .iter()
+        .map(|arg| std::ffi::CString::new(arg.clone()).map_err(|_| ()))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut argv = args.iter().map(|arg| arg.as_ptr()).collect::<Vec<_>>();
+    argv.push(std::ptr::null());
+    let mut env = Vec::new();
+    for (key, value) in std::env::vars_os() {
+        use std::os::unix::ffi::OsStrExt;
+        let mut bytes = key.as_os_str().as_bytes().to_vec();
+        bytes.push(b'=');
+        bytes.extend_from_slice(value.as_os_str().as_bytes());
+        env.push(std::ffi::CString::new(bytes).map_err(|_| ())?);
+    }
+    let mut envp = env.iter().map(|entry| entry.as_ptr()).collect::<Vec<_>>();
+    envp.push(std::ptr::null());
+    let result = unsafe { libc::execve(executable.as_ptr(), argv.as_ptr(), envp.as_ptr()) };
+    if result == -1 {
+        Err(())
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(test)]

@@ -2,8 +2,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::isolation::PostDropIsolationProof;
 use crate::privilege_drop::{AppliedCredentials, PrivilegeDropTarget};
+use niralis_session::SessionExecPlan;
 
-pub const SESSION_CHILD_PROTOCOL_VERSION: u32 = 7;
+pub const SESSION_CHILD_PROTOCOL_VERSION: u32 = 8;
 pub const SESSION_EXEC_PROBE_VERSION: u32 = 2;
 pub const MAX_SESSION_CHILD_MESSAGE_BYTES: usize = 1024 * 1024;
 
@@ -72,6 +73,7 @@ pub struct SessionChildRuntimeContext {
     #[serde(default)]
     pub imported_locale: Vec<(String, String)>,
     pub probe_path: SessionChildUnixPath,
+    pub exec_plan: SessionExecPlan,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -163,6 +165,7 @@ pub struct SessionRuntimeEnvironmentProof {
     #[serde(default)]
     pub user_bus_connected: bool,
     pub cwd: SessionChildUnixPath,
+    pub exec_plan: SessionExecPlan,
 }
 
 impl From<&PostDropIsolationProof> for SessionChildIsolationProof {
@@ -215,6 +218,18 @@ pub struct SessionChildEnvelope<T> {
     pub message: T,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SessionChildCommit {
+    Exec,
+    Abort,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FinalExecFailure {
+    pub stage: String,
+    pub errno: i32,
+}
+
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SessionChildRequest {
     ApplyCredentials {
@@ -264,5 +279,8 @@ pub enum SessionChildErrorCode {
     TerminalProofFailed,
     ExecFailed,
     RuntimeProbeFailed,
+    CommitTimeout,
+    CommitRejected,
+    FinalExecFailed,
     InternalError,
 }

@@ -6,6 +6,7 @@ mod runtime;
 #[cfg(test)]
 mod runtime_tests;
 mod session_child;
+mod smoke;
 mod user_bus;
 mod vt;
 
@@ -38,6 +39,7 @@ pub use session_child::{
     SessionProcessIdentityProof, SessionRuntimeEnvironmentProof, SESSION_CHILD_PROTOCOL_VERSION,
     SESSION_EXEC_PROBE_VERSION,
 };
+pub use smoke::{authorize_real_graphical_smoke, RealGraphicalSmokeGuardError};
 pub use user_bus::{prove_user_bus, UserBusError};
 pub use vt::{
     LinuxVirtualTerminalAllocator, OwnedVirtualTerminal, VirtualTerminalAllocator,

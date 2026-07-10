@@ -1,11 +1,17 @@
-use std::io::{Read, Write};
+use std::io::Write;
 use std::thread;
 use std::time::Duration;
 
 fn main() {
-    let _ = std::io::stdin().read_to_end(&mut Vec::new());
+    let mut stdin = std::io::stdin();
+    let mut request = Vec::new();
+    let _ = std::io::BufRead::read_until(
+        &mut std::io::BufReader::new(&mut stdin),
+        b'\n',
+        &mut request,
+    );
     let response = serde_json::json!({
-        "version": 7,
+        "version": 8,
         "message": {
             "Ready": {
                 "canonical_username": "canonical-user",
@@ -23,7 +29,7 @@ fn main() {
                     "securebits": 0, "no_new_privs": false, "open_fds": [0, 1, 2]
                 },
                 "process_identity": {"pid": std::process::id(), "sid": std::process::id(), "pgid": std::process::id()},
-                "runtime_environment": {"home": {"bytes": [47,104,111,109,101,47,116,101,115,116]}, "user": "canonical-user", "logname": "canonical-user", "shell": {"bytes": [47,98,105,110,47,98,97,115,104]}, "path": "/usr/local/bin:/usr/bin:/bin", "session_type": "wayland", "cwd": {"bytes": [47,104,111,109,101,47,116,101,115,116]}},
+                "runtime_environment": {"home": {"bytes": [47,104,111,109,101,47,116,101,115,116]}, "user": "canonical-user", "logname": "canonical-user", "shell": {"bytes": [47,98,105,110,47,98,97,115,104]}, "path": "/usr/local/bin:/usr/bin:/bin", "session_type": "wayland", "cwd": {"bytes": [47,104,111,109,101,47,116,101,115,116]}, "exec_plan": {"source_path": [47,115,111,117,114,99,101,46,100,101,115,107,116,111,112], "executable": [47,98,105,110,116,114,117,101], "argv": [[116,114,117,101]]}},
                 "exec_probe_version": 2
             }
         }
@@ -32,5 +38,11 @@ fn main() {
     let _ = serde_json::to_writer(&mut stdout, &response);
     let _ = stdout.write_all(b"\n");
     let _ = stdout.flush();
+    let mut commit = Vec::new();
+    let _ =
+        std::io::BufRead::read_until(&mut std::io::BufReader::new(&mut stdin), b'\n', &mut commit);
+    unsafe {
+        libc::close(4);
+    }
     thread::sleep(Duration::from_secs(5));
 }

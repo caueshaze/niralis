@@ -37,6 +37,11 @@ fn expectation() -> SessionChildExpectation {
             probe_path: SessionChildUnixPath {
                 bytes: b"/probe".to_vec(),
             },
+            exec_plan: niralis_session::SessionExecPlan {
+                source_path: b"/source.desktop".to_vec(),
+                executable: b"/bin/true".to_vec(),
+                argv: vec![b"true".to_vec()],
+            },
         },
         terminal: None,
     }
@@ -72,8 +77,12 @@ fn ready_child_remains_alive_after_startup_proof() {
 
 #[test]
 fn nonzero_child_exit_is_reported_after_handshake() {
-    let error = runner(env!("CARGO_BIN_EXE_fixture-child-exit1"))
+    let runner = runner(env!("CARGO_BIN_EXE_fixture-child-exit1"));
+    runner
         .run_child(expectation())
-        .expect_err("nonzero child should fail");
-    assert_eq!(error, SessionChildError::ExitFailed);
+        .expect("exec acceptance should complete before natural exit");
+    let status = runner
+        .wait_for_child()
+        .expect("natural exit should be reaped");
+    assert!(!status.success());
 }

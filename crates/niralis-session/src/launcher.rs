@@ -372,12 +372,14 @@ impl WorkerSessionLauncher {
     pub fn start_pam_session(
         &self,
         request: SessionRequest,
+        launch_plan: crate::SessionExecPlan,
         pam_service: String,
         password: WorkerSecret,
     ) -> Result<StartedSession, SessionError> {
         self.start_worker(
             WorkerRequest::PamSession {
                 request: request.clone(),
+                launch_plan,
                 pam_service,
                 password,
                 session_child_path: self.session_child_path.clone(),
@@ -394,12 +396,14 @@ impl WorkerSessionLauncher {
     pub fn start_pam_session_for_test(
         &self,
         request: SessionRequest,
+        launch_plan: crate::SessionExecPlan,
         pam_service: String,
         password: WorkerSecret,
     ) -> Result<(StartedSession, RuntimeSessionId), SessionError> {
         self.start_worker(
             WorkerRequest::PamSession {
                 request: request.clone(),
+                launch_plan,
                 pam_service,
                 password,
                 session_child_path: self.session_child_path.clone(),
@@ -442,7 +446,7 @@ impl WorkerSessionLauncher {
                     worker_id: started_worker_id,
                     logind_session_id,
                 } if session == expected
-                    && fixture_version == 1
+                    && matches!(fixture_version, 1 | 2)
                     && (started_worker_id == worker_id || started_worker_id.is_empty())
                     && session_pgid == session_pid =>
                 {

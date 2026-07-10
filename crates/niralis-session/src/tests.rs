@@ -2,8 +2,8 @@ use niralis_protocol::{SessionInfo, SessionKind};
 use std::path::PathBuf;
 
 use crate::{
-    SessionRequest, StartedSession, WorkerEnvelope, WorkerRequest, WorkerResponse, WorkerSecret,
-    WORKER_PROTOCOL_VERSION,
+    SessionExecPlan, SessionRequest, StartedSession, WorkerEnvelope, WorkerRequest, WorkerResponse,
+    WorkerSecret, WORKER_PROTOCOL_VERSION,
 };
 
 fn session(kind: SessionKind) -> SessionInfo {
@@ -40,6 +40,11 @@ fn worker_request_round_trip_preserves_wayland_x11_and_secret() {
                 session_probe_path: PathBuf::from("/usr/libexec/niralis-session-probe"),
                 control_path: PathBuf::from("/run/niralis/worker-control/control.sock"),
                 worker_id: "worker-1".to_owned(),
+                launch_plan: SessionExecPlan {
+                    source_path: b"/usr/share/wayland-sessions/niri.desktop".to_vec(),
+                    executable: b"/usr/bin/niri".to_vec(),
+                    argv: vec![b"niri".to_vec(), b"--session".to_vec()],
+                },
             },
         })
         .expect("request should serialize");
@@ -56,6 +61,7 @@ fn worker_request_round_trip_preserves_wayland_x11_and_secret() {
                 session_probe_path,
                 control_path,
                 worker_id,
+                launch_plan,
             } => {
                 assert_eq!(request.username, "test");
                 assert_eq!(request.session, session(kind));
@@ -74,6 +80,15 @@ fn worker_request_round_trip_preserves_wayland_x11_and_secret() {
                     PathBuf::from("/run/niralis/worker-control/control.sock")
                 );
                 assert_eq!(worker_id, "worker-1");
+                assert_eq!(
+                    launch_plan.argv,
+                    vec![b"niri".to_vec(), b"--session".to_vec()]
+                );
+                assert_eq!(launch_plan.executable, b"/usr/bin/niri".to_vec());
+                assert_eq!(
+                    launch_plan.source_path,
+                    b"/usr/share/wayland-sessions/niri.desktop".to_vec()
+                );
             }
             other => panic!("unexpected request: {other:?}"),
         }

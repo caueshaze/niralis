@@ -13,9 +13,9 @@ pub use error::SessionError;
 pub use launcher::WorkerSessionLauncher;
 pub use mock::MockSessionLauncher;
 pub use protocol::{
-    WorkerControlRequest, WorkerEnvelope, WorkerErrorCode, WorkerRequest, WorkerResponse,
-    WorkerSessionFailureCode, MAX_WORKER_CONTROL_MESSAGE_BYTES, MAX_WORKER_MESSAGE_BYTES,
-    WORKER_CONTROL_PROTOCOL_VERSION, WORKER_PROTOCOL_VERSION,
+    SessionExecPlan, WorkerControlRequest, WorkerEnvelope, WorkerErrorCode, WorkerRequest,
+    WorkerResponse, WorkerSessionFailureCode, MAX_WORKER_CONTROL_MESSAGE_BYTES,
+    MAX_WORKER_MESSAGE_BYTES, WORKER_CONTROL_PROTOCOL_VERSION, WORKER_PROTOCOL_VERSION,
 };
 pub use secret::WorkerSecret;
 #[cfg(any(test, feature = "integration-test-control"))]

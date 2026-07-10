@@ -203,6 +203,11 @@ fn main() {
                 forbidden_variables_present,
                 user_bus_connected: true,
                 cwd,
+                exec_plan: niralis_session::SessionExecPlan {
+                    source_path: b"/legacy-probe.desktop".to_vec(),
+                    executable: b"/bin/true".to_vec(),
+                    argv: vec![b"true".to_vec()],
+                },
             },
             exec_probe_version: SESSION_EXEC_PROBE_VERSION,
             terminal_proof,

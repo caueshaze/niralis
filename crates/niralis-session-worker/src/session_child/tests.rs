@@ -1,8 +1,8 @@
 use super::protocol::{
-    SessionChildEnvelope, SessionChildErrorCode, SessionChildRequest, SessionChildResponse,
-    SessionChildRuntimeContext, SessionChildUnixCredentials, SessionChildUnixPath,
-    SessionProcessIdentityProof, SessionRuntimeEnvironmentProof, SESSION_CHILD_PROTOCOL_VERSION,
-    SESSION_EXEC_PROBE_VERSION,
+    SessionChildCommit, SessionChildEnvelope, SessionChildErrorCode, SessionChildRequest,
+    SessionChildResponse, SessionChildRuntimeContext, SessionChildUnixCredentials,
+    SessionChildUnixPath, SessionProcessIdentityProof, SessionRuntimeEnvironmentProof,
+    SESSION_CHILD_PROTOCOL_VERSION, SESSION_EXEC_PROBE_VERSION,
 };
 use crate::isolation::{CapabilityState, PostDropIsolationProof};
 use crate::privilege_drop::{
@@ -56,6 +56,11 @@ fn runtime() -> SessionChildRuntimeContext {
         imported_locale: Vec::new(),
         probe_path: SessionChildUnixPath {
             bytes: b"/probe".to_vec(),
+        },
+        exec_plan: niralis_session::SessionExecPlan {
+            source_path: b"/source.desktop".to_vec(),
+            executable: b"/bin/true".to_vec(),
+            argv: vec![b"true".to_vec()],
         },
     }
 }
@@ -119,6 +124,18 @@ fn protocol_round_trip_preserves_probe_and_ready() {
     let decoded: SessionChildResponse =
         serde_json::from_str(&encoded).expect("response should deserialize");
     assert_eq!(decoded, rejected);
+}
+
+#[test]
+fn commit_exec_is_bounded_and_round_trips() {
+    let envelope = SessionChildEnvelope {
+        version: SESSION_CHILD_PROTOCOL_VERSION,
+        message: SessionChildCommit::Exec,
+    };
+    let bytes = serde_json::to_vec(&envelope).expect("commit should serialize");
+    let decoded: SessionChildEnvelope<SessionChildCommit> =
+        serde_json::from_slice(&bytes).expect("commit should deserialize");
+    assert_eq!(decoded, envelope);
 }
 
 #[test]
@@ -326,6 +343,7 @@ fn ready_binding_rejects_each_identity_or_credential_mismatch() {
                 forbidden_variables_present: Vec::new(),
                 user_bus_connected: true,
                 cwd: runtime().home,
+                exec_plan: runtime().exec_plan,
             },
             exec_probe_version: SESSION_EXEC_PROBE_VERSION,
             terminal_proof: None,
