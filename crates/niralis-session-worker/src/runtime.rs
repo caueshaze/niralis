@@ -380,7 +380,13 @@ fn run_pam_session<
         Ok(Ok(())) => {
             let pam_environment = match transaction.session_environment() {
                 Ok(environment) => environment,
-                Err(_) => {
+                Err(error) => {
+                    warn!(
+                        username = %canonical_username,
+                        session = %session.session.id,
+                        ?error,
+                        "worker failed to extract PAM graphical runtime environment"
+                    );
                     drop(transaction);
                     write_envelope(
                         writer,

@@ -77,7 +77,7 @@ impl NativePamTransaction {
             let tty = CString::new(tty).map_err(|_| AuthSessionError::OpenFailed)?;
             let tty_item = unsafe { &*tty.as_ptr().cast::<libc::c_void>() };
             if let Err(error) = pam::set_item(self.handle_mut(), PamItemType::TTY, tty_item) {
-                debug!(
+                tracing::warn!(
                     stage = "pam_set_item(PAM_TTY)",
                     ?error,
                     "PAM terminal metadata setup failed"
@@ -91,20 +91,20 @@ impl NativePamTransaction {
         }
         let setcred_result = pam::setcred(self.handle_mut(), PamFlag::Establish_Cred);
         if setcred_result != PamReturnCode::Success {
-            debug!(stage = "pam_setcred_establish", result = ?setcred_result, "PAM credential setup failed");
+            tracing::warn!(stage = "pam_setcred_establish", result = ?setcred_result, "PAM credential setup failed");
             return Err(AuthSessionError::OpenFailed);
         }
         self.credentials_established = true;
         let open_result = pam::open_session(self.handle_mut(), false);
         if open_result != PamReturnCode::Success {
-            debug!(stage = "pam_open_session", result = ?open_result, "PAM session open failed");
+            tracing::warn!(stage = "pam_open_session", result = ?open_result, "PAM session open failed");
             self.cleanup();
             return Err(AuthSessionError::OpenFailed);
         }
         self.session_open = true;
         let reinitialize_result = pam::setcred(self.handle_mut(), PamFlag::Reinitialize_Cred);
         if reinitialize_result != PamReturnCode::Success {
-            debug!(stage = "pam_setcred_reinitialize", result = ?reinitialize_result, "PAM credential reinitialization failed");
+            tracing::warn!(stage = "pam_setcred_reinitialize", result = ?reinitialize_result, "PAM credential reinitialization failed");
             self.cleanup();
             return Err(AuthSessionError::OpenFailed);
         }
@@ -119,7 +119,7 @@ impl NativePamTransaction {
         &mut self,
     ) -> Result<PamSessionEnvironment, AuthSessionError> {
         let session_id = self.pam_value("XDG_SESSION_ID").map_err(|error| {
-            debug!(
+            tracing::warn!(
                 stage = "pam_getenv",
                 key = "XDG_SESSION_ID",
                 ?error,
@@ -132,7 +132,7 @@ impl NativePamTransaction {
         }
         let runtime_dir =
             PamUnixPath::new(self.pam_value_bytes("XDG_RUNTIME_DIR").map_err(|error| {
-                debug!(
+                tracing::warn!(
                     stage = "pam_getenv",
                     key = "XDG_RUNTIME_DIR",
                     ?error,
