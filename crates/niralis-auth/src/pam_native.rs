@@ -4,7 +4,9 @@ use std::ptr::NonNull;
 use pam::{Conversation, PamFlag, PamItemType, PamReturnCode};
 
 use crate::conversation::SilentPasswordConversation;
-use crate::{AuthSessionError, AuthenticatedUser, PamSessionMetadata};
+use crate::{
+    AuthSessionError, AuthenticatedUser, PamSessionEnvironment, PamSessionMetadata, PamUnixPath,
+};
 
 pub(crate) struct NativePamTransaction {
     handle: NonNull<pam::PamHandle>,
@@ -87,6 +89,57 @@ impl NativePamTransaction {
 
     pub(crate) fn password_is_cleared(&self) -> bool {
         self.conversation.password_is_cleared()
+    }
+
+    pub(crate) fn session_environment(
+        &mut self,
+    ) -> Result<PamSessionEnvironment, AuthSessionError> {
+        let session_id = self.pam_value("XDG_SESSION_ID")?;
+        if session_id.is_empty() || session_id.len() > 128 || session_id.as_bytes().contains(&0) {
+            return Err(AuthSessionError::EnvironmentInvalid);
+        }
+        let runtime_dir = PamUnixPath::new(self.pam_value_bytes("XDG_RUNTIME_DIR")?)?;
+        let imported_locale = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            pam::getenvlist(self.handle_mut())
+                .filter(|(key, _)| key == "LANG" || key == "LANGUAGE" || key.starts_with("LC_"))
+                .take(256)
+                .collect::<Vec<_>>()
+        }))
+        .map_err(|_| AuthSessionError::EnvironmentInvalid)?;
+        let total = imported_locale
+            .iter()
+            .map(|(key, value)| key.len() + value.len() + 1)
+            .sum::<usize>();
+        if imported_locale
+            .iter()
+            .any(|(key, value)| key.is_empty() || key.len() > 128 || value.len() > 16 * 1024)
+            || total > 64 * 1024
+        {
+            return Err(AuthSessionError::EnvironmentInvalid);
+        }
+        Ok(PamSessionEnvironment {
+            session_id,
+            runtime_dir,
+            imported_locale,
+        })
+    }
+
+    fn pam_value(&mut self, name: &str) -> Result<String, AuthSessionError> {
+        let bytes = self.pam_value_bytes(name)?;
+        String::from_utf8(bytes).map_err(|_| AuthSessionError::EnvironmentInvalid)
+    }
+
+    fn pam_value_bytes(&mut self, name: &str) -> Result<Vec<u8>, AuthSessionError> {
+        let name = CString::new(name).map_err(|_| AuthSessionError::EnvironmentInvalid)?;
+        let value = unsafe { pam::ffi::pam_getenv(self.handle_mut(), name.as_ptr()) };
+        if value.is_null() {
+            return Err(AuthSessionError::EnvironmentInvalid);
+        }
+        let bytes = unsafe { CStr::from_ptr(value) }.to_bytes().to_vec();
+        if bytes.is_empty() || bytes.len() > 16 * 1024 {
+            return Err(AuthSessionError::EnvironmentInvalid);
+        }
+        Ok(bytes)
     }
     fn handle_mut(&mut self) -> &mut pam::PamHandle {
         unsafe { self.handle.as_mut() }

@@ -6,6 +6,7 @@ mod runtime;
 #[cfg(test)]
 mod runtime_tests;
 mod session_child;
+mod user_bus;
 mod vt;
 
 pub use identity::{
@@ -24,7 +25,10 @@ pub use privilege_drop::{
     AppliedCredentials, LibcPrivilegeDropper, PrivilegeDropError, PrivilegeDropTarget,
     PrivilegeDropper,
 };
-pub use runtime::{run_worker_process, WorkerAuthenticatorFactory};
+pub use runtime::{
+    run_worker_process, LinuxRuntimeDirValidator, RuntimeDirValidationError, RuntimeDirValidator,
+    StubRuntimeDirValidator, WorkerAuthenticatorFactory,
+};
 pub use session_child::{
     ProcessSessionChildRunner, ProcessSessionChildRunnerFactory, SessionChildCredentialProof,
     SessionChildEnvelope, SessionChildError, SessionChildErrorCode, SessionChildExpectation,
@@ -34,6 +38,7 @@ pub use session_child::{
     SessionProcessIdentityProof, SessionRuntimeEnvironmentProof, SESSION_CHILD_PROTOCOL_VERSION,
     SESSION_EXEC_PROBE_VERSION,
 };
+pub use user_bus::{prove_user_bus, UserBusError};
 pub use vt::{
     LinuxVirtualTerminalAllocator, OwnedVirtualTerminal, VirtualTerminalAllocator,
     VirtualTerminalError, VirtualTerminalGuard, VirtualTerminalLease,

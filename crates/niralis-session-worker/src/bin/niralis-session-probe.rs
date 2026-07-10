@@ -102,6 +102,52 @@ fn main() {
         Some(v) => v,
         None => std::process::exit(1),
     };
+    let forbidden_names = [
+        "LD_PRELOAD",
+        "LD_LIBRARY_PATH",
+        "LD_AUDIT",
+        "LD_DEBUG",
+        "GCONV_PATH",
+        "PYTHONPATH",
+        "PYTHONHOME",
+        "PERL5LIB",
+        "PERLLIB",
+        "RUBYLIB",
+        "RUBYOPT",
+        "NODE_OPTIONS",
+        "BASH_ENV",
+        "ENV",
+        "GIO_EXTRA_MODULES",
+        "GIO_MODULE_DIR",
+        "GTK_PATH",
+        "GTK_IM_MODULE_FILE",
+        "QT_PLUGIN_PATH",
+        "QT_QPA_PLATFORM_PLUGIN_PATH",
+        "WAYLAND_DISPLAY",
+        "DISPLAY",
+        "XAUTHORITY",
+    ];
+    let forbidden_variables_present: Vec<String> = forbidden_names
+        .iter()
+        .filter(|name| std::env::var_os(name).is_some())
+        .map(|name| (*name).to_owned())
+        .collect();
+    if !forbidden_variables_present.is_empty() {
+        std::process::exit(1);
+    }
+    let imported_locale = std::env::vars_os()
+        .filter_map(|(key, value)| {
+            let key = key.to_str()?.to_owned();
+            if key == "LANG" || key == "LANGUAGE" || key.starts_with("LC_") {
+                Some((key, value.to_str()?.to_owned()))
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    if niralis_session_worker::prove_user_bus().is_err() {
+        std::process::exit(1);
+    }
     let pid = std::process::id();
     let sid = unsafe { libc::getsid(0) as u32 };
     let pgid = unsafe { libc::getpgid(0) as u32 };
@@ -143,6 +189,19 @@ fn main() {
                 shell,
                 path: std::env::var("PATH").unwrap_or_default(),
                 session_type: std::env::var("XDG_SESSION_TYPE").unwrap_or_default(),
+                session_class: std::env::var("XDG_SESSION_CLASS").unwrap_or_default(),
+                session_desktop: std::env::var("XDG_SESSION_DESKTOP").unwrap_or_default(),
+                session_id: std::env::var("XDG_SESSION_ID").unwrap_or_default(),
+                runtime_dir: path("XDG_RUNTIME_DIR").unwrap_or_else(|| std::process::exit(1)),
+                seat: std::env::var("XDG_SEAT").unwrap_or_default(),
+                vtnr: std::env::var("XDG_VTNR")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0),
+                dbus_session_bus_address: std::env::var("DBUS_SESSION_BUS_ADDRESS").ok(),
+                imported_locale,
+                forbidden_variables_present,
+                user_bus_connected: true,
                 cwd,
             },
             exec_probe_version: SESSION_EXEC_PROBE_VERSION,

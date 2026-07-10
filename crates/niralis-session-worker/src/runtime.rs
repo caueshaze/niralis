@@ -1,8 +1,10 @@
 use std::io::{Read, Write};
+use std::os::unix::ffi::OsStringExt;
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::io::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
 
@@ -37,6 +39,55 @@ pub struct WorkerDependencies<'a, F, I, G, C, L> {
     pub session_child_runner_factory: &'a C,
     pub logind_resolver: &'a L,
     pub virtual_terminal_allocator: &'a dyn VirtualTerminalAllocator,
+    pub runtime_dir_validator: &'a dyn RuntimeDirValidator,
+}
+
+pub trait RuntimeDirValidator: Send + Sync {
+    fn validate(&self, path: &Path, uid: u32) -> Result<(), RuntimeDirValidationError>;
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LinuxRuntimeDirValidator;
+
+#[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
+pub enum RuntimeDirValidationError {
+    #[error("runtime directory path is invalid")]
+    InvalidPath,
+    #[error("runtime directory metadata is invalid")]
+    InvalidMetadata,
+    #[error("runtime directory owner or mode is invalid")]
+    WrongOwnerOrMode,
+}
+
+impl RuntimeDirValidator for LinuxRuntimeDirValidator {
+    fn validate(&self, path: &Path, uid: u32) -> Result<(), RuntimeDirValidationError> {
+        if !path.is_absolute() {
+            return Err(RuntimeDirValidationError::InvalidPath);
+        }
+        let link = std::fs::symlink_metadata(path)
+            .map_err(|_| RuntimeDirValidationError::InvalidMetadata)?;
+        if link.file_type().is_symlink() || !link.is_dir() {
+            return Err(RuntimeDirValidationError::InvalidMetadata);
+        }
+        let metadata =
+            std::fs::metadata(path).map_err(|_| RuntimeDirValidationError::InvalidMetadata)?;
+        if !metadata.file_type().is_dir()
+            || metadata.uid() != uid
+            || metadata.mode() & 0o7777 != 0o700
+        {
+            return Err(RuntimeDirValidationError::WrongOwnerOrMode);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct StubRuntimeDirValidator;
+
+impl RuntimeDirValidator for StubRuntimeDirValidator {
+    fn validate(&self, _path: &Path, _uid: u32) -> Result<(), RuntimeDirValidationError> {
+        Ok(())
+    }
 }
 
 #[derive(Debug, Default)]
@@ -62,6 +113,7 @@ pub fn run_worker_process<R: Read, W: Write>(
             session_child_runner_factory: &ProcessSessionChildRunnerFactory,
             logind_resolver: &SdLoginResolver,
             virtual_terminal_allocator: &LinuxVirtualTerminalAllocator,
+            runtime_dir_validator: &LinuxRuntimeDirValidator,
         },
     )
 }
@@ -134,6 +186,7 @@ pub fn run_worker_process_with_dependencies<
             control_path,
             worker_id,
             dependencies.virtual_terminal_allocator,
+            dependencies.runtime_dir_validator,
         ),
     }
 }
@@ -160,6 +213,7 @@ fn run_pam_session<
     control_path: std::path::PathBuf,
     worker_id: String,
     virtual_terminal_allocator: &dyn VirtualTerminalAllocator,
+    runtime_dir_validator: &dyn RuntimeDirValidator,
 ) -> Result<(), SessionError> {
     let control_listener = if control_path.as_os_str().is_empty() {
         None
@@ -289,6 +343,19 @@ fn run_pam_session<
 
     match open_result {
         Ok(Ok(())) => {
+            let pam_environment = match transaction.session_environment() {
+                Ok(environment) => environment,
+                Err(_) => {
+                    drop(transaction);
+                    write_envelope(
+                        writer,
+                        WorkerResponse::SessionFailed {
+                            code: WorkerSessionFailureCode::RuntimeEnvironmentFailed,
+                        },
+                    )?;
+                    return Err(SessionError::AuthenticatedSessionFailed);
+                }
+            };
             info!(username = %canonical_username, session = %session.session.id, "worker PAM session opened");
             let logind = match logind_resolver.resolve_by_pid(std::process::id()) {
                 Ok(Some(identity))
@@ -314,6 +381,32 @@ fn run_pam_session<
                     return Err(SessionError::AuthenticatedSessionFailed);
                 }
             };
+            if pam_environment.session_id != logind.id.as_str() {
+                drop(transaction);
+                write_envelope(
+                    writer,
+                    WorkerResponse::SessionFailed {
+                        code: WorkerSessionFailureCode::LogindSessionIdMismatch,
+                    },
+                )?;
+                return Err(SessionError::AuthenticatedSessionFailed);
+            }
+            let runtime_dir = PathBuf::from(std::ffi::OsString::from_vec(
+                pam_environment.runtime_dir.bytes.clone(),
+            ));
+            if runtime_dir_validator
+                .validate(&runtime_dir, credentials.identity.uid)
+                .is_err()
+            {
+                drop(transaction);
+                write_envelope(
+                    writer,
+                    WorkerResponse::SessionFailed {
+                        code: WorkerSessionFailureCode::RuntimeDirectoryInvalid,
+                    },
+                )?;
+                return Err(SessionError::AuthenticatedSessionFailed);
+            }
             let child_terminal_fd = match terminal.lease().duplicate_terminal_fd() {
                 Ok(fd) => fd,
                 Err(error) => {
@@ -357,6 +450,16 @@ fn run_pam_session<
                         niralis_protocol::SessionKind::X11 => "x11",
                     }
                     .to_owned(),
+                    session_class: "user".to_owned(),
+                    session_desktop: session.session.id.clone(),
+                    session_id: logind.id.as_str().to_owned(),
+                    runtime_dir: SessionChildUnixPath {
+                        bytes: pam_environment.runtime_dir.bytes,
+                    },
+                    seat: terminal.lease().seat().as_str().to_owned(),
+                    vtnr: terminal.lease().vtnr().number(),
+                    dbus_session_bus_address: None,
+                    imported_locale: pam_environment.imported_locale,
                     probe_path,
                 },
                 _ => {
@@ -695,4 +798,46 @@ mod terminal_binding_tests {
 
 fn write_rejection<W: Write>(writer: &mut W, code: WorkerErrorCode) -> Result<(), SessionError> {
     write_envelope(writer, WorkerResponse::Rejected { code })
+}
+
+#[cfg(test)]
+mod runtime_dir_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("niralis-4gc-{name}-{}", std::process::id()))
+    }
+
+    #[test]
+    fn validates_existing_owned_mode_0700_directory() {
+        let directory = path("valid");
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let uid = unsafe { libc::geteuid() };
+        assert!(LinuxRuntimeDirValidator.validate(&directory, uid).is_ok());
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
+    #[test]
+    fn rejects_relative_and_symlink_runtime_paths() {
+        let directory = path("target");
+        let link = path("link");
+        let _ = std::fs::remove_dir_all(&directory);
+        let _ = std::fs::remove_file(&link);
+        std::fs::create_dir(&directory).unwrap();
+        std::os::unix::fs::symlink(&directory, &link).unwrap();
+        let uid = unsafe { libc::geteuid() };
+        assert_eq!(
+            LinuxRuntimeDirValidator.validate(Path::new("relative"), uid),
+            Err(RuntimeDirValidationError::InvalidPath)
+        );
+        assert_eq!(
+            LinuxRuntimeDirValidator.validate(&link, uid),
+            Err(RuntimeDirValidationError::InvalidMetadata)
+        );
+        std::fs::remove_file(&link).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
+    }
 }

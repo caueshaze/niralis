@@ -6,6 +6,13 @@ use crate::{
 };
 
 #[test]
+fn pam_owned_runtime_path_rejects_empty_nul_and_oversized_values() {
+    assert!(crate::PamUnixPath::new(Vec::new()).is_err());
+    assert!(crate::PamUnixPath::new(vec![0]).is_err());
+    assert!(crate::PamUnixPath::new(vec![b'a'; 4097]).is_err());
+}
+
+#[test]
 fn accepts_mock_user_transaction() {
     let auth = MockAuthenticator;
 

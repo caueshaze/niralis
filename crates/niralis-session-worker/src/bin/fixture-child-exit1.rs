@@ -3,7 +3,7 @@ use std::io::{Read, Write};
 fn main() {
     let _ = std::io::stdin().read_to_end(&mut Vec::new());
     let response = serde_json::json!({
-        "version": 6,
+        "version": 7,
         "message": {
             "Ready": {
                 "canonical_username": "canonical-user",
@@ -22,7 +22,7 @@ fn main() {
                 },
                 "process_identity": {"pid": std::process::id(), "sid": std::process::id(), "pgid": std::process::id()},
                 "runtime_environment": {"home": {"bytes": [47,104,111,109,101,47,116,101,115,116]}, "user": "canonical-user", "logname": "canonical-user", "shell": {"bytes": [47,98,105,110,47,98,97,115,104]}, "path": "/usr/local/bin:/usr/bin:/bin", "session_type": "wayland", "cwd": {"bytes": [47,104,111,109,101,47,116,101,115,116]}},
-                "exec_probe_version": 1
+                "exec_probe_version": 2
             }
         }
     });

@@ -3,8 +3,8 @@ use serde::{Deserialize, Serialize};
 use crate::isolation::PostDropIsolationProof;
 use crate::privilege_drop::{AppliedCredentials, PrivilegeDropTarget};
 
-pub const SESSION_CHILD_PROTOCOL_VERSION: u32 = 6;
-pub const SESSION_EXEC_PROBE_VERSION: u32 = 1;
+pub const SESSION_CHILD_PROTOCOL_VERSION: u32 = 7;
+pub const SESSION_EXEC_PROBE_VERSION: u32 = 2;
 pub const MAX_SESSION_CHILD_MESSAGE_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -25,7 +25,7 @@ pub struct SessionChildCredentialProof {
     pub supplementary_gids: Vec<u32>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionChildUnixPath {
     pub bytes: Vec<u8>,
 }
@@ -55,6 +55,22 @@ pub struct SessionChildRuntimeContext {
     pub home: SessionChildUnixPath,
     pub shell: SessionChildUnixPath,
     pub session_type: String,
+    #[serde(default)]
+    pub session_class: String,
+    #[serde(default)]
+    pub session_desktop: String,
+    #[serde(default)]
+    pub session_id: String,
+    #[serde(default)]
+    pub runtime_dir: SessionChildUnixPath,
+    #[serde(default)]
+    pub seat: String,
+    #[serde(default)]
+    pub vtnr: u32,
+    #[serde(default)]
+    pub dbus_session_bus_address: Option<String>,
+    #[serde(default)]
+    pub imported_locale: Vec<(String, String)>,
     pub probe_path: SessionChildUnixPath,
 }
 
@@ -126,6 +142,26 @@ pub struct SessionRuntimeEnvironmentProof {
     pub shell: SessionChildUnixPath,
     pub path: String,
     pub session_type: String,
+    #[serde(default)]
+    pub session_class: String,
+    #[serde(default)]
+    pub session_desktop: String,
+    #[serde(default)]
+    pub session_id: String,
+    #[serde(default)]
+    pub runtime_dir: SessionChildUnixPath,
+    #[serde(default)]
+    pub seat: String,
+    #[serde(default)]
+    pub vtnr: u32,
+    #[serde(default)]
+    pub dbus_session_bus_address: Option<String>,
+    #[serde(default)]
+    pub imported_locale: Vec<(String, String)>,
+    #[serde(default)]
+    pub forbidden_variables_present: Vec<String>,
+    #[serde(default)]
+    pub user_bus_connected: bool,
     pub cwd: SessionChildUnixPath,
 }
 

@@ -69,6 +69,16 @@ pub struct RuntimeEnvironmentProof {
     pub shell: SessionChildUnixPath,
     pub path: String,
     pub session_type: String,
+    pub session_class: String,
+    pub session_desktop: String,
+    pub session_id: String,
+    pub runtime_dir: SessionChildUnixPath,
+    pub seat: String,
+    pub vtnr: u32,
+    pub dbus_session_bus_address: Option<String>,
+    pub imported_locale: Vec<(String, String)>,
+    pub forbidden_variables_present: Vec<String>,
+    pub user_bus_connected: bool,
     pub cwd: SessionChildUnixPath,
 }
 
@@ -367,6 +377,20 @@ fn validate_ready_response(
             && runtime_environment.home == expectation.runtime.home
             && runtime_environment.shell == expectation.runtime.shell
             && runtime_environment.session_type == expectation.runtime.session_type
+            && (expectation.runtime.session_id.is_empty()
+                || (runtime_environment.session_class == expectation.runtime.session_class
+                    && runtime_environment.session_desktop
+                        == expectation.runtime.session_desktop
+                    && runtime_environment.session_id == expectation.runtime.session_id
+                    && runtime_environment.runtime_dir == expectation.runtime.runtime_dir
+                    && runtime_environment.seat == expectation.runtime.seat
+                    && runtime_environment.vtnr == expectation.runtime.vtnr
+                    && runtime_environment.dbus_session_bus_address
+                        == expectation.runtime.dbus_session_bus_address
+                    && runtime_environment.imported_locale
+                        == expectation.runtime.imported_locale
+                    && runtime_environment.forbidden_variables_present.is_empty()
+                    && runtime_environment.user_bus_connected))
             && runtime_environment.user == expectation.canonical_username
             && runtime_environment.logname == expectation.canonical_username
             && runtime_environment.path == DEFAULT_SESSION_PATH
@@ -407,6 +431,16 @@ fn validate_ready_response(
                     shell: runtime_environment.shell,
                     path: runtime_environment.path,
                     session_type: runtime_environment.session_type,
+                    session_class: runtime_environment.session_class,
+                    session_desktop: runtime_environment.session_desktop,
+                    session_id: runtime_environment.session_id,
+                    runtime_dir: runtime_environment.runtime_dir,
+                    seat: runtime_environment.seat,
+                    vtnr: runtime_environment.vtnr,
+                    dbus_session_bus_address: runtime_environment.dbus_session_bus_address,
+                    imported_locale: runtime_environment.imported_locale,
+                    forbidden_variables_present: runtime_environment.forbidden_variables_present,
+                    user_bus_connected: runtime_environment.user_bus_connected,
                     cwd: runtime_environment.cwd,
                 },
                 exec_probe_version,
@@ -811,7 +845,26 @@ pub(crate) fn run_child_process_with_dependencies(
                 runtime.shell.to_path_buf().ok().unwrap_or_default(),
             )
             .env("PATH", DEFAULT_SESSION_PATH)
-            .env("XDG_SESSION_TYPE", &runtime.session_type);
+            .env("XDG_SESSION_TYPE", &runtime.session_type)
+            .env("XDG_SESSION_CLASS", &runtime.session_class)
+            .env("XDG_SESSION_DESKTOP", &runtime.session_desktop)
+            .env("XDG_SESSION_ID", &runtime.session_id)
+            .env(
+                "XDG_RUNTIME_DIR",
+                runtime
+                    .runtime_dir
+                    .to_path_buf()
+                    .map_err(|_| SessionChildErrorCode::InvalidRuntimeContext)
+                    .unwrap(),
+            )
+            .env("XDG_SEAT", &runtime.seat)
+            .env("XDG_VTNR", runtime.vtnr.to_string());
+        if let Some(address) = &runtime.dbus_session_bus_address {
+            command.env("DBUS_SESSION_BUS_ADDRESS", address);
+        }
+        for (key, value) in &runtime.imported_locale {
+            command.env(key, value);
+        }
         if let Some(terminal) = terminal.as_ref() {
             command
                 .arg("--terminal-seat")
@@ -857,6 +910,16 @@ pub(crate) fn run_child_process_with_dependencies(
                 shell: runtime.shell.clone(),
                 path: DEFAULT_SESSION_PATH.to_owned(),
                 session_type: runtime.session_type.clone(),
+                session_class: runtime.session_class.clone(),
+                session_desktop: runtime.session_desktop.clone(),
+                session_id: runtime.session_id.clone(),
+                runtime_dir: runtime.runtime_dir.clone(),
+                seat: runtime.seat.clone(),
+                vtnr: runtime.vtnr,
+                dbus_session_bus_address: runtime.dbus_session_bus_address.clone(),
+                imported_locale: runtime.imported_locale.clone(),
+                forbidden_variables_present: Vec::new(),
+                user_bus_connected: false,
                 cwd: runtime.home,
             },
             exec_probe_version: SESSION_EXEC_PROBE_VERSION,

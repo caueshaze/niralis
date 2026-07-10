@@ -68,4 +68,14 @@ impl AuthenticatedTransaction for StaticTransaction {
     ) -> Result<(), AuthSessionError> {
         Ok(())
     }
+
+    fn session_environment(
+        &mut self,
+    ) -> Result<niralis_auth::PamSessionEnvironment, AuthSessionError> {
+        Ok(niralis_auth::PamSessionEnvironment {
+            session_id: "test-session".to_owned(),
+            runtime_dir: niralis_auth::PamUnixPath::new(b"/tmp/niralis-runtime".to_vec())?,
+            imported_locale: Vec::new(),
+        })
+    }
 }

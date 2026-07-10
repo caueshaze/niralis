@@ -81,4 +81,7 @@ pub enum WorkerSessionFailureCode {
     InternalPanic,
     SessionChildFailed,
     LogindFailed,
+    LogindSessionIdMismatch,
+    RuntimeEnvironmentFailed,
+    RuntimeDirectoryInvalid,
 }

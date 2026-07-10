@@ -154,6 +154,16 @@ impl AuthenticatedTransaction for StubTransaction {
             Err(AuthSessionError::OpenFailed)
         }
     }
+
+    fn session_environment(
+        &mut self,
+    ) -> Result<niralis_auth::PamSessionEnvironment, AuthSessionError> {
+        Ok(niralis_auth::PamSessionEnvironment {
+            session_id: "test-logind".to_owned(),
+            runtime_dir: niralis_auth::PamUnixPath::new(b"/tmp/niralis-runtime".to_vec())?,
+            imported_locale: Vec::new(),
+        })
+    }
 }
 
 impl Drop for StubTransaction {
@@ -277,6 +287,16 @@ impl SessionChildRunner for StubChildRunner {
                 shell: expectation.runtime.shell.clone(),
                 path: crate::session_child::DEFAULT_SESSION_PATH.into(),
                 session_type: expectation.runtime.session_type.clone(),
+                session_class: expectation.runtime.session_class.clone(),
+                session_desktop: expectation.runtime.session_desktop.clone(),
+                session_id: expectation.runtime.session_id.clone(),
+                runtime_dir: expectation.runtime.runtime_dir.clone(),
+                seat: expectation.runtime.seat.clone(),
+                vtnr: expectation.runtime.vtnr,
+                dbus_session_bus_address: expectation.runtime.dbus_session_bus_address.clone(),
+                imported_locale: expectation.runtime.imported_locale.clone(),
+                forbidden_variables_present: Vec::new(),
+                user_bus_connected: true,
                 cwd: expectation.runtime.home.clone(),
             },
             exec_probe_version: crate::session_child::SESSION_EXEC_PROBE_VERSION,

@@ -58,6 +58,10 @@ impl AuthenticatedTransaction for PamAuthenticatedTransaction {
             AuthSessionError::OpenFailed
         })
     }
+
+    fn session_environment(&mut self) -> Result<crate::PamSessionEnvironment, AuthSessionError> {
+        self.transaction.session_environment()
+    }
 }
 
 impl std::fmt::Debug for PamAuthenticatedTransaction {

@@ -1,5 +1,6 @@
 use crate::{
     AuthError, AuthSessionError, AuthenticatedTransaction, AuthenticatedUser, Authenticator,
+    PamSessionEnvironment, PamUnixPath,
 };
 
 #[derive(Debug, Default)]
@@ -39,5 +40,13 @@ impl AuthenticatedTransaction for MockAuthenticatedTransaction {
         _metadata: &crate::PamSessionMetadata,
     ) -> Result<(), AuthSessionError> {
         Ok(())
+    }
+
+    fn session_environment(&mut self) -> Result<PamSessionEnvironment, AuthSessionError> {
+        Ok(PamSessionEnvironment {
+            session_id: "mock-session".to_owned(),
+            runtime_dir: PamUnixPath::new(b"/run/user/1000".to_vec())?,
+            imported_locale: Vec::new(),
+        })
     }
 }

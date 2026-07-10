@@ -24,6 +24,27 @@ pub struct PamSessionMetadata {
     pub vtnr: Option<VirtualTerminalId>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PamUnixPath {
+    pub bytes: Vec<u8>,
+}
+
+impl PamUnixPath {
+    pub fn new(bytes: Vec<u8>) -> Result<Self, AuthSessionError> {
+        if bytes.is_empty() || bytes.len() > 4096 || bytes.contains(&0) {
+            return Err(AuthSessionError::EnvironmentInvalid);
+        }
+        Ok(Self { bytes })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PamSessionEnvironment {
+    pub session_id: String,
+    pub runtime_dir: PamUnixPath,
+    pub imported_locale: Vec<(String, String)>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SeatId(String);
 
@@ -102,12 +123,16 @@ pub enum AuthError {
 pub enum AuthSessionError {
     #[error("failed to open authenticated session")]
     OpenFailed,
+    #[error("required PAM session environment is invalid")]
+    EnvironmentInvalid,
 }
 
 pub trait AuthenticatedTransaction: Send {
     fn user(&self) -> &AuthenticatedUser;
 
     fn open_session(&mut self, metadata: &PamSessionMetadata) -> Result<(), AuthSessionError>;
+
+    fn session_environment(&mut self) -> Result<PamSessionEnvironment, AuthSessionError>;
 }
 
 pub trait Authenticator: Send + Sync {

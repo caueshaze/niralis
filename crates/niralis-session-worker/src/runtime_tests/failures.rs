@@ -6,7 +6,9 @@ use niralis_auth::AuthError;
 use niralis_session::{WorkerEnvelope, WorkerResponse, WorkerSessionFailureCode};
 
 use crate::identity::IdentityError;
-use crate::runtime::{run_worker_process_with_dependencies, WorkerDependencies};
+use crate::runtime::{
+    run_worker_process_with_dependencies, StubRuntimeDirValidator, WorkerDependencies,
+};
 
 use super::support::{
     identity, request, StubChildFactory, StubFactory, StubGroupsResolver, StubIdentityResolver,
@@ -161,6 +163,7 @@ fn pam_worker_distinguishes_auth_identity_and_session_failures() {
                 },
                 logind_resolver: &StubLogind,
                 virtual_terminal_allocator: &StubVtAllocator,
+                runtime_dir_validator: &StubRuntimeDirValidator,
             },
         );
 

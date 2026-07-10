@@ -5,7 +5,9 @@ use std::sync::{Arc, Mutex};
 use crate::session_child::SessionChildError;
 use niralis_session::{WorkerEnvelope, WorkerResponse};
 
-use crate::runtime::{run_worker_process_with_dependencies, WorkerDependencies};
+use crate::runtime::{
+    run_worker_process_with_dependencies, StubRuntimeDirValidator, WorkerDependencies,
+};
 
 use super::support::{
     identity, request, StubChildFactory, StubFactory, StubGroupsResolver, StubIdentityResolver,
@@ -48,6 +50,7 @@ fn pam_worker_reports_started_before_lifecycle_completion() {
             },
             logind_resolver: &StubLogind,
             virtual_terminal_allocator: &StubVtAllocator,
+            runtime_dir_validator: &StubRuntimeDirValidator,
         },
     )
     .expect("worker should succeed");
@@ -104,6 +107,7 @@ fn identity_resolution_uses_pam_user_not_requested_username() {
             },
             logind_resolver: &StubLogind,
             virtual_terminal_allocator: &StubVtAllocator,
+            runtime_dir_validator: &StubRuntimeDirValidator,
         },
     )
     .expect("worker should succeed");
@@ -160,6 +164,7 @@ fn child_failure_drops_pam_transaction_after_child_returns() {
             },
             logind_resolver: &StubLogind,
             virtual_terminal_allocator: &StubVtAllocator,
+            runtime_dir_validator: &StubRuntimeDirValidator,
         },
     );
 
