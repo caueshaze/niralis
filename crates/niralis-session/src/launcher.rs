@@ -622,10 +622,17 @@ fn map_response(
         WorkerResponse::AuthenticationFailed if !status.success() => {
             Err(SessionError::AuthenticationFailed)
         }
-        WorkerResponse::SessionFailed { .. } if !status.success() => {
+        WorkerResponse::SessionFailed { code } if !status.success() => {
+            debug!(
+                ?code,
+                "session worker reported authenticated session failure"
+            );
             Err(SessionError::AuthenticatedSessionFailed)
         }
-        WorkerResponse::Rejected { .. } if !status.success() => Err(SessionError::WorkerRejected),
+        WorkerResponse::Rejected { code } if !status.success() => {
+            debug!(?code, "session worker rejected request");
+            Err(SessionError::WorkerRejected)
+        }
         _ => Err(SessionError::WorkerProtocolFailed),
     }
 }
