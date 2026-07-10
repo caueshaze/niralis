@@ -35,6 +35,8 @@ pub trait LoginBackend: Send + Sync {
         &self,
         attempt: LoginAttempt,
     ) -> std::result::Result<StartedSession, LoginBackendError>;
+
+    fn shutdown_sessions(&self) {}
 }
 
 impl<T> LoginBackend for Box<T>

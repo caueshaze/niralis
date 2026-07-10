@@ -18,7 +18,9 @@ fn main() {
         message: WorkerResponse::Started {
             session,
             session_pid: pid,
+            session_pgid: pid,
             fixture_version: 1,
+            worker_id: String::new(),
         },
     };
     let stdout = std::io::stdout();

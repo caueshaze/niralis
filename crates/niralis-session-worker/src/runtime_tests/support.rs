@@ -244,6 +244,8 @@ pub(super) fn request() -> WorkerEnvelope<WorkerRequest> {
             password: WorkerSecret::new("secret".to_owned()),
             session_child_path: "/usr/libexec/niralis-session-child".into(),
             session_probe_path: "/usr/libexec/niralis-session-probe".into(),
+            control_path: std::path::PathBuf::new(),
+            worker_id: String::new(),
         },
     }
 }

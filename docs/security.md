@@ -204,6 +204,36 @@ separately and is not limited by the startup timeout. Writer and reader helper
 threads are always joined before ownership transfer, and cleanup kills and
 reaps a live child on startup failure.
 
+### Session termination and process-group cleanup
+
+The worker control endpoint is selected by the daemon before the worker starts;
+it is never returned by `Started`. The endpoint is created under the trusted
+`/run/niralis/worker-control` hierarchy when available, with a private
+temporary fallback for unprivileged tests. Each lifecycle also has an opaque
+worker ID.
+
+The bounded control protocol binds a termination request to the worker ID,
+worker PID, session PID, and validated session PGID. The worker checks Unix
+peer credentials before accepting it. The daemon does not close PAM or kill
+the worker as the normal termination path.
+
+Normal termination is:
+
+`Running -> Stopping -> SIGTERM(-PGID) -> grace deadline -> optional
+SIGKILL(-PGID) -> session leader reap -> PAM close -> worker exit`.
+
+The worker explicitly reaps the session leader because it is the direct child.
+Descendants in the same process group receive the group signal and are checked
+for immediate disappearance, but they are not individually reaped by the
+worker. A descendant that deliberately calls `setsid()` or `setpgid()` can
+escape this process-group boundary; stronger containment belongs to future
+cgroup/logind integration.
+
+If the worker becomes unresponsive, the daemon enters emergency cleanup using
+only the previously validated PGID, applies bounded SIGTERM/SIGKILL cleanup,
+then reaps the worker and records a failed emergency lifecycle. This is not
+the normal PAM ownership path.
+
 The child rejects UID 0 before any mutation, then applies and verifies
 `setgroups -> setgid -> setuid`. It checks real/effective/saved UID and GID
 values and supplementary groups before writing `Ready`. The worker compares

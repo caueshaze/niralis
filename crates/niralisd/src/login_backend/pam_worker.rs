@@ -29,4 +29,8 @@ impl LoginBackend for PamWorkerLoginBackend {
             )
             .map_err(map_session_error)
     }
+
+    fn shutdown_sessions(&self) {
+        self.launcher.shutdown_sessions();
+    }
 }

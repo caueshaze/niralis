@@ -4,8 +4,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{SessionRequest, StartedSession, WorkerSecret};
 
-pub const WORKER_PROTOCOL_VERSION: u32 = 6;
+pub const WORKER_PROTOCOL_VERSION: u32 = 7;
 pub const MAX_WORKER_MESSAGE_BYTES: usize = 64 * 1024;
+pub const WORKER_CONTROL_PROTOCOL_VERSION: u32 = 1;
+pub const MAX_WORKER_CONTROL_MESSAGE_BYTES: usize = 4096;
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkerEnvelope<T> {
@@ -24,6 +26,18 @@ pub enum WorkerRequest {
         password: WorkerSecret,
         session_child_path: PathBuf,
         session_probe_path: PathBuf,
+        control_path: PathBuf,
+        worker_id: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WorkerControlRequest {
+    Terminate {
+        worker_id: String,
+        expected_worker_pid: u32,
+        expected_session_pid: u32,
+        expected_session_pgid: u32,
     },
 }
 
@@ -32,7 +46,9 @@ pub enum WorkerResponse {
     Started {
         session: StartedSession,
         session_pid: u32,
+        session_pgid: u32,
         fixture_version: u32,
+        worker_id: String,
     },
     Ready {
         session: StartedSession,

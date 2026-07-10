@@ -331,6 +331,7 @@ dependencies = [
 name = "niralis-session"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "niralis-protocol",
  "serde",
  "serde_json",

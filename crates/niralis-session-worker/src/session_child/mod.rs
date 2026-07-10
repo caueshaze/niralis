@@ -93,6 +93,14 @@ pub trait SessionChildRunner: Send + Sync {
     fn wait_for_child(&self) -> Result<std::process::ExitStatus, SessionChildError> {
         Ok(std::process::ExitStatus::from_raw(0))
     }
+
+    fn poll_child(&self) -> Result<Option<std::process::ExitStatus>, SessionChildError> {
+        Ok(None)
+    }
+
+    fn terminate(&self, _grace: Duration) -> Result<std::process::ExitStatus, SessionChildError> {
+        Err(SessionChildError::IoFailed)
+    }
 }
 
 pub trait SessionChildRunnerFactory: Send + Sync {
@@ -113,7 +121,13 @@ impl SessionChildRunnerFactory for ProcessSessionChildRunnerFactory {
 #[derive(Debug, Clone)]
 pub struct ProcessSessionChildRunner {
     path: PathBuf,
-    live_child: Arc<Mutex<Option<Child>>>,
+    live_child: Arc<Mutex<Option<LiveSessionChild>>>,
+}
+
+#[derive(Debug)]
+struct LiveSessionChild {
+    child: Child,
+    pgid: u32,
 }
 
 impl ProcessSessionChildRunner {
@@ -131,9 +145,9 @@ impl ProcessSessionChildRunner {
 impl Drop for ProcessSessionChildRunner {
     fn drop(&mut self) {
         if let Ok(mut child) = self.live_child.lock() {
-            if let Some(mut child) = child.take() {
-                let _ = child.kill();
-                let _ = child.wait();
+            if let Some(mut live) = child.take() {
+                let _ = terminate_group(live.pgid, libc::SIGKILL);
+                let _ = live.child.wait();
             }
         }
     }
@@ -190,26 +204,79 @@ impl SessionChildRunner for ProcessSessionChildRunner {
         }
         let report = validate_ready_response(response.message, &expectation, pid)?;
         let child = attempt.take_child();
+        let pgid = report.process_identity.pgid;
         *self
             .live_child
             .lock()
-            .map_err(|_| SessionChildError::IoFailed)? = Some(child);
+            .map_err(|_| SessionChildError::IoFailed)? = Some(LiveSessionChild { child, pgid });
         Ok(report)
     }
 
     fn wait_for_child(&self) -> Result<std::process::ExitStatus, SessionChildError> {
-        let mut child = self
+        loop {
+            if let Some(status) = self.poll_child()? {
+                return Ok(status);
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+    }
+
+    fn poll_child(&self) -> Result<Option<std::process::ExitStatus>, SessionChildError> {
+        let mut guard = self
+            .live_child
+            .lock()
+            .map_err(|_| SessionChildError::IoFailed)?;
+        let Some(live) = guard.as_mut() else {
+            return Err(SessionChildError::IoFailed);
+        };
+        match live
+            .child
+            .try_wait()
+            .map_err(|_| SessionChildError::IoFailed)?
+        {
+            Some(status) => {
+                guard.take();
+                Ok(Some(status))
+            }
+            None => Ok(None),
+        }
+    }
+
+    fn terminate(&self, grace: Duration) -> Result<std::process::ExitStatus, SessionChildError> {
+        let mut live = self
             .live_child
             .lock()
             .map_err(|_| SessionChildError::IoFailed)?
             .take()
             .ok_or(SessionChildError::IoFailed)?;
+        let _ = terminate_group(live.pgid, libc::SIGTERM);
+        let deadline = Instant::now() + grace;
         loop {
-            if let Some(status) = child.try_wait().map_err(|_| SessionChildError::IoFailed)? {
+            if let Some(status) = live
+                .child
+                .try_wait()
+                .map_err(|_| SessionChildError::IoFailed)?
+            {
                 return Ok(status);
             }
-            thread::sleep(Duration::from_millis(25));
+            if Instant::now() >= deadline {
+                terminate_group(live.pgid, libc::SIGKILL)?;
+                return live.child.wait().map_err(|_| SessionChildError::IoFailed);
+            }
+            thread::sleep(Duration::from_millis(10));
         }
+    }
+}
+
+fn terminate_group(pgid: u32, signal: libc::c_int) -> Result<(), SessionChildError> {
+    if pgid == 0 || pgid > libc::pid_t::MAX as u32 {
+        return Err(SessionChildError::IoFailed);
+    }
+    let result = unsafe { libc::kill(-(pgid as libc::pid_t), signal) };
+    if result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+        Ok(())
+    } else {
+        Err(SessionChildError::IoFailed)
     }
 }
 

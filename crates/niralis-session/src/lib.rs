@@ -13,9 +13,10 @@ pub use error::SessionError;
 pub use launcher::WorkerSessionLauncher;
 pub use mock::MockSessionLauncher;
 pub use protocol::{
-    WorkerEnvelope, WorkerErrorCode, WorkerRequest, WorkerResponse, WorkerSessionFailureCode,
-    MAX_WORKER_MESSAGE_BYTES, WORKER_PROTOCOL_VERSION,
+    WorkerControlRequest, WorkerEnvelope, WorkerErrorCode, WorkerRequest, WorkerResponse,
+    WorkerSessionFailureCode, MAX_WORKER_CONTROL_MESSAGE_BYTES, MAX_WORKER_MESSAGE_BYTES,
+    WORKER_CONTROL_PROTOCOL_VERSION, WORKER_PROTOCOL_VERSION,
 };
 pub use secret::WorkerSecret;
 pub use types::{SessionLauncher, SessionRequest, StartedSession};
-pub use worker_io::{read_envelope, write_envelope};
+pub use worker_io::{read_control_request, read_envelope, write_control_request, write_envelope};

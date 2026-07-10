@@ -1,11 +1,16 @@
 use std::io::{Read, Write};
+use std::os::unix::io::AsRawFd;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
+use std::thread;
+use std::time::Duration;
 
 use niralis_auth::{AuthError, Authenticator, PamAuthenticator};
 use niralis_session::{
-    read_envelope, write_envelope, SessionError, StartedSession, WorkerErrorCode, WorkerRequest,
-    WorkerResponse, WorkerSessionFailureCode,
+    read_control_request, read_envelope, write_envelope, SessionError, StartedSession,
+    WorkerControlRequest, WorkerErrorCode, WorkerRequest, WorkerResponse, WorkerSessionFailureCode,
+    WORKER_CONTROL_PROTOCOL_VERSION,
 };
 use tracing::{debug, info, warn};
 
@@ -105,6 +110,8 @@ pub fn run_worker_process_with_dependencies<
             password,
             session_child_path,
             session_probe_path,
+            control_path,
+            worker_id,
         } => run_pam_session(
             writer,
             dependencies.authenticator_factory,
@@ -116,6 +123,8 @@ pub fn run_worker_process_with_dependencies<
             password,
             session_child_path,
             session_probe_path,
+            control_path,
+            worker_id,
         ),
     }
 }
@@ -137,7 +146,14 @@ fn run_pam_session<
     password: niralis_session::WorkerSecret,
     session_child_path: std::path::PathBuf,
     session_probe_path: std::path::PathBuf,
+    control_path: std::path::PathBuf,
+    worker_id: String,
 ) -> Result<(), SessionError> {
+    let control_listener = if control_path.as_os_str().is_empty() {
+        None
+    } else {
+        Some(bind_control_listener(&control_path)?)
+    };
     let authenticator = factory.build(&pam_service);
     let auth_result = authenticator.authenticate(&request.username, password.expose());
     drop(password);
@@ -325,11 +341,19 @@ fn run_pam_session<
                 WorkerResponse::Started {
                     session: session.clone(),
                     session_pid: child_report.child_pid,
+                    session_pgid: child_report.process_identity.pgid,
                     fixture_version: child_report.exec_probe_version,
+                    worker_id: worker_id.clone(),
                 },
             )?;
             info!(username = %canonical_username, session = %session.session.id, pid = child_report.child_pid, "worker session started; PAM transaction remains open");
-            let child_status = match child_runner.wait_for_child() {
+            let child_status = match wait_for_session(
+                control_listener,
+                child_runner.as_ref(),
+                worker_id,
+                child_report.child_pid,
+                child_report.process_identity.pgid,
+            ) {
                 Ok(status) => status,
                 Err(error) => {
                     warn!(username = %canonical_username, session = %session.session.id, ?error, "worker failed while waiting for session child");
@@ -369,6 +393,93 @@ fn run_pam_session<
             Err(SessionError::AuthenticatedSessionFailed)
         }
     }
+}
+
+const SESSION_TERMINATION_GRACE: Duration = Duration::from_secs(5);
+
+fn bind_control_listener(path: &std::path::Path) -> Result<UnixListener, SessionError> {
+    if !path.is_absolute() || path.exists() {
+        return Err(SessionError::WorkerProtocolFailed);
+    }
+    let listener = UnixListener::bind(path).map_err(|_| SessionError::WorkerIoFailed)?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|_| SessionError::WorkerIoFailed)?;
+    Ok(listener)
+}
+
+fn wait_for_session(
+    listener: Option<UnixListener>,
+    child_runner: &dyn crate::session_child::SessionChildRunner,
+    worker_id: String,
+    session_pid: u32,
+    session_pgid: u32,
+) -> Result<std::process::ExitStatus, SessionError> {
+    loop {
+        if let Some(status) = child_runner
+            .poll_child()
+            .map_err(|_| SessionError::AuthenticatedSessionFailed)?
+        {
+            return Ok(status);
+        }
+        if let Some(listener) = listener.as_ref() {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    if !peer_is_root(&stream) {
+                        continue;
+                    }
+                    let request = read_control_request(&mut stream)
+                        .map_err(|_| SessionError::AuthenticatedSessionFailed)?;
+                    if request.version != WORKER_CONTROL_PROTOCOL_VERSION {
+                        return Err(SessionError::AuthenticatedSessionFailed);
+                    }
+                    match request.message {
+                        WorkerControlRequest::Terminate {
+                            worker_id: requested_worker_id,
+                            expected_worker_pid,
+                            expected_session_pid,
+                            expected_session_pgid,
+                        } if requested_worker_id == worker_id
+                            && expected_worker_pid == std::process::id()
+                            && expected_session_pid == session_pid
+                            && expected_session_pgid == session_pgid =>
+                        {
+                            return child_runner
+                                .terminate(SESSION_TERMINATION_GRACE)
+                                .map_err(|_| SessionError::AuthenticatedSessionFailed);
+                        }
+                        _ => return Err(SessionError::AuthenticatedSessionFailed),
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(_) => return Err(SessionError::AuthenticatedSessionFailed),
+            }
+        } else {
+            return child_runner
+                .wait_for_child()
+                .map_err(|_| SessionError::AuthenticatedSessionFailed);
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn peer_is_root(stream: &UnixStream) -> bool {
+    let mut credentials = libc::ucred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
+    let mut length = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    let result = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            &mut credentials as *mut _ as *mut libc::c_void,
+            &mut length,
+        )
+    };
+    result == 0 && credentials.uid == 0
 }
 
 fn write_rejection<W: Write>(writer: &mut W, code: WorkerErrorCode) -> Result<(), SessionError> {

@@ -38,6 +38,8 @@ fn worker_request_round_trip_preserves_wayland_x11_and_secret() {
                 password: WorkerSecret::new("secret".to_owned()),
                 session_child_path: PathBuf::from("/usr/libexec/niralis-session-child"),
                 session_probe_path: PathBuf::from("/usr/libexec/niralis-session-probe"),
+                control_path: PathBuf::from("/run/niralis/worker-control/control.sock"),
+                worker_id: "worker-1".to_owned(),
             },
         })
         .expect("request should serialize");
@@ -52,6 +54,8 @@ fn worker_request_round_trip_preserves_wayland_x11_and_secret() {
                 password,
                 session_child_path,
                 session_probe_path,
+                control_path,
+                worker_id,
             } => {
                 assert_eq!(request.username, "test");
                 assert_eq!(request.session, session(kind));
@@ -65,6 +69,11 @@ fn worker_request_round_trip_preserves_wayland_x11_and_secret() {
                     session_probe_path,
                     PathBuf::from("/usr/libexec/niralis-session-probe")
                 );
+                assert_eq!(
+                    control_path,
+                    PathBuf::from("/run/niralis/worker-control/control.sock")
+                );
+                assert_eq!(worker_id, "worker-1");
             }
             other => panic!("unexpected request: {other:?}"),
         }
@@ -97,6 +106,26 @@ fn worker_response_round_trip_preserves_session() {
             }
         );
     }
+}
+
+#[test]
+fn worker_control_request_round_trip_is_bound_to_lifecycle() {
+    let request = crate::WorkerControlRequest::Terminate {
+        worker_id: "worker-opaque-1".to_owned(),
+        expected_worker_pid: 100,
+        expected_session_pid: 200,
+        expected_session_pgid: 200,
+    };
+    let encoded = serde_json::to_string(&crate::WorkerEnvelope {
+        version: crate::WORKER_CONTROL_PROTOCOL_VERSION,
+        message: request.clone(),
+    })
+    .expect("control request should serialize");
+    assert!(encoded.len() < crate::MAX_WORKER_CONTROL_MESSAGE_BYTES);
+    let decoded: crate::WorkerEnvelope<crate::WorkerControlRequest> =
+        serde_json::from_str(&encoded).expect("control request should deserialize");
+    assert_eq!(decoded.version, crate::WORKER_CONTROL_PROTOCOL_VERSION);
+    assert_eq!(decoded.message, request);
 }
 
 #[test]
