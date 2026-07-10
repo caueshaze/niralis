@@ -368,6 +368,7 @@ fn run_pam_session<
         session_desktop: request.session.id.clone(),
         seat: Some(terminal.lease().seat().clone()),
         vtnr: Some(terminal.lease().vtnr()),
+        tty: Some(format!("/dev/tty{}", terminal.lease().vtnr().number())),
     };
     let open_result = catch_unwind(AssertUnwindSafe(|| transaction.open_session(&metadata)));
     let session = StartedSession {

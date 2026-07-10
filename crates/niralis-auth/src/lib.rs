@@ -22,6 +22,7 @@ pub struct PamSessionMetadata {
     pub session_desktop: String,
     pub seat: Option<SeatId>,
     pub vtnr: Option<VirtualTerminalId>,
+    pub tty: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

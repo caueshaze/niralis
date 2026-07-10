@@ -28,6 +28,7 @@ fn accepts_mock_user_transaction() {
             session_desktop: "niri".to_owned(),
             seat: None,
             vtnr: None,
+            tty: None,
         })
         .expect("mock transaction should allow opening session");
 }
@@ -40,6 +41,7 @@ fn session_metadata_emits_owned_seat_and_vt_after_core_fields() {
         session_desktop: "niri".to_owned(),
         seat: Some(SeatId::new("seat0".to_owned()).unwrap()),
         vtnr: Some(VirtualTerminalId::new(7).unwrap()),
+        tty: Some("/dev/tty7".to_owned()),
     };
     assert_eq!(
         metadata.entries(),

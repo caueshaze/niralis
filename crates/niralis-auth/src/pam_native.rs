@@ -73,20 +73,38 @@ impl NativePamTransaction {
         &mut self,
         metadata: &PamSessionMetadata,
     ) -> Result<(), AuthSessionError> {
+        if let Some(tty) = metadata.tty.as_deref() {
+            let tty = CString::new(tty).map_err(|_| AuthSessionError::OpenFailed)?;
+            let tty_item = unsafe { &*tty.as_ptr().cast::<libc::c_void>() };
+            if let Err(error) = pam::set_item(self.handle_mut(), PamItemType::TTY, tty_item) {
+                debug!(
+                    stage = "pam_set_item(PAM_TTY)",
+                    ?error,
+                    "PAM terminal metadata setup failed"
+                );
+                return Err(AuthSessionError::OpenFailed);
+            }
+        }
         for entry in metadata.entries() {
             CString::new(entry.as_str()).map_err(|_| AuthSessionError::OpenFailed)?;
             pam::putenv(self.handle_mut(), &entry).map_err(|_| AuthSessionError::OpenFailed)?;
         }
-        if pam::setcred(self.handle_mut(), PamFlag::Establish_Cred) != PamReturnCode::Success {
+        let setcred_result = pam::setcred(self.handle_mut(), PamFlag::Establish_Cred);
+        if setcred_result != PamReturnCode::Success {
+            debug!(stage = "pam_setcred_establish", result = ?setcred_result, "PAM credential setup failed");
             return Err(AuthSessionError::OpenFailed);
         }
         self.credentials_established = true;
-        if pam::open_session(self.handle_mut(), false) != PamReturnCode::Success {
+        let open_result = pam::open_session(self.handle_mut(), false);
+        if open_result != PamReturnCode::Success {
+            debug!(stage = "pam_open_session", result = ?open_result, "PAM session open failed");
             self.cleanup();
             return Err(AuthSessionError::OpenFailed);
         }
         self.session_open = true;
-        if pam::setcred(self.handle_mut(), PamFlag::Reinitialize_Cred) != PamReturnCode::Success {
+        let reinitialize_result = pam::setcred(self.handle_mut(), PamFlag::Reinitialize_Cred);
+        if reinitialize_result != PamReturnCode::Success {
+            debug!(stage = "pam_setcred_reinitialize", result = ?reinitialize_result, "PAM credential reinitialization failed");
             self.cleanup();
             return Err(AuthSessionError::OpenFailed);
         }
@@ -100,11 +118,28 @@ impl NativePamTransaction {
     pub(crate) fn session_environment(
         &mut self,
     ) -> Result<PamSessionEnvironment, AuthSessionError> {
-        let session_id = self.pam_value("XDG_SESSION_ID")?;
+        let session_id = self.pam_value("XDG_SESSION_ID").map_err(|error| {
+            debug!(
+                stage = "pam_getenv",
+                key = "XDG_SESSION_ID",
+                ?error,
+                "required PAM session value unavailable"
+            );
+            error
+        })?;
         if session_id.is_empty() || session_id.len() > 128 || session_id.as_bytes().contains(&0) {
             return Err(AuthSessionError::EnvironmentInvalid);
         }
-        let runtime_dir = PamUnixPath::new(self.pam_value_bytes("XDG_RUNTIME_DIR")?)?;
+        let runtime_dir =
+            PamUnixPath::new(self.pam_value_bytes("XDG_RUNTIME_DIR").map_err(|error| {
+                debug!(
+                    stage = "pam_getenv",
+                    key = "XDG_RUNTIME_DIR",
+                    ?error,
+                    "required PAM session value unavailable"
+                );
+                error
+            })?)?;
         let imported_locale = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             pam::getenvlist(self.handle_mut())
                 .filter(|(key, _)| key == "LANG" || key == "LANGUAGE" || key.starts_with("LC_"))
