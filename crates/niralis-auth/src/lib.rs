@@ -20,6 +20,35 @@ pub struct PamSessionMetadata {
     pub session_type: PamSessionType,
     pub session_class: PamSessionClass,
     pub session_desktop: String,
+    pub seat: Option<SeatId>,
+    pub vtnr: Option<VirtualTerminalId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SeatId(String);
+
+impl SeatId {
+    pub fn new(value: String) -> Option<Self> {
+        (!value.is_empty() && value.len() <= 64 && !value.as_bytes().contains(&0))
+            .then_some(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct VirtualTerminalId(u32);
+
+impl VirtualTerminalId {
+    pub fn new(value: u32) -> Option<Self> {
+        (value > 0 && value <= 63).then_some(Self(value))
+    }
+
+    pub fn number(self) -> u32 {
+        self.0
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,7 +64,7 @@ pub enum PamSessionClass {
 }
 
 impl PamSessionMetadata {
-    pub(crate) fn entries(&self) -> [String; 3] {
+    pub(crate) fn entries(&self) -> Vec<String> {
         let session_type = match self.session_type {
             PamSessionType::Wayland => "wayland",
             PamSessionType::X11 => "x11",
@@ -44,11 +73,18 @@ impl PamSessionMetadata {
             PamSessionClass::User => "user",
             PamSessionClass::Greeter => "greeter",
         };
-        [
+        let mut entries = vec![
             format!("XDG_SESSION_TYPE={session_type}"),
             format!("XDG_SESSION_CLASS={session_class}"),
             format!("XDG_SESSION_DESKTOP={}", self.session_desktop),
-        ]
+        ];
+        if let Some(seat) = &self.seat {
+            entries.push(format!("XDG_SEAT={}", seat.as_str()));
+        }
+        if let Some(vtnr) = self.vtnr {
+            entries.push(format!("XDG_VTNR={}", vtnr.number()));
+        }
+        entries
     }
 }
 

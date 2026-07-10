@@ -73,6 +73,7 @@ fn request(uid: u32) -> Vec<u8> {
                 supplementary_gids: vec![10, 20],
             },
             runtime: runtime(),
+            terminal: None,
         },
     };
     let mut bytes = serde_json::to_vec(&envelope).expect("request should serialize");
@@ -93,6 +94,7 @@ fn protocol_round_trip_preserves_probe_and_ready() {
                 supplementary_gids: vec![10, 20],
             },
             runtime: runtime(),
+            terminal: None,
         },
     };
     let encoded = serde_json::to_string(&request).expect("request should serialize");
@@ -205,6 +207,7 @@ fn maximum_supported_credentials_fit_the_child_protocol() {
             session_id: "niri".to_owned(),
             credentials,
             runtime: runtime(),
+            terminal: None,
         },
     };
     let payload = serde_json::to_vec(&envelope).expect("maximum request should serialize");
@@ -222,6 +225,7 @@ fn ready_binding_rejects_each_identity_or_credential_mismatch() {
             supplementary_gids: vec![10, 20],
         },
         runtime: runtime(),
+        terminal: None,
     };
     let expected = SessionChildUnixCredentials {
         uid: 1000,
@@ -304,6 +308,7 @@ fn ready_binding_rejects_each_identity_or_credential_mismatch() {
                 cwd: runtime().home,
             },
             exec_probe_version: SESSION_EXEC_PROBE_VERSION,
+            terminal_proof: None,
         };
 
         assert_eq!(

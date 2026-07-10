@@ -48,6 +48,26 @@ cargo run -p niralis-discovery --example resolve-installed-session -- niri
 - Session child launches use an explicit trusted executable path and a separate
   versioned, size-limited handshake.
 
+## Seat and virtual-terminal lifecycle
+
+The 4G-B worker selects only the trusted internal `seat0` policy and, on Linux
+VT-capable systems, allocates one exact virtual terminal through an owned
+lease. `XDG_SEAT` and `XDG_VTNR` are added to the PAM environment only from
+that lease, before `pam_open_session`; they are never accepted from the public
+client or inherited from the worker environment.
+
+The real child receives a single deliberate terminal capability at fixed FD 3.
+All other inherited descriptors remain fail-closed. After `setsid()`, the
+child acquires the exact terminal with `TIOCSCTTY`, establishes its own
+foreground process group, verifies terminal SID/PGID and device identity, and
+closes FD 3 before the final strict FD audit. The worker validates logind Seat
+and VT properties against the same lease before emitting `Started`.
+
+Normal tests use fake seat/VT leases and never touch `/dev/console`, activate a
+VT, wait for an active VT, or disallocate a real console. Any physical VT smoke
+must be explicitly enabled in a dedicated test environment; no automatic
+restoration of an unrelated previous VT is attempted.
+
 ## PAM Authority Migration
 
 When configured with:

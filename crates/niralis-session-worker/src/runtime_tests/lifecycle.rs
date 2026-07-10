@@ -9,7 +9,7 @@ use crate::runtime::{run_worker_process_with_dependencies, WorkerDependencies};
 
 use super::support::{
     identity, request, StubChildFactory, StubFactory, StubGroupsResolver, StubIdentityResolver,
-    StubLogind, TrackingState,
+    StubLogind, StubVtAllocator, TrackingState,
 };
 
 #[test]
@@ -47,6 +47,7 @@ fn pam_worker_reports_started_before_lifecycle_completion() {
                 result: Ok(()),
             },
             logind_resolver: &StubLogind,
+            virtual_terminal_allocator: &StubVtAllocator,
         },
     )
     .expect("worker should succeed");
@@ -102,6 +103,7 @@ fn identity_resolution_uses_pam_user_not_requested_username() {
                 result: Ok(()),
             },
             logind_resolver: &StubLogind,
+            virtual_terminal_allocator: &StubVtAllocator,
         },
     )
     .expect("worker should succeed");
@@ -157,6 +159,7 @@ fn child_failure_drops_pam_transaction_after_child_returns() {
                 result: Err(SessionChildError::ProtocolFailed),
             },
             logind_resolver: &StubLogind,
+            virtual_terminal_allocator: &StubVtAllocator,
         },
     );
 

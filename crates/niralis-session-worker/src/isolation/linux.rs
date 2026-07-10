@@ -31,17 +31,24 @@ pub struct LinuxInheritedFdSanitizer;
 
 impl InheritedFdSanitizer for LinuxInheritedFdSanitizer {
     fn sanitize(&self) -> Result<(), FdSanitizationError> {
-        let result =
-            unsafe { libc::syscall(libc::SYS_close_range as libc::c_long, 3, u32::MAX, 0) };
-        if result == 0 {
-            return Ok(());
+        self.sanitize_with_allowlist(&[])
+    }
+
+    fn sanitize_with_allowlist(&self, allowed_fds: &[RawFd]) -> Result<(), FdSanitizationError> {
+        let allow = |fd: RawFd| allowed_fds.contains(&fd);
+        if allowed_fds.is_empty() {
+            let result =
+                unsafe { libc::syscall(libc::SYS_close_range as libc::c_long, 3, u32::MAX, 0) };
+            if result == 0 {
+                return Ok(());
+            }
         }
         let entries = fs::read_dir("/proc/self/fd").map_err(|_| FdSanitizationError::Failed)?;
         let mut fds = Vec::new();
         for entry in entries {
             let entry = entry.map_err(|_| FdSanitizationError::Failed)?;
             if let Ok(fd) = entry.file_name().to_string_lossy().parse::<RawFd>() {
-                if fd >= 3 {
+                if fd >= 3 && !allow(fd) {
                     fds.push(fd);
                 }
             }

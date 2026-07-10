@@ -2,7 +2,7 @@ use crate::conversation::SilentPasswordConversation;
 use crate::pam::authenticated_user_from_pam;
 use crate::{
     AuthError, Authenticator, MockAuthenticator, PamAuthenticator, PamSessionClass,
-    PamSessionMetadata, PamSessionType,
+    PamSessionMetadata, PamSessionType, SeatId, VirtualTerminalId,
 };
 
 #[test]
@@ -20,8 +20,38 @@ fn accepts_mock_user_transaction() {
             session_type: PamSessionType::Wayland,
             session_class: PamSessionClass::User,
             session_desktop: "niri".to_owned(),
+            seat: None,
+            vtnr: None,
         })
         .expect("mock transaction should allow opening session");
+}
+
+#[test]
+fn session_metadata_emits_owned_seat_and_vt_after_core_fields() {
+    let metadata = PamSessionMetadata {
+        session_type: PamSessionType::Wayland,
+        session_class: PamSessionClass::User,
+        session_desktop: "niri".to_owned(),
+        seat: Some(SeatId::new("seat0".to_owned()).unwrap()),
+        vtnr: Some(VirtualTerminalId::new(7).unwrap()),
+    };
+    assert_eq!(
+        metadata.entries(),
+        vec![
+            "XDG_SESSION_TYPE=wayland",
+            "XDG_SESSION_CLASS=user",
+            "XDG_SESSION_DESKTOP=niri",
+            "XDG_SEAT=seat0",
+            "XDG_VTNR=7",
+        ]
+    );
+}
+
+#[test]
+fn invalid_seat_and_vt_values_are_rejected() {
+    assert!(SeatId::new(String::new()).is_none());
+    assert!(VirtualTerminalId::new(0).is_none());
+    assert!(VirtualTerminalId::new(64).is_none());
 }
 
 #[test]

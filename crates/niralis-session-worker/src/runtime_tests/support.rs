@@ -1,6 +1,8 @@
+use std::os::fd::{FromRawFd, OwnedFd};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use niralis_auth::{
     AuthError, AuthSessionError, AuthenticatedTransaction, AuthenticatedUser, Authenticator,
@@ -20,6 +22,8 @@ use crate::session_child::{
     SessionChildRunnerFactory,
 };
 use crate::{LogindError, LogindSessionId, LogindSessionIdentity, LogindSessionResolver};
+use crate::{VirtualTerminalAllocator, VirtualTerminalError, VirtualTerminalLease};
+use niralis_auth::{SeatId, VirtualTerminalId};
 
 #[derive(Clone, Default)]
 pub(super) struct TrackingState {
@@ -30,6 +34,48 @@ pub(super) struct TrackingState {
     pub(super) drops: Arc<AtomicUsize>,
     pub(super) child_calls: Arc<AtomicUsize>,
     pub(super) child_drop_observations: Arc<AtomicUsize>,
+}
+
+#[derive(Default)]
+pub(super) struct StubVtAllocator;
+
+impl VirtualTerminalAllocator for StubVtAllocator {
+    fn allocate(
+        &self,
+        seat: &SeatId,
+    ) -> Result<Box<dyn VirtualTerminalLease>, VirtualTerminalError> {
+        Ok(Box::new(StubVtLease {
+            seat: seat.clone(),
+            vtnr: VirtualTerminalId::new(1).unwrap(),
+        }))
+    }
+}
+
+struct StubVtLease {
+    seat: SeatId,
+    vtnr: VirtualTerminalId,
+}
+
+impl VirtualTerminalLease for StubVtLease {
+    fn seat(&self) -> &SeatId {
+        &self.seat
+    }
+    fn vtnr(&self) -> VirtualTerminalId {
+        self.vtnr
+    }
+    fn duplicate_terminal_fd(&self) -> Result<OwnedFd, VirtualTerminalError> {
+        let fd = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_RDWR | libc::O_CLOEXEC) };
+        if fd < 0 {
+            return Err(VirtualTerminalError::OperationFailed);
+        }
+        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+    }
+    fn activate(&mut self, _wait: Duration) -> Result<(), VirtualTerminalError> {
+        Ok(())
+    }
+    fn release(&mut self) -> Result<(), VirtualTerminalError> {
+        Ok(())
+    }
 }
 
 pub(super) struct StubFactory {
@@ -144,6 +190,8 @@ impl LogindSessionResolver for StubLogind {
             session_type: "wayland".to_owned(),
             class: "user".to_owned(),
             desktop: Some("niri".to_owned()),
+            seat: Some("seat0".to_owned()),
+            vtnr: Some(1),
         }))
     }
     fn resolve_by_id(
@@ -232,6 +280,17 @@ impl SessionChildRunner for StubChildRunner {
                 cwd: expectation.runtime.home.clone(),
             },
             exec_probe_version: crate::session_child::SESSION_EXEC_PROBE_VERSION,
+            terminal_proof: expectation.terminal.as_ref().map(|terminal| {
+                crate::session_child::SessionChildTerminalProof {
+                    seat: terminal.seat.clone(),
+                    vtnr: terminal.vtnr,
+                    fd: terminal.fd,
+                    device_major: terminal.device_major,
+                    device_minor: terminal.device_minor,
+                    controlling_sid: 1,
+                    foreground_pgid: 1,
+                }
+            }),
         })
     }
 }

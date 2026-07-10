@@ -10,7 +10,7 @@ use crate::runtime::{run_worker_process_with_dependencies, WorkerDependencies};
 
 use super::support::{
     identity, request, StubChildFactory, StubFactory, StubGroupsResolver, StubIdentityResolver,
-    StubLogind, TrackingState,
+    StubLogind, StubVtAllocator, TrackingState,
 };
 
 #[test]
@@ -160,6 +160,7 @@ fn pam_worker_distinguishes_auth_identity_and_session_failures() {
                         .map_err(|_| crate::session_child::SessionChildError::ProtocolFailed),
                 },
                 logind_resolver: &StubLogind,
+                virtual_terminal_allocator: &StubVtAllocator,
             },
         );
 

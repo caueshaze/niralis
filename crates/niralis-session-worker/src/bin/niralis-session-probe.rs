@@ -1,18 +1,66 @@
 use niralis_session_worker::{
     LinuxPostDropAuditor, PostDropAuditor, SessionChildCredentialProof, SessionChildEnvelope,
-    SessionChildIsolationProof, SessionChildResponse, SessionChildUnixCredentials,
-    SessionChildUnixPath, SessionProcessIdentityProof, SessionRuntimeEnvironmentProof,
-    SESSION_CHILD_PROTOCOL_VERSION, SESSION_EXEC_PROBE_VERSION,
+    SessionChildIsolationProof, SessionChildResponse, SessionChildTerminalProof,
+    SessionChildUnixCredentials, SessionChildUnixPath, SessionProcessIdentityProof,
+    SessionRuntimeEnvironmentProof, SESSION_CHILD_PROTOCOL_VERSION, SESSION_EXEC_PROBE_VERSION,
 };
 use std::io::Write;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    if args.len() != 3 {
+    if args.len() != 3 && args.len() != 11 {
         std::process::exit(1);
     }
     let username = args[1].clone();
     let session_id = args[2].clone();
+    let terminal_args = if args.len() == 11
+        && args[3] == "--terminal-seat"
+        && args[5] == "--terminal-vtnr"
+        && args[7] == "--terminal-major"
+        && args[9] == "--terminal-minor"
+    {
+        Some((
+            args[4].clone(),
+            args[6].parse::<u32>().ok(),
+            args[8].parse::<u32>().ok(),
+            args[10].parse::<u32>().ok(),
+        ))
+    } else {
+        None
+    };
+    let terminal_proof = terminal_args.and_then(|(seat, vtnr, major, minor)| {
+        let (Some(vtnr), Some(major), Some(minor)) = (vtnr, major, minor) else {
+            return None;
+        };
+        let fd = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/tty")
+            .ok()?;
+        let fd_number = std::os::fd::AsRawFd::as_raw_fd(&fd);
+        let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
+        if unsafe { libc::fstat(fd_number, &mut stat) } < 0
+            || libc::major(stat.st_rdev) as u32 != major
+            || libc::minor(stat.st_rdev) as u32 != minor
+        {
+            return None;
+        }
+        let sid = unsafe { libc::tcgetsid(fd_number) };
+        let pgid = unsafe { libc::tcgetpgrp(fd_number) };
+        let pid = std::process::id();
+        if sid <= 0 || pgid <= 0 || sid as u32 != pid || pgid as u32 != pid {
+            return None;
+        }
+        Some(SessionChildTerminalProof {
+            seat,
+            vtnr,
+            fd: 3,
+            device_major: major,
+            device_minor: minor,
+            controlling_sid: sid as u32,
+            foreground_pgid: pgid as u32,
+        })
+    });
     let audit = match LinuxPostDropAuditor.audit() {
         Ok(value) => value,
         Err(_) => std::process::exit(1),
@@ -98,6 +146,7 @@ fn main() {
                 cwd,
             },
             exec_probe_version: SESSION_EXEC_PROBE_VERSION,
+            terminal_proof,
         },
     };
     let mut out = std::io::stdout().lock();

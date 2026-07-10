@@ -6,6 +6,7 @@ mod runtime;
 #[cfg(test)]
 mod runtime_tests;
 mod session_child;
+mod vt;
 
 pub use identity::{
     GroupResolutionError, IdentityError, NssSupplementaryGroupsResolver, NssUnixIdentityResolver,
@@ -28,9 +29,14 @@ pub use session_child::{
     ProcessSessionChildRunner, ProcessSessionChildRunnerFactory, SessionChildCredentialProof,
     SessionChildEnvelope, SessionChildError, SessionChildErrorCode, SessionChildExpectation,
     SessionChildIsolationProof, SessionChildReport, SessionChildResponse, SessionChildRunner,
-    SessionChildRunnerFactory, SessionChildRuntimeContext, SessionChildUnixCredentials,
-    SessionChildUnixPath, SessionProcessIdentityProof, SessionRuntimeEnvironmentProof,
-    SESSION_CHILD_PROTOCOL_VERSION, SESSION_EXEC_PROBE_VERSION,
+    SessionChildRunnerFactory, SessionChildRuntimeContext, SessionChildTerminalContext,
+    SessionChildTerminalProof, SessionChildUnixCredentials, SessionChildUnixPath,
+    SessionProcessIdentityProof, SessionRuntimeEnvironmentProof, SESSION_CHILD_PROTOCOL_VERSION,
+    SESSION_EXEC_PROBE_VERSION,
+};
+pub use vt::{
+    LinuxVirtualTerminalAllocator, OwnedVirtualTerminal, VirtualTerminalAllocator,
+    VirtualTerminalError, VirtualTerminalGuard, VirtualTerminalLease,
 };
 
 pub fn run_session_child() -> i32 {

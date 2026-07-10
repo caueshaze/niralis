@@ -1,13 +1,14 @@
 mod protocol;
 pub use protocol::{
     SessionChildCredentialProof, SessionChildEnvelope, SessionChildErrorCode,
-    SessionChildIsolationProof, SessionChildResponse, SessionChildUnixCredentials,
-    SessionProcessIdentityProof, SessionRuntimeEnvironmentProof, SESSION_CHILD_PROTOCOL_VERSION,
-    SESSION_EXEC_PROBE_VERSION,
+    SessionChildIsolationProof, SessionChildResponse, SessionChildTerminalContext,
+    SessionChildTerminalProof, SessionChildUnixCredentials, SessionProcessIdentityProof,
+    SessionRuntimeEnvironmentProof, SESSION_CHILD_PROTOCOL_VERSION, SESSION_EXEC_PROBE_VERSION,
 };
 pub use protocol::{SessionChildRuntimeContext, SessionChildUnixPath};
 
 use std::io::{Read, Write};
+use std::os::fd::OwnedFd;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -20,8 +21,8 @@ use std::time::{Duration, Instant};
 use tracing::info;
 
 use crate::isolation::{
-    validate_isolation_proof, InheritedFdSanitizer, LinuxInheritedFdSanitizer,
-    LinuxPostDropAuditor, PostDropAuditor, PostDropIsolationProof,
+    validate_isolation_proof, validate_isolation_proof_with_allowed_fds, InheritedFdSanitizer,
+    LinuxInheritedFdSanitizer, LinuxPostDropAuditor, PostDropAuditor, PostDropIsolationProof,
 };
 use crate::privilege_drop::{
     AppliedCredentials, LibcPrivilegeDropper, PrivilegeDropError, PrivilegeDropTarget,
@@ -37,6 +38,7 @@ pub struct SessionChildExpectation {
     pub session_id: String,
     pub target_credentials: PrivilegeDropTarget,
     pub runtime: SessionChildRuntimeContext,
+    pub terminal: Option<SessionChildTerminalContext>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,6 +52,7 @@ pub struct SessionChildReport {
     pub runtime_environment: RuntimeEnvironmentProof,
     pub exec_probe_version: u32,
     pub credential_proof: SessionChildCredentialProof,
+    pub terminal_proof: Option<SessionChildTerminalProof>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,6 +109,14 @@ pub trait SessionChildRunner: Send + Sync {
 
 pub trait SessionChildRunnerFactory: Send + Sync {
     fn build(&self, path: &Path) -> Result<Box<dyn SessionChildRunner>, SessionChildError>;
+
+    fn build_with_terminal(
+        &self,
+        path: &Path,
+        _terminal_fd: Option<OwnedFd>,
+    ) -> Result<Box<dyn SessionChildRunner>, SessionChildError> {
+        self.build(path)
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -117,11 +128,23 @@ impl SessionChildRunnerFactory for ProcessSessionChildRunnerFactory {
             path.to_path_buf(),
         )?))
     }
+
+    fn build_with_terminal(
+        &self,
+        path: &Path,
+        terminal_fd: Option<OwnedFd>,
+    ) -> Result<Box<dyn SessionChildRunner>, SessionChildError> {
+        Ok(Box::new(ProcessSessionChildRunner::with_terminal(
+            path.to_path_buf(),
+            terminal_fd,
+        )?))
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct ProcessSessionChildRunner {
     path: PathBuf,
+    terminal_fd: Arc<Mutex<Option<OwnedFd>>>,
     live_child: Arc<Mutex<Option<LiveSessionChild>>>,
 }
 
@@ -138,8 +161,21 @@ impl ProcessSessionChildRunner {
         }
         Ok(Self {
             path,
+            terminal_fd: Arc::new(Mutex::new(None)),
             live_child: Arc::new(Mutex::new(None)),
         })
+    }
+
+    pub fn with_terminal(
+        path: PathBuf,
+        terminal_fd: Option<OwnedFd>,
+    ) -> Result<Self, SessionChildError> {
+        let runner = Self::new(path)?;
+        *runner
+            .terminal_fd
+            .lock()
+            .map_err(|_| SessionChildError::IoFailed)? = terminal_fd;
+        Ok(runner)
     }
 }
 
@@ -167,13 +203,19 @@ impl SessionChildRunner for ProcessSessionChildRunner {
                 session_id: expectation.session_id.clone(),
                 credentials: SessionChildUnixCredentials::from(&expectation.target_credentials),
                 runtime: expectation.runtime.clone(),
+                terminal: expectation.terminal.clone(),
             },
         };
         let payload = serde_json::to_vec(&request).map_err(|_| SessionChildError::IoFailed)?;
         if payload.len() + 1 > protocol::MAX_SESSION_CHILD_MESSAGE_BYTES {
             return Err(SessionChildError::ProtocolFailed);
         }
-        let mut attempt = SessionChildAttempt::spawn(&self.path, payload)?;
+        let terminal_fd = self
+            .terminal_fd
+            .lock()
+            .map_err(|_| SessionChildError::IoFailed)?
+            .take();
+        let mut attempt = SessionChildAttempt::spawn(&self.path, payload, terminal_fd)?;
         let pid = attempt.child.as_ref().expect("child exists").id();
         let writer_result = attempt.wait_writer(deadline);
         let reader_result = match &writer_result {
@@ -300,6 +342,7 @@ fn validate_ready_response(
             process_identity,
             runtime_environment,
             exec_probe_version,
+            terminal_proof,
         } if canonical_username == expectation.canonical_username
             && session_id == expectation.session_id
             && child_pid == pid
@@ -327,7 +370,20 @@ fn validate_ready_response(
             && runtime_environment.user == expectation.canonical_username
             && runtime_environment.logname == expectation.canonical_username
             && runtime_environment.path == DEFAULT_SESSION_PATH
-            && runtime_environment.cwd == expectation.runtime.home =>
+            && runtime_environment.cwd == expectation.runtime.home
+            && match (&expectation.terminal, &terminal_proof) {
+                (None, None) => true,
+                (Some(expected), Some(actual)) => {
+                    actual.seat == expected.seat
+                        && actual.vtnr == expected.vtnr
+                        && actual.fd == expected.fd
+                        && actual.device_major == expected.device_major
+                        && actual.device_minor == expected.device_minor
+                        && actual.controlling_sid == pid
+                        && actual.foreground_pgid == pid
+                }
+                _ => false,
+            } =>
         {
             Ok(SessionChildReport {
                 canonical_username,
@@ -355,6 +411,7 @@ fn validate_ready_response(
                 },
                 exec_probe_version,
                 credential_proof,
+                terminal_proof,
             })
         }
         SessionChildResponse::Rejected { .. } => Err(SessionChildError::ProtocolFailed),
@@ -386,8 +443,29 @@ impl SessionChildAttempt {
 }
 
 impl SessionChildAttempt {
-    fn spawn(path: &Path, payload: Vec<u8>) -> Result<Self, SessionChildError> {
-        let child = Command::new(path)
+    fn spawn(
+        path: &Path,
+        payload: Vec<u8>,
+        terminal_fd: Option<OwnedFd>,
+    ) -> Result<Self, SessionChildError> {
+        let mut command = Command::new(path);
+        let terminal_fd_keepalive = terminal_fd;
+        if let Some(terminal_fd) = terminal_fd_keepalive.as_ref() {
+            let source_fd = std::os::fd::AsRawFd::as_raw_fd(terminal_fd);
+            unsafe {
+                use std::os::unix::process::CommandExt;
+                command.pre_exec(move || {
+                    if libc::dup2(source_fd, 3) < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    if libc::fcntl(3, libc::F_SETFD, 0) < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+        }
+        let child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -589,12 +667,19 @@ pub(crate) fn run_child_process_with_dependencies(
         session_id,
         credentials,
         runtime,
+        terminal,
     } = request.message;
     if credentials.uid == 0 {
         let _ = write_rejection(&mut writer, SessionChildErrorCode::RootUidDisallowed);
         return 1;
     }
-    if fd_sanitizer.sanitize().is_err() {
+    let allowed_terminal_fds = terminal
+        .as_ref()
+        .map_or_else(Vec::new, |value| vec![value.fd]);
+    if fd_sanitizer
+        .sanitize_with_allowlist(&allowed_terminal_fds)
+        .is_err()
+    {
         let _ = write_rejection(&mut writer, SessionChildErrorCode::FdSanitizationFailed);
         return 1;
     }
@@ -622,7 +707,7 @@ pub(crate) fn run_child_process_with_dependencies(
             return 1;
         }
     };
-    if let Err(error) = validate_isolation_proof(&proof) {
+    if let Err(error) = validate_isolation_proof_with_allowed_fds(&proof, &allowed_terminal_fds) {
         eprintln!(
             "session child isolation policy failed error={error} effective_capability_count={} permitted_capability_count={} inheritable_capability_count={} ambient_capability_count={} bounding_capability_count={} securebits={} no_new_privs={} open_fd_count={}",
             proof.capabilities.effective.len(),
@@ -639,11 +724,58 @@ pub(crate) fn run_child_process_with_dependencies(
     }
     // The production child replaces itself with the trusted probe. Test seams use
     // synthetic PIDs and retain the response path for deterministic unit tests.
-    if child_pid == std::process::id() {
+    let terminal_proof = if child_pid == std::process::id() {
         if unsafe { libc::setsid() } < 0 {
             let _ = write_rejection(&mut writer, SessionChildErrorCode::SessionBoundaryFailed);
             return 1;
         }
+        let terminal = match terminal.as_ref() {
+            Some(terminal) if terminal.fd == 3 => terminal,
+            _ => {
+                let _ = write_rejection(&mut writer, SessionChildErrorCode::TerminalProofFailed);
+                return 1;
+            }
+        };
+        let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
+        if unsafe { libc::fstat(terminal.fd, &mut stat) } < 0
+            || libc::major(stat.st_rdev) as u32 != terminal.device_major
+            || libc::minor(stat.st_rdev) as u32 != terminal.device_minor
+        {
+            let _ = write_rejection(&mut writer, SessionChildErrorCode::TerminalProofFailed);
+            return 1;
+        }
+        if unsafe { libc::ioctl(terminal.fd, libc::TIOCSCTTY, 0) } < 0 {
+            let _ = write_rejection(&mut writer, SessionChildErrorCode::TerminalProofFailed);
+            return 1;
+        }
+        let previous_sigttou = unsafe { libc::signal(libc::SIGTTOU, libc::SIG_IGN) };
+        let foreground = unsafe { libc::tcsetpgrp(terminal.fd, libc::getpgrp()) };
+        unsafe { libc::signal(libc::SIGTTOU, previous_sigttou) };
+        if foreground != 0 {
+            let _ = write_rejection(&mut writer, SessionChildErrorCode::TerminalProofFailed);
+            return 1;
+        }
+        let sid = unsafe { libc::tcgetsid(terminal.fd) };
+        let pgid = unsafe { libc::tcgetpgrp(terminal.fd) };
+        let pid = unsafe { libc::getpid() };
+        if sid <= 0 || pgid <= 0 || sid as u32 != pid as u32 || pgid as u32 != pid as u32 {
+            let _ = write_rejection(&mut writer, SessionChildErrorCode::TerminalProofFailed);
+            return 1;
+        }
+        unsafe { libc::close(terminal.fd) };
+        Some(SessionChildTerminalProof {
+            seat: terminal.seat.clone(),
+            vtnr: terminal.vtnr,
+            fd: terminal.fd,
+            device_major: terminal.device_major,
+            device_minor: terminal.device_minor,
+            controlling_sid: sid as u32,
+            foreground_pgid: pgid as u32,
+        })
+    } else {
+        None
+    };
+    if child_pid == std::process::id() {
         let home = match runtime.home.to_path_buf() {
             Ok(path) if path.is_absolute() => path,
             _ => {
@@ -680,6 +812,17 @@ pub(crate) fn run_child_process_with_dependencies(
             )
             .env("PATH", DEFAULT_SESSION_PATH)
             .env("XDG_SESSION_TYPE", &runtime.session_type);
+        if let Some(terminal) = terminal.as_ref() {
+            command
+                .arg("--terminal-seat")
+                .arg(&terminal.seat)
+                .arg("--terminal-vtnr")
+                .arg(terminal.vtnr.to_string())
+                .arg("--terminal-major")
+                .arg(terminal.device_major.to_string())
+                .arg("--terminal-minor")
+                .arg(terminal.device_minor.to_string());
+        }
         let error = std::os::unix::process::CommandExt::exec(&mut command);
         let _ = write_rejection(&mut writer, SessionChildErrorCode::ExecFailed);
         let _ = error;
@@ -717,6 +860,7 @@ pub(crate) fn run_child_process_with_dependencies(
                 cwd: runtime.home,
             },
             exec_probe_version: SESSION_EXEC_PROBE_VERSION,
+            terminal_proof,
         },
     };
     if serde_json::to_writer(&mut writer, &response).is_err()

@@ -22,8 +22,9 @@ use crate::logind::{LogindSessionIdentity, LogindSessionResolver, SdLoginResolve
 use crate::privilege_drop::PrivilegeDropTarget;
 use crate::session_child::{
     ProcessSessionChildRunnerFactory, SessionChildExpectation, SessionChildRunnerFactory,
-    SessionChildRuntimeContext, SessionChildUnixPath,
+    SessionChildRuntimeContext, SessionChildTerminalContext, SessionChildUnixPath,
 };
+use crate::vt::{LinuxVirtualTerminalAllocator, VirtualTerminalAllocator, VirtualTerminalGuard};
 
 pub trait WorkerAuthenticatorFactory: Send + Sync {
     fn build(&self, pam_service: &str) -> Box<dyn Authenticator>;
@@ -35,6 +36,7 @@ pub struct WorkerDependencies<'a, F, I, G, C, L> {
     pub supplementary_groups_resolver: &'a G,
     pub session_child_runner_factory: &'a C,
     pub logind_resolver: &'a L,
+    pub virtual_terminal_allocator: &'a dyn VirtualTerminalAllocator,
 }
 
 #[derive(Debug, Default)]
@@ -59,6 +61,7 @@ pub fn run_worker_process<R: Read, W: Write>(
             supplementary_groups_resolver: &NssSupplementaryGroupsResolver,
             session_child_runner_factory: &ProcessSessionChildRunnerFactory,
             logind_resolver: &SdLoginResolver,
+            virtual_terminal_allocator: &LinuxVirtualTerminalAllocator,
         },
     )
 }
@@ -130,6 +133,7 @@ pub fn run_worker_process_with_dependencies<
             session_probe_path,
             control_path,
             worker_id,
+            dependencies.virtual_terminal_allocator,
         ),
     }
 }
@@ -155,11 +159,27 @@ fn run_pam_session<
     session_probe_path: std::path::PathBuf,
     control_path: std::path::PathBuf,
     worker_id: String,
+    virtual_terminal_allocator: &dyn VirtualTerminalAllocator,
 ) -> Result<(), SessionError> {
     let control_listener = if control_path.as_os_str().is_empty() {
         None
     } else {
         Some(bind_control_listener(&control_path)?)
+    };
+    let seat = niralis_auth::SeatId::new("seat0".to_owned())
+        .ok_or(SessionError::AuthenticatedSessionFailed)?;
+    let mut terminal = match virtual_terminal_allocator.allocate(&seat) {
+        Ok(terminal) => VirtualTerminalGuard::new(terminal),
+        Err(error) => {
+            warn!(username = %request.username, session = %request.session.id, ?error, "worker failed to allocate virtual terminal");
+            write_envelope(
+                writer,
+                WorkerResponse::SessionFailed {
+                    code: WorkerSessionFailureCode::OpenFailed,
+                },
+            )?;
+            return Err(SessionError::AuthenticatedSessionFailed);
+        }
     };
     let authenticator = factory.build(&pam_service);
     let auth_result = authenticator.authenticate(&request.username, password.expose());
@@ -258,6 +278,8 @@ fn run_pam_session<
         },
         session_class: niralis_auth::PamSessionClass::User,
         session_desktop: request.session.id.clone(),
+        seat: Some(terminal.lease().seat().clone()),
+        vtnr: Some(terminal.lease().vtnr()),
     };
     let open_result = catch_unwind(AssertUnwindSafe(|| transaction.open_session(&metadata)));
     let session = StartedSession {
@@ -275,6 +297,8 @@ fn run_pam_session<
                         credentials.identity.uid,
                         expected_type,
                         &session.session.id,
+                        terminal.lease().seat().as_str(),
+                        terminal.lease().vtnr().number(),
                     ) =>
                 {
                     identity
@@ -290,8 +314,22 @@ fn run_pam_session<
                     return Err(SessionError::AuthenticatedSessionFailed);
                 }
             };
+            let child_terminal_fd = match terminal.lease().duplicate_terminal_fd() {
+                Ok(fd) => fd,
+                Err(error) => {
+                    warn!(username = %canonical_username, session = %session.session.id, ?error, "worker failed to duplicate owned VT fd");
+                    drop(transaction);
+                    write_envelope(
+                        writer,
+                        WorkerResponse::SessionFailed {
+                            code: WorkerSessionFailureCode::SessionChildFailed,
+                        },
+                    )?;
+                    return Err(SessionError::AuthenticatedSessionFailed);
+                }
+            };
             let child_runner = match session_child_runner_factory
-                .build(Path::new(&session_child_path))
+                .build_with_terminal(Path::new(&session_child_path), Some(child_terminal_fd))
             {
                 Ok(runner) => runner,
                 Err(error) => {
@@ -337,6 +375,13 @@ fn run_pam_session<
                 session_id: session.session.id.clone(),
                 target_credentials: PrivilegeDropTarget::from(&credentials),
                 runtime,
+                terminal: Some(SessionChildTerminalContext {
+                    seat: terminal.lease().seat().as_str().to_owned(),
+                    vtnr: terminal.lease().vtnr().number(),
+                    fd: 3,
+                    device_major: 4,
+                    device_minor: terminal.lease().vtnr().number(),
+                }),
             }) {
                 Ok(report) => report,
                 Err(error) => {
@@ -351,6 +396,21 @@ fn run_pam_session<
                     return Err(SessionError::AuthenticatedSessionFailed);
                 }
             };
+            if !valid_terminal_proof(
+                &child_report,
+                terminal.lease().seat().as_str(),
+                terminal.lease().vtnr().number(),
+            ) {
+                let _ = child_runner.terminate(SESSION_TERMINATION_GRACE);
+                drop(transaction);
+                write_envelope(
+                    writer,
+                    WorkerResponse::SessionFailed {
+                        code: WorkerSessionFailureCode::SessionChildFailed,
+                    },
+                )?;
+                return Err(SessionError::AuthenticatedSessionFailed);
+            }
             match logind_resolver.resolve_by_pid(child_report.child_pid) {
                 Ok(Some(child_identity))
                     if child_identity.id == logind.id
@@ -359,6 +419,8 @@ fn run_pam_session<
                             credentials.identity.uid,
                             expected_type,
                             &session.session.id,
+                            terminal.lease().seat().as_str(),
+                            terminal.lease().vtnr().number(),
                         ) => {}
                 _ => {
                     let _ = child_runner.terminate(SESSION_TERMINATION_GRACE);
@@ -371,6 +433,21 @@ fn run_pam_session<
                     )?;
                     return Err(SessionError::AuthenticatedSessionFailed);
                 }
+            }
+            if terminal
+                .lease_mut()
+                .activate(Duration::from_millis(1000))
+                .is_err()
+            {
+                let _ = child_runner.terminate(SESSION_TERMINATION_GRACE);
+                drop(transaction);
+                write_envelope(
+                    writer,
+                    WorkerResponse::SessionFailed {
+                        code: WorkerSessionFailureCode::SessionChildFailed,
+                    },
+                )?;
+                return Err(SessionError::AuthenticatedSessionFailed);
             }
             info!(
                 username = %canonical_username,
@@ -430,6 +507,7 @@ fn run_pam_session<
             info!(username = %canonical_username, session = %session.session.id, ?child_status, "worker session child reaped");
             drop(transaction);
             info!(username = %canonical_username, session = %session.session.id, "worker PAM transaction closed");
+            let _ = terminal.release();
             if child_status.success() {
                 Ok(())
             } else {
@@ -466,6 +544,8 @@ fn valid_logind_identity(
     uid: u32,
     expected_type: &str,
     desktop: &str,
+    expected_seat: &str,
+    expected_vtnr: u32,
 ) -> bool {
     identity.uid == uid
         && identity.session_type == expected_type
@@ -474,6 +554,24 @@ fn valid_logind_identity(
             .desktop
             .as_deref()
             .map_or(true, |value| value == desktop)
+        && identity.seat.as_deref() == Some(expected_seat)
+        && identity.vtnr == Some(expected_vtnr)
+}
+
+fn valid_terminal_proof(
+    report: &crate::session_child::SessionChildReport,
+    expected_seat: &str,
+    expected_vtnr: u32,
+) -> bool {
+    report.terminal_proof.as_ref().is_some_and(|proof| {
+        proof.seat == expected_seat
+            && proof.vtnr == expected_vtnr
+            && proof.fd == 3
+            && proof.device_major == 4
+            && proof.device_minor == expected_vtnr
+            && proof.controlling_sid == report.process_identity.sid
+            && proof.foreground_pgid == report.process_identity.pgid
+    })
 }
 
 const SESSION_TERMINATION_GRACE: Duration = Duration::from_secs(5);
@@ -562,6 +660,37 @@ fn peer_is_root(stream: &UnixStream) -> bool {
         )
     };
     result == 0 && credentials.uid == 0
+}
+
+#[cfg(test)]
+mod terminal_binding_tests {
+    use super::*;
+
+    fn identity() -> LogindSessionIdentity {
+        LogindSessionIdentity {
+            id: crate::LogindSessionId::new("c1".to_owned()).unwrap(),
+            uid: 1000,
+            session_type: "wayland".to_owned(),
+            class: "user".to_owned(),
+            desktop: Some("niri".to_owned()),
+            seat: Some("seat0".to_owned()),
+            vtnr: Some(2),
+        }
+    }
+
+    #[test]
+    fn logind_seat_and_vt_are_bound_to_the_owned_terminal() {
+        let identity = identity();
+        assert!(valid_logind_identity(
+            &identity, 1000, "wayland", "niri", "seat0", 2
+        ));
+        assert!(!valid_logind_identity(
+            &identity, 1000, "wayland", "niri", "seat1", 2
+        ));
+        assert!(!valid_logind_identity(
+            &identity, 1000, "wayland", "niri", "seat0", 3
+        ));
+    }
 }
 
 fn write_rejection<W: Write>(writer: &mut W, code: WorkerErrorCode) -> Result<(), SessionError> {

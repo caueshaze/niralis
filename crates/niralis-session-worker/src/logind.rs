@@ -24,6 +24,8 @@ pub struct LogindSessionIdentity {
     pub session_type: String,
     pub class: String,
     pub desktop: Option<String>,
+    pub seat: Option<String>,
+    pub vtnr: Option<u32>,
 }
 
 #[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
@@ -99,6 +101,16 @@ impl LogindSessionResolver for SdLoginResolver {
             > = library
                 .get(b"sd_session_get_desktop\0")
                 .map_err(|_| LogindError::Unavailable)?;
+            let seat: Symbol<
+                unsafe extern "C" fn(*const libc::c_char, *mut *mut libc::c_char) -> libc::c_int,
+            > = library
+                .get(b"sd_session_get_seat\0")
+                .map_err(|_| LogindError::Unavailable)?;
+            let vt: Symbol<
+                unsafe extern "C" fn(*const libc::c_char, *mut libc::c_uint) -> libc::c_int,
+            > = library
+                .get(b"sd_session_get_vt\0")
+                .map_err(|_| LogindError::Unavailable)?;
             let id_c = CString::new(id.as_str()).map_err(|_| LogindError::InvalidSessionId)?;
             let mut value_uid = 0;
             if uid(id_c.as_ptr(), &mut value_uid) < 0 {
@@ -110,6 +122,8 @@ impl LogindSessionResolver for SdLoginResolver {
                 session_type: string_value(ty, id_c.as_ptr())?,
                 class: string_value(class, id_c.as_ptr())?,
                 desktop: string_value(desktop, id_c.as_ptr()).ok(),
+                seat: optional_string_value(seat, id_c.as_ptr()),
+                vtnr: optional_vtnr(vt, id_c.as_ptr()),
             }))
         }
     }
@@ -134,4 +148,25 @@ unsafe fn string_value(
         .to_owned();
     libc::free(value.cast());
     Ok(result)
+}
+
+unsafe fn optional_string_value(
+    function: Symbol<
+        unsafe extern "C" fn(*const libc::c_char, *mut *mut libc::c_char) -> libc::c_int,
+    >,
+    id: *const libc::c_char,
+) -> Option<String> {
+    string_value(function, id).ok()
+}
+
+unsafe fn optional_vtnr(
+    function: Symbol<unsafe extern "C" fn(*const libc::c_char, *mut libc::c_uint) -> libc::c_int>,
+    id: *const libc::c_char,
+) -> Option<u32> {
+    let mut value = 0;
+    if function(id, &mut value) < 0 || value == 0 {
+        None
+    } else {
+        Some(value)
+    }
 }

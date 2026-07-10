@@ -30,6 +30,7 @@ fn expectation() -> SessionChildExpectation {
                 bytes: b"/probe".to_vec(),
             },
         },
+        terminal: None,
     }
 }
 

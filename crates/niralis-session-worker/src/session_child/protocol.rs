@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::isolation::PostDropIsolationProof;
 use crate::privilege_drop::{AppliedCredentials, PrivilegeDropTarget};
 
-pub const SESSION_CHILD_PROTOCOL_VERSION: u32 = 5;
+pub const SESSION_CHILD_PROTOCOL_VERSION: u32 = 6;
 pub const SESSION_EXEC_PROBE_VERSION: u32 = 1;
 pub const MAX_SESSION_CHILD_MESSAGE_BYTES: usize = 1024 * 1024;
 
@@ -56,6 +56,26 @@ pub struct SessionChildRuntimeContext {
     pub shell: SessionChildUnixPath,
     pub session_type: String,
     pub probe_path: SessionChildUnixPath,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionChildTerminalContext {
+    pub seat: String,
+    pub vtnr: u32,
+    pub fd: i32,
+    pub device_major: u32,
+    pub device_minor: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionChildTerminalProof {
+    pub seat: String,
+    pub vtnr: u32,
+    pub fd: i32,
+    pub device_major: u32,
+    pub device_minor: u32,
+    pub controlling_sid: u32,
+    pub foreground_pgid: u32,
 }
 
 impl From<&PrivilegeDropTarget> for SessionChildUnixCredentials {
@@ -166,6 +186,8 @@ pub enum SessionChildRequest {
         session_id: String,
         credentials: SessionChildUnixCredentials,
         runtime: SessionChildRuntimeContext,
+        #[serde(default)]
+        terminal: Option<SessionChildTerminalContext>,
     },
 }
 
@@ -181,6 +203,8 @@ pub enum SessionChildResponse {
         process_identity: SessionProcessIdentityProof,
         runtime_environment: SessionRuntimeEnvironmentProof,
         exec_probe_version: u32,
+        #[serde(default)]
+        terminal_proof: Option<SessionChildTerminalProof>,
     },
     Rejected {
         code: SessionChildErrorCode,
@@ -201,6 +225,7 @@ pub enum SessionChildErrorCode {
     InvalidRuntimeContext,
     HomeDirectoryUnavailable,
     SessionBoundaryFailed,
+    TerminalProofFailed,
     ExecFailed,
     RuntimeProbeFailed,
     InternalError,

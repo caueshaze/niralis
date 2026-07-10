@@ -5,7 +5,7 @@ use std::time::Duration;
 fn main() {
     let _ = std::io::stdin().read_to_end(&mut Vec::new());
     let response = serde_json::json!({
-        "version": 5,
+        "version": 6,
         "message": {
             "Ready": {
                 "canonical_username": "canonical-user",

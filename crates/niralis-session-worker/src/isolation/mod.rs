@@ -40,6 +40,13 @@ pub enum IsolationPolicyError {
 pub fn validate_isolation_proof(
     proof: &PostDropIsolationProof,
 ) -> Result<(), IsolationPolicyError> {
+    validate_isolation_proof_with_allowed_fds(proof, &[])
+}
+
+pub fn validate_isolation_proof_with_allowed_fds(
+    proof: &PostDropIsolationProof,
+    allowed_fds: &[i32],
+) -> Result<(), IsolationPolicyError> {
     let caps = &proof.capabilities;
     if caps.cap_last_cap > HARD_MAX_CAPABILITY_ID
         || !valid_capabilities(&caps.effective, caps.cap_last_cap)
@@ -63,7 +70,11 @@ pub fn validate_isolation_proof(
     if proof.securebits & DANGEROUS_SECUREBITS_MASK != 0 {
         return Err(IsolationPolicyError::DangerousSecurebits);
     }
-    if proof.open_fds != [0, 1, 2] {
+    let mut expected = vec![0, 1, 2];
+    expected.extend_from_slice(allowed_fds);
+    expected.sort_unstable();
+    expected.dedup();
+    if proof.open_fds != expected {
         return Err(IsolationPolicyError::UnexpectedFileDescriptors);
     }
     Ok(())
@@ -79,6 +90,14 @@ fn valid_fds(values: &[i32]) -> bool {
 
 pub trait InheritedFdSanitizer: Send + Sync {
     fn sanitize(&self) -> Result<(), FdSanitizationError>;
+
+    fn sanitize_with_allowlist(&self, allowed_fds: &[i32]) -> Result<(), FdSanitizationError> {
+        if allowed_fds.is_empty() {
+            self.sanitize()
+        } else {
+            Err(FdSanitizationError::Failed)
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
