@@ -20,10 +20,12 @@ pub fn build_worker_session_launcher(config: &Config) -> Result<WorkerSessionLau
     validate_worker_binary(config)?;
     if matches!(config.auth.backend, AuthBackend::Pam) {
         validate_trusted_executable(&config.session.child_path, ExecutableRole::SessionChild)?;
+        validate_trusted_executable(&config.session.probe_path, ExecutableRole::SessionProbe)?;
     }
     WorkerSessionLauncher::new(
         config.session.worker_path.clone(),
         config.session.child_path.clone(),
+        config.session.probe_path.clone(),
         Duration::from_secs(config.session.worker_timeout_seconds),
     )
     .map_err(|_| NiralisdError::InvalidWorkerPath(config.session.worker_path.clone()))
@@ -55,6 +57,7 @@ fn validate_worker_binary(config: &Config) -> Result<()> {
 enum ExecutableRole {
     SessionWorker,
     SessionChild,
+    SessionProbe,
 }
 
 fn validate_trusted_executable(path: &Path, role: ExecutableRole) -> Result<()> {
@@ -107,6 +110,7 @@ fn invalid(path: &Path, role: ExecutableRole) -> NiralisdError {
     match role {
         ExecutableRole::SessionWorker => NiralisdError::InvalidWorkerPath(path.to_path_buf()),
         ExecutableRole::SessionChild => NiralisdError::InvalidSessionChildPath(path.to_path_buf()),
+        ExecutableRole::SessionProbe => NiralisdError::InvalidSessionProbePath(path.to_path_buf()),
     }
 }
 
@@ -114,6 +118,7 @@ fn unavailable(path: &Path, role: ExecutableRole) -> NiralisdError {
     match role {
         ExecutableRole::SessionWorker => NiralisdError::WorkerUnavailable(path.to_path_buf()),
         ExecutableRole::SessionChild => NiralisdError::SessionChildUnavailable(path.to_path_buf()),
+        ExecutableRole::SessionProbe => NiralisdError::SessionProbeUnavailable(path.to_path_buf()),
     }
 }
 
@@ -121,11 +126,12 @@ fn untrusted(path: &Path, role: ExecutableRole) -> NiralisdError {
     match role {
         ExecutableRole::SessionWorker => NiralisdError::WorkerUntrusted(path.to_path_buf()),
         ExecutableRole::SessionChild => NiralisdError::SessionChildUntrusted(path.to_path_buf()),
+        ExecutableRole::SessionProbe => NiralisdError::SessionProbeUntrusted(path.to_path_buf()),
     }
 }
 
 fn has_trusted_owner_and_permissions(uid: u32, mode: u32) -> bool {
-    uid == 0 && mode & 0o022 == 0
+    uid == 0 && mode & (0o022 | 0o6000) == 0
 }
 
 #[cfg(test)]

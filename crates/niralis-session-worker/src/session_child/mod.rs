@@ -1,4 +1,10 @@
 mod protocol;
+pub use protocol::{
+    SessionChildEnvelope, SessionChildErrorCode, SessionChildIsolationProof, SessionChildResponse,
+    SessionChildUnixCredentials, SessionProcessIdentityProof, SessionRuntimeEnvironmentProof,
+    SESSION_CHILD_PROTOCOL_VERSION, SESSION_EXEC_PROBE_VERSION,
+};
+pub use protocol::{SessionChildRuntimeContext, SessionChildUnixPath};
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -15,10 +21,7 @@ use crate::privilege_drop::{
     AppliedCredentials, LibcPrivilegeDropper, PrivilegeDropError, PrivilegeDropTarget,
     PrivilegeDropper,
 };
-use protocol::{
-    SessionChildEnvelope, SessionChildErrorCode, SessionChildIsolationProof, SessionChildRequest,
-    SessionChildResponse, SessionChildUnixCredentials, SESSION_CHILD_PROTOCOL_VERSION,
-};
+use protocol::SessionChildRequest;
 
 pub const SESSION_CHILD_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -27,6 +30,7 @@ pub struct SessionChildExpectation {
     pub canonical_username: String,
     pub session_id: String,
     pub target_credentials: PrivilegeDropTarget,
+    pub runtime: SessionChildRuntimeContext,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,6 +40,26 @@ pub struct SessionChildReport {
     pub child_pid: u32,
     pub applied_credentials: AppliedCredentials,
     pub isolation_proof: PostDropIsolationProof,
+    pub process_identity: ProcessIdentityProof,
+    pub runtime_environment: RuntimeEnvironmentProof,
+    pub exec_probe_version: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessIdentityProof {
+    pub pid: u32,
+    pub sid: u32,
+    pub pgid: u32,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeEnvironmentProof {
+    pub home: SessionChildUnixPath,
+    pub user: String,
+    pub logname: String,
+    pub shell: SessionChildUnixPath,
+    pub path: String,
+    pub session_type: String,
+    pub cwd: SessionChildUnixPath,
 }
 
 #[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
@@ -102,6 +126,7 @@ impl SessionChildRunner for ProcessSessionChildRunner {
                 canonical_username: expectation.canonical_username.clone(),
                 session_id: expectation.session_id.clone(),
                 credentials: SessionChildUnixCredentials::from(&expectation.target_credentials),
+                runtime: expectation.runtime.clone(),
             },
         };
         let payload = serde_json::to_vec(&request).map_err(|_| SessionChildError::IoFailed)?;
@@ -154,13 +179,27 @@ fn validate_ready_response(
             child_pid,
             applied_credentials,
             isolation_proof,
+            process_identity,
+            runtime_environment,
+            exec_probe_version,
         } if canonical_username == expectation.canonical_username
             && session_id == expectation.session_id
             && child_pid == pid
             && applied_credentials
                 == SessionChildUnixCredentials::from(&expectation.target_credentials)
             && validate_isolation_proof(&PostDropIsolationProof::from(isolation_proof.clone()))
-                .is_ok() =>
+                .is_ok()
+            && exec_probe_version == SESSION_EXEC_PROBE_VERSION
+            && process_identity.pid == pid
+            && process_identity.sid == pid
+            && process_identity.pgid == pid
+            && runtime_environment.home == expectation.runtime.home
+            && runtime_environment.shell == expectation.runtime.shell
+            && runtime_environment.session_type == expectation.runtime.session_type
+            && runtime_environment.user == expectation.canonical_username
+            && runtime_environment.logname == expectation.canonical_username
+            && runtime_environment.path == DEFAULT_SESSION_PATH
+            && runtime_environment.cwd == expectation.runtime.home =>
         {
             Ok(SessionChildReport {
                 canonical_username,
@@ -172,12 +211,29 @@ fn validate_ready_response(
                     supplementary_gids: applied_credentials.supplementary_gids,
                 },
                 isolation_proof: isolation_proof.into(),
+                process_identity: ProcessIdentityProof {
+                    pid: process_identity.pid,
+                    sid: process_identity.sid,
+                    pgid: process_identity.pgid,
+                },
+                runtime_environment: RuntimeEnvironmentProof {
+                    home: runtime_environment.home,
+                    user: runtime_environment.user,
+                    logname: runtime_environment.logname,
+                    shell: runtime_environment.shell,
+                    path: runtime_environment.path,
+                    session_type: runtime_environment.session_type,
+                    cwd: runtime_environment.cwd,
+                },
+                exec_probe_version,
             })
         }
         SessionChildResponse::Rejected { .. } => Err(SessionChildError::ProtocolFailed),
         SessionChildResponse::Ready { .. } => Err(SessionChildError::ProtocolFailed),
     }
 }
+
+pub const DEFAULT_SESSION_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
 
 const CHILD_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
@@ -400,6 +456,7 @@ pub(crate) fn run_child_process_with_dependencies(
         canonical_username,
         session_id,
         credentials,
+        runtime,
     } = request.message;
     if credentials.uid == 0 {
         let _ = write_rejection(&mut writer, SessionChildErrorCode::RootUidDisallowed);
@@ -448,14 +505,77 @@ pub(crate) fn run_child_process_with_dependencies(
         let _ = write_rejection(&mut writer, SessionChildErrorCode::IsolationPolicyFailed);
         return 1;
     }
+    // The production child replaces itself with the trusted probe. Test seams use
+    // synthetic PIDs and retain the response path for deterministic unit tests.
+    if child_pid == std::process::id() {
+        if unsafe { libc::setsid() } < 0 {
+            let _ = write_rejection(&mut writer, SessionChildErrorCode::SessionBoundaryFailed);
+            return 1;
+        }
+        let home = match runtime.home.to_path_buf() {
+            Ok(path) if path.is_absolute() => path,
+            _ => {
+                let _ =
+                    write_rejection(&mut writer, SessionChildErrorCode::HomeDirectoryUnavailable);
+                return 1;
+            }
+        };
+        if std::env::set_current_dir(&home).is_err() {
+            let _ = write_rejection(&mut writer, SessionChildErrorCode::HomeDirectoryUnavailable);
+            return 1;
+        }
+        let probe = match runtime.probe_path.to_path_buf() {
+            Ok(path) if path.is_absolute() => path,
+            _ => {
+                let _ = write_rejection(&mut writer, SessionChildErrorCode::InvalidRuntimeContext);
+                return 1;
+            }
+        };
+        let mut command = std::process::Command::new(probe);
+        command
+            .arg(&canonical_username)
+            .arg(&session_id)
+            .stdin(std::process::Stdio::inherit())
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit())
+            .env_clear()
+            .env("HOME", home)
+            .env("USER", &canonical_username)
+            .env("LOGNAME", &canonical_username)
+            .env(
+                "SHELL",
+                runtime.shell.to_path_buf().ok().unwrap_or_default(),
+            )
+            .env("PATH", DEFAULT_SESSION_PATH)
+            .env("XDG_SESSION_TYPE", &runtime.session_type);
+        let error = std::os::unix::process::CommandExt::exec(&mut command);
+        let _ = write_rejection(&mut writer, SessionChildErrorCode::ExecFailed);
+        let _ = error;
+        return 1;
+    }
     let response = SessionChildEnvelope {
         version: SESSION_CHILD_PROTOCOL_VERSION,
         message: SessionChildResponse::Ready {
-            canonical_username,
+            canonical_username: canonical_username.clone(),
             session_id,
             child_pid,
             applied_credentials,
             isolation_proof: SessionChildIsolationProof::from(&proof),
+            process_identity: SessionProcessIdentityProof {
+                pid: child_pid,
+                sid: child_pid,
+                pgid: child_pid,
+            },
+            runtime_environment: SessionRuntimeEnvironmentProof {
+                home: runtime.home.clone(),
+                user: canonical_username.clone(),
+                logname: canonical_username.clone(),
+                shell: runtime.shell.clone(),
+                path: DEFAULT_SESSION_PATH.to_owned(),
+                session_type: runtime.session_type.clone(),
+                cwd: runtime.home,
+            },
+            exec_probe_version: SESSION_EXEC_PROBE_VERSION,
         },
     };
     if serde_json::to_writer(&mut writer, &response).is_err()

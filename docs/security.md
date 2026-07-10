@@ -235,6 +235,19 @@ The child path is absolute and follows the same root-owned, non-writable trust
 policy as the worker. The child performs the real numeric privilege drop but
 does not execute a compositor or initialize a desktop session.
 
+## Trusted Exec Handoff
+
+The session configuration contains a separately trusted `probe_path`. The
+worker passes canonical home, shell, session type, and the probe path through a
+bounded byte-safe child protocol v4. After descriptor sanitization, credential
+drop, isolation audit, and `setsid()`, the child changes to the canonical HOME,
+constructs only `HOME`, `USER`, `LOGNAME`, `SHELL`, `PATH`, and
+`XDG_SESSION_TYPE`, and replaces itself with `niralis-session-probe` using
+`exec`. The probe preserves the original PID, reaudits credentials and
+isolation, verifies SID/PGID, cwd, and the explicit environment, then emits
+`Ready`. The worker accepts it only when every proof is bound to the spawned
+PID and expected canonical identity.
+
 ## Worker Trust Policy
 
 When PAM is enabled, both the worker and session child binaries must be

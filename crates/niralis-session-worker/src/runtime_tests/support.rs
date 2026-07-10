@@ -157,7 +157,7 @@ impl SessionChildRunner for StubChildRunner {
             .fetch_add(self.state.drops.load(Ordering::SeqCst), Ordering::SeqCst);
         self.result.clone()?;
         Ok(SessionChildReport {
-            canonical_username: expectation.canonical_username,
+            canonical_username: expectation.canonical_username.clone(),
             session_id: expectation.session_id,
             child_pid: 1,
             applied_credentials: AppliedCredentials {
@@ -178,6 +178,21 @@ impl SessionChildRunner for StubChildRunner {
                 no_new_privs: false,
                 open_fds: vec![0, 1, 2],
             },
+            process_identity: crate::session_child::ProcessIdentityProof {
+                pid: 1,
+                sid: 1,
+                pgid: 1,
+            },
+            runtime_environment: crate::session_child::RuntimeEnvironmentProof {
+                home: expectation.runtime.home.clone(),
+                user: expectation.canonical_username.clone(),
+                logname: expectation.canonical_username.clone(),
+                shell: expectation.runtime.shell.clone(),
+                path: crate::session_child::DEFAULT_SESSION_PATH.into(),
+                session_type: expectation.runtime.session_type.clone(),
+                cwd: expectation.runtime.home.clone(),
+            },
+            exec_probe_version: crate::session_child::SESSION_EXEC_PROBE_VERSION,
         })
     }
 }
@@ -219,6 +234,7 @@ pub(super) fn request() -> WorkerEnvelope<WorkerRequest> {
             pam_service: "niralis".to_owned(),
             password: WorkerSecret::new("secret".to_owned()),
             session_child_path: "/usr/libexec/niralis-session-child".into(),
+            session_probe_path: "/usr/libexec/niralis-session-probe".into(),
         },
     }
 }

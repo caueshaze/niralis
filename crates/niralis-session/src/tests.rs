@@ -37,6 +37,7 @@ fn worker_request_round_trip_preserves_wayland_x11_and_secret() {
                 pam_service: "niralis".to_owned(),
                 password: WorkerSecret::new("secret".to_owned()),
                 session_child_path: PathBuf::from("/usr/libexec/niralis-session-child"),
+                session_probe_path: PathBuf::from("/usr/libexec/niralis-session-probe"),
             },
         })
         .expect("request should serialize");
@@ -50,6 +51,7 @@ fn worker_request_round_trip_preserves_wayland_x11_and_secret() {
                 pam_service,
                 password,
                 session_child_path,
+                session_probe_path,
             } => {
                 assert_eq!(request.username, "test");
                 assert_eq!(request.session, session(kind));
@@ -58,6 +60,10 @@ fn worker_request_round_trip_preserves_wayland_x11_and_secret() {
                 assert_eq!(
                     session_child_path,
                     PathBuf::from("/usr/libexec/niralis-session-child")
+                );
+                assert_eq!(
+                    session_probe_path,
+                    PathBuf::from("/usr/libexec/niralis-session-probe")
                 );
             }
             other => panic!("unexpected request: {other:?}"),

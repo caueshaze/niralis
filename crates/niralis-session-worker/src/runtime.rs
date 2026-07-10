@@ -16,6 +16,7 @@ use crate::identity::{
 use crate::privilege_drop::PrivilegeDropTarget;
 use crate::session_child::{
     ProcessSessionChildRunnerFactory, SessionChildExpectation, SessionChildRunnerFactory,
+    SessionChildRuntimeContext, SessionChildUnixPath,
 };
 
 pub trait WorkerAuthenticatorFactory: Send + Sync {
@@ -103,6 +104,7 @@ pub fn run_worker_process_with_dependencies<
             pam_service,
             password,
             session_child_path,
+            session_probe_path,
         } => run_pam_session(
             writer,
             dependencies.authenticator_factory,
@@ -113,6 +115,7 @@ pub fn run_worker_process_with_dependencies<
             pam_service,
             password,
             session_child_path,
+            session_probe_path,
         ),
     }
 }
@@ -133,6 +136,7 @@ fn run_pam_session<
     pam_service: String,
     password: niralis_session::WorkerSecret,
     session_child_path: std::path::PathBuf,
+    session_probe_path: std::path::PathBuf,
 ) -> Result<(), SessionError> {
     let authenticator = factory.build(&pam_service);
     let auth_result = authenticator.authenticate(&request.username, password.expose());
@@ -245,10 +249,37 @@ fn run_pam_session<
                     return Err(SessionError::AuthenticatedSessionFailed);
                 }
             };
+            let runtime = match (
+                SessionChildUnixPath::new(&credentials.identity.home),
+                SessionChildUnixPath::new(&credentials.identity.shell),
+                SessionChildUnixPath::new(&session_probe_path),
+            ) {
+                (Ok(home), Ok(shell), Ok(probe_path)) => SessionChildRuntimeContext {
+                    home,
+                    shell,
+                    session_type: match session.session.kind {
+                        niralis_protocol::SessionKind::Wayland => "wayland",
+                        niralis_protocol::SessionKind::X11 => "x11",
+                    }
+                    .to_owned(),
+                    probe_path,
+                },
+                _ => {
+                    drop(transaction);
+                    write_envelope(
+                        writer,
+                        WorkerResponse::SessionFailed {
+                            code: WorkerSessionFailureCode::SessionChildFailed,
+                        },
+                    )?;
+                    return Err(SessionError::AuthenticatedSessionFailed);
+                }
+            };
             let child_report = match child_runner.run_child(SessionChildExpectation {
                 canonical_username: canonical_username.clone(),
                 session_id: session.session.id.clone(),
                 target_credentials: PrivilegeDropTarget::from(&credentials),
+                runtime,
             }) {
                 Ok(report) => report,
                 Err(error) => {
@@ -267,6 +298,12 @@ fn run_pam_session<
                 username = %canonical_username,
                 session = %session.session.id,
                 pid = child_report.child_pid,
+                spawned_child_pid = child_report.child_pid,
+                exec_probe_pid = child_report.process_identity.pid,
+                sid = child_report.process_identity.sid,
+                pgid = child_report.process_identity.pgid,
+                sid_equals_pid = child_report.process_identity.sid == child_report.child_pid,
+                pgid_equals_pid = child_report.process_identity.pgid == child_report.child_pid,
                 uid = child_report.applied_credentials.uid,
                 gid = child_report.applied_credentials.gid,
                 supplementary_group_count = child_report.applied_credentials.supplementary_gids.len(),
@@ -278,7 +315,10 @@ fn run_pam_session<
                 securebits = child_report.isolation_proof.securebits,
                 no_new_privs = child_report.isolation_proof.no_new_privs,
                 open_fd_count = child_report.isolation_proof.open_fds.len(),
-                "worker session child verified post-drop isolation"
+                cwd_matches_home = child_report.runtime_environment.cwd == child_report.runtime_environment.home,
+                runtime_session_type = %child_report.runtime_environment.session_type,
+                probe_version = child_report.exec_probe_version,
+                "worker session exec probe verified"
             );
             drop(transaction);
             info!(username = %canonical_username, session = %session.session.id, "worker PAM transaction closed");

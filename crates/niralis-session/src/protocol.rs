@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{SessionRequest, StartedSession, WorkerSecret};
 
-pub const WORKER_PROTOCOL_VERSION: u32 = 4;
+pub const WORKER_PROTOCOL_VERSION: u32 = 5;
 pub const MAX_WORKER_MESSAGE_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -23,6 +23,7 @@ pub enum WorkerRequest {
         pam_service: String,
         password: WorkerSecret,
         session_child_path: PathBuf,
+        session_probe_path: PathBuf,
     },
 }
 

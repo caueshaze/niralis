@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use niralis_session_worker::{
     PrivilegeDropTarget, ProcessSessionChildRunner, SessionChildError, SessionChildExpectation,
-    SessionChildRunner,
+    SessionChildRunner, SessionChildRuntimeContext, SessionChildUnixPath,
 };
 
 fn runner(binary: &str) -> ProcessSessionChildRunner {
@@ -17,6 +17,18 @@ fn expectation() -> SessionChildExpectation {
             uid: 1000,
             gid: 1000,
             supplementary_gids: vec![10, 20],
+        },
+        runtime: SessionChildRuntimeContext {
+            home: SessionChildUnixPath {
+                bytes: b"/home/test".to_vec(),
+            },
+            shell: SessionChildUnixPath {
+                bytes: b"/bin/bash".to_vec(),
+            },
+            session_type: "wayland".into(),
+            probe_path: SessionChildUnixPath {
+                bytes: b"/probe".to_vec(),
+            },
         },
     }
 }

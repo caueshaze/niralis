@@ -21,8 +21,12 @@ pub use privilege_drop::{
 };
 pub use runtime::{run_worker_process, WorkerAuthenticatorFactory};
 pub use session_child::{
-    ProcessSessionChildRunner, ProcessSessionChildRunnerFactory, SessionChildError,
-    SessionChildExpectation, SessionChildReport, SessionChildRunner, SessionChildRunnerFactory,
+    ProcessSessionChildRunner, ProcessSessionChildRunnerFactory, SessionChildEnvelope,
+    SessionChildError, SessionChildErrorCode, SessionChildExpectation, SessionChildIsolationProof,
+    SessionChildReport, SessionChildResponse, SessionChildRunner, SessionChildRunnerFactory,
+    SessionChildRuntimeContext, SessionChildUnixCredentials, SessionChildUnixPath,
+    SessionProcessIdentityProof, SessionRuntimeEnvironmentProof, SESSION_CHILD_PROTOCOL_VERSION,
+    SESSION_EXEC_PROBE_VERSION,
 };
 
 pub fn run_session_child() -> i32 {

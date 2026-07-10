@@ -34,6 +34,12 @@ pub enum NiralisdError {
     SessionChildUnavailable(PathBuf),
     #[error("session child is untrusted: {0}")]
     SessionChildUntrusted(PathBuf),
+    #[error("invalid session probe path: {0}")]
+    InvalidSessionProbePath(PathBuf),
+    #[error("session probe is unavailable: {0}")]
+    SessionProbeUnavailable(PathBuf),
+    #[error("session probe is untrusted: {0}")]
+    SessionProbeUntrusted(PathBuf),
     #[error("PAM authentication requires the worker session launcher")]
     InvalidAuthLauncherCombination,
 }

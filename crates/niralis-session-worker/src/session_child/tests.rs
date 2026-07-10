@@ -1,6 +1,8 @@
 use super::protocol::{
     SessionChildEnvelope, SessionChildErrorCode, SessionChildRequest, SessionChildResponse,
-    SessionChildUnixCredentials, SESSION_CHILD_PROTOCOL_VERSION,
+    SessionChildRuntimeContext, SessionChildUnixCredentials, SessionChildUnixPath,
+    SessionProcessIdentityProof, SessionRuntimeEnvironmentProof, SESSION_CHILD_PROTOCOL_VERSION,
+    SESSION_EXEC_PROBE_VERSION,
 };
 use crate::isolation::{CapabilityState, PostDropIsolationProof};
 use crate::privilege_drop::{
@@ -33,6 +35,20 @@ fn proof() -> super::protocol::SessionChildIsolationProof {
         open_fds: vec![0, 1, 2],
     })
 }
+fn runtime() -> SessionChildRuntimeContext {
+    SessionChildRuntimeContext {
+        home: SessionChildUnixPath {
+            bytes: b"/home/test".to_vec(),
+        },
+        shell: SessionChildUnixPath {
+            bytes: b"/bin/bash".to_vec(),
+        },
+        session_type: "wayland".into(),
+        probe_path: SessionChildUnixPath {
+            bytes: b"/probe".to_vec(),
+        },
+    }
+}
 
 impl PrivilegeDropper for StubDropper {
     fn drop_privileges(
@@ -56,6 +72,7 @@ fn request(uid: u32) -> Vec<u8> {
                 gid: 1000,
                 supplementary_gids: vec![10, 20],
             },
+            runtime: runtime(),
         },
     };
     let mut bytes = serde_json::to_vec(&envelope).expect("request should serialize");
@@ -75,6 +92,7 @@ fn protocol_round_trip_preserves_probe_and_ready() {
                 gid: 1000,
                 supplementary_gids: vec![10, 20],
             },
+            runtime: runtime(),
         },
     };
     let encoded = serde_json::to_string(&request).expect("request should serialize");
@@ -186,6 +204,7 @@ fn maximum_supported_credentials_fit_the_child_protocol() {
             canonical_username: "canonical-user".to_owned(),
             session_id: "niri".to_owned(),
             credentials,
+            runtime: runtime(),
         },
     };
     let payload = serde_json::to_vec(&envelope).expect("maximum request should serialize");
@@ -202,6 +221,7 @@ fn ready_binding_rejects_each_identity_or_credential_mismatch() {
             gid: 1000,
             supplementary_gids: vec![10, 20],
         },
+        runtime: runtime(),
     };
     let expected = SessionChildUnixCredentials {
         uid: 1000,
@@ -260,6 +280,21 @@ fn ready_binding_rejects_each_identity_or_credential_mismatch() {
             child_pid,
             applied_credentials,
             isolation_proof: proof(),
+            process_identity: SessionProcessIdentityProof {
+                pid: child_pid,
+                sid: 42,
+                pgid: 42,
+            },
+            runtime_environment: SessionRuntimeEnvironmentProof {
+                home: runtime().home.clone(),
+                user: "canonical-user".into(),
+                logname: "canonical-user".into(),
+                shell: runtime().shell.clone(),
+                path: super::DEFAULT_SESSION_PATH.into(),
+                session_type: "wayland".into(),
+                cwd: runtime().home,
+            },
+            exec_probe_version: SESSION_EXEC_PROBE_VERSION,
         };
 
         assert_eq!(

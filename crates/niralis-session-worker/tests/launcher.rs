@@ -22,6 +22,7 @@ fn launcher_for(bin: &str) -> WorkerSessionLauncher {
     WorkerSessionLauncher::new(
         PathBuf::from(bin),
         PathBuf::from("/usr/libexec/niralis-session-child"),
+        PathBuf::from("/usr/libexec/niralis-session-probe"),
         Duration::from_millis(200),
     )
     .expect("launcher should build")
@@ -53,6 +54,7 @@ fn relative_worker_path_is_rejected() {
     let error = WorkerSessionLauncher::new(
         PathBuf::from("relative-worker"),
         PathBuf::from("/usr/libexec/niralis-session-child"),
+        PathBuf::from("/usr/libexec/niralis-session-probe"),
         Duration::from_millis(200),
     )
     .expect_err("relative path should be rejected");
