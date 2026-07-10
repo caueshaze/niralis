@@ -1,4 +1,5 @@
 mod identity;
+mod isolation;
 mod privilege_drop;
 mod runtime;
 #[cfg(test)]
@@ -8,6 +9,11 @@ mod session_child;
 pub use identity::{
     GroupResolutionError, IdentityError, NssSupplementaryGroupsResolver, NssUnixIdentityResolver,
     ResolvedUnixCredentials, SupplementaryGroupsResolver, UnixIdentity, UnixIdentityResolver,
+};
+pub use isolation::{
+    validate_isolation_proof, CapabilityState, FdSanitizationError, InheritedFdSanitizer,
+    IsolationPolicyError, LinuxInheritedFdSanitizer, LinuxPostDropAuditor, PostDropAuditError,
+    PostDropAuditor, PostDropIsolationProof,
 };
 pub use privilege_drop::{
     AppliedCredentials, LibcPrivilegeDropper, PrivilegeDropError, PrivilegeDropTarget,

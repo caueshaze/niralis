@@ -2,6 +2,7 @@ use super::protocol::{
     SessionChildEnvelope, SessionChildErrorCode, SessionChildRequest, SessionChildResponse,
     SessionChildUnixCredentials, SESSION_CHILD_PROTOCOL_VERSION,
 };
+use crate::isolation::{CapabilityState, PostDropIsolationProof};
 use crate::privilege_drop::{
     AppliedCredentials, PrivilegeDropError, PrivilegeDropTarget, PrivilegeDropper,
 };
@@ -15,6 +16,22 @@ struct StubDropper {
     result: Result<AppliedCredentials, PrivilegeDropError>,
     calls: AtomicUsize,
     target: Mutex<Option<PrivilegeDropTarget>>,
+}
+
+fn proof() -> super::protocol::SessionChildIsolationProof {
+    super::protocol::SessionChildIsolationProof::from(&PostDropIsolationProof {
+        capabilities: CapabilityState {
+            effective: vec![],
+            permitted: vec![],
+            inheritable: vec![],
+            ambient: vec![],
+            bounding: vec![0],
+            cap_last_cap: 0,
+        },
+        securebits: 0,
+        no_new_privs: false,
+        open_fds: vec![0, 1, 2],
+    })
 }
 
 impl PrivilegeDropper for StubDropper {
@@ -242,6 +259,7 @@ fn ready_binding_rejects_each_identity_or_credential_mismatch() {
             session_id,
             child_pid,
             applied_credentials,
+            isolation_proof: proof(),
         };
 
         assert_eq!(

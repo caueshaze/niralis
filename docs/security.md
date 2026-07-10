@@ -187,7 +187,7 @@ Workers that hang are killed and reaped. The timeout covers:
 
 After canonical credentials are resolved and `open_session()` succeeds, the
 worker starts `niralis-session-child` as a separate executable process. The
-child receives only a bounded v2 `ApplyCredentials` handshake containing the
+child receives only a bounded v3 `ApplyCredentials` handshake containing the
 canonical username, session ID, and numeric UID/GID/supplementary groups. It
 never receives home, shell, password, PAM handle, transaction, or final
 environment.
@@ -211,11 +211,20 @@ values and supplementary groups before writing `Ready`. The worker compares
 the observed applied credentials with its canonical target and logs only the
 canonical username, session, PID, UID, primary GID, and group count.
 
-This proves Unix credential state only. It does not prove that capabilities,
-securebits, ambient capabilities, inherited privileged file descriptors,
-`no_new_privs`, seccomp, namespaces, or LSM state are hardened. No
-user-controlled code or compositor is executed yet, so those remain separate
-requirements.
+## Post-Drop Isolation Proof
+
+Before writing `Ready`, the child closes inherited file descriptors at or above
+3, applies and verifies the Unix credentials, and audits capabilities,
+`securebits`, `no_new_privs`, and surviving descriptors. The proof requires
+empty effective, permitted, inheritable, and ambient capability sets, no
+dangerous `securebits`, and exactly file descriptors 0, 1, and 2. The worker
+revalidates the complete proof before accepting the response.
+
+The capability bounding set is observed and reported but is not emptied. The
+`no_new_privs` value is observed but is not changed and may be either value.
+This phase does not prove seccomp, namespace isolation, LSM state, or
+capability policy beyond the audited sets. No user-controlled code or
+compositor is executed yet, so these remain separate requirements.
 
 The child path is absolute and follows the same root-owned, non-writable trust
 policy as the worker. The child performs the real numeric privilege drop but
@@ -278,7 +287,7 @@ Mock credentials remain:
 - real graphical session startup
 - `.desktop` `Exec` execution
 - compositor or `niri-session` launch
-- runtime application of credential changes by a real session child
+- application of the final graphical session runtime by the session child
 - logind integration
 - seat, VT, DRM, Wayland, or X11 lifecycle
 - PAM environment import back into the daemon

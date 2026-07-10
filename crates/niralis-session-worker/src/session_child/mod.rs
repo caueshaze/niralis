@@ -7,13 +7,17 @@ use std::sync::mpsc::{self, Receiver};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use crate::isolation::{
+    validate_isolation_proof, InheritedFdSanitizer, LinuxInheritedFdSanitizer,
+    LinuxPostDropAuditor, PostDropAuditor, PostDropIsolationProof,
+};
 use crate::privilege_drop::{
     AppliedCredentials, LibcPrivilegeDropper, PrivilegeDropError, PrivilegeDropTarget,
     PrivilegeDropper,
 };
 use protocol::{
-    SessionChildEnvelope, SessionChildErrorCode, SessionChildRequest, SessionChildResponse,
-    SessionChildUnixCredentials, SESSION_CHILD_PROTOCOL_VERSION,
+    SessionChildEnvelope, SessionChildErrorCode, SessionChildIsolationProof, SessionChildRequest,
+    SessionChildResponse, SessionChildUnixCredentials, SESSION_CHILD_PROTOCOL_VERSION,
 };
 
 pub const SESSION_CHILD_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -31,6 +35,7 @@ pub struct SessionChildReport {
     pub session_id: String,
     pub child_pid: u32,
     pub applied_credentials: AppliedCredentials,
+    pub isolation_proof: PostDropIsolationProof,
 }
 
 #[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
@@ -148,11 +153,14 @@ fn validate_ready_response(
             session_id,
             child_pid,
             applied_credentials,
+            isolation_proof,
         } if canonical_username == expectation.canonical_username
             && session_id == expectation.session_id
             && child_pid == pid
             && applied_credentials
-                == SessionChildUnixCredentials::from(&expectation.target_credentials) =>
+                == SessionChildUnixCredentials::from(&expectation.target_credentials)
+            && validate_isolation_proof(&PostDropIsolationProof::from(isolation_proof.clone()))
+                .is_ok() =>
         {
             Ok(SessionChildReport {
                 canonical_username,
@@ -163,6 +171,7 @@ fn validate_ready_response(
                     gid: applied_credentials.gid,
                     supplementary_gids: applied_credentials.supplementary_gids,
                 },
+                isolation_proof: isolation_proof.into(),
             })
         }
         SessionChildResponse::Rejected { .. } => Err(SessionChildError::ProtocolFailed),
@@ -333,13 +342,39 @@ fn kill_and_reap(child: &mut Child) {
 pub(crate) fn run_child_process() -> i32 {
     let stdin = std::io::stdin().lock();
     let stdout = std::io::stdout().lock();
-    run_child_process_with_dropper(stdin, stdout, &LibcPrivilegeDropper, std::process::id())
+    run_child_process_with_dependencies(
+        stdin,
+        stdout,
+        &LibcPrivilegeDropper,
+        &LinuxInheritedFdSanitizer,
+        &LinuxPostDropAuditor,
+        std::process::id(),
+    )
 }
 
+#[cfg(test)]
 pub(crate) fn run_child_process_with_dropper(
+    reader: impl Read,
+    writer: impl Write,
+    dropper: &impl PrivilegeDropper,
+    child_pid: u32,
+) -> i32 {
+    run_child_process_with_dependencies(
+        reader,
+        writer,
+        dropper,
+        &NoopFdSanitizer,
+        &StubAudit,
+        child_pid,
+    )
+}
+
+pub(crate) fn run_child_process_with_dependencies(
     reader: impl Read,
     mut writer: impl Write,
     dropper: &impl PrivilegeDropper,
+    fd_sanitizer: &impl InheritedFdSanitizer,
+    auditor: &impl PostDropAuditor,
     child_pid: u32,
 ) -> i32 {
     let mut bytes = Vec::new();
@@ -370,6 +405,10 @@ pub(crate) fn run_child_process_with_dropper(
         let _ = write_rejection(&mut writer, SessionChildErrorCode::RootUidDisallowed);
         return 1;
     }
+    if fd_sanitizer.sanitize().is_err() {
+        let _ = write_rejection(&mut writer, SessionChildErrorCode::FdSanitizationFailed);
+        return 1;
+    }
     let target = PrivilegeDropTarget::from(credentials);
     let applied = match dropper.drop_privileges(&target) {
         Ok(applied) => applied,
@@ -387,6 +426,17 @@ pub(crate) fn run_child_process_with_dropper(
         let _ = write_rejection(&mut writer, SessionChildErrorCode::CredentialMismatch);
         return 1;
     }
+    let proof = match auditor.audit() {
+        Ok(proof) => proof,
+        Err(_) => {
+            let _ = write_rejection(&mut writer, SessionChildErrorCode::IsolationAuditFailed);
+            return 1;
+        }
+    };
+    if validate_isolation_proof(&proof).is_err() {
+        let _ = write_rejection(&mut writer, SessionChildErrorCode::IsolationPolicyFailed);
+        return 1;
+    }
     let response = SessionChildEnvelope {
         version: SESSION_CHILD_PROTOCOL_VERSION,
         message: SessionChildResponse::Ready {
@@ -394,6 +444,7 @@ pub(crate) fn run_child_process_with_dropper(
             session_id,
             child_pid,
             applied_credentials,
+            isolation_proof: SessionChildIsolationProof::from(&proof),
         },
     };
     if serde_json::to_writer(&mut writer, &response).is_err()
@@ -403,6 +454,36 @@ pub(crate) fn run_child_process_with_dropper(
         return 1;
     }
     0
+}
+
+#[cfg(test)]
+struct NoopFdSanitizer;
+#[cfg(test)]
+impl InheritedFdSanitizer for NoopFdSanitizer {
+    fn sanitize(&self) -> Result<(), crate::isolation::FdSanitizationError> {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+struct StubAudit;
+#[cfg(test)]
+impl PostDropAuditor for StubAudit {
+    fn audit(&self) -> Result<PostDropIsolationProof, crate::isolation::PostDropAuditError> {
+        Ok(PostDropIsolationProof {
+            capabilities: crate::isolation::CapabilityState {
+                effective: vec![],
+                permitted: vec![],
+                inheritable: vec![],
+                ambient: vec![],
+                bounding: vec![],
+                cap_last_cap: 0,
+            },
+            securebits: 0,
+            no_new_privs: false,
+            open_fds: vec![0, 1, 2],
+        })
+    }
 }
 
 fn parse_request(

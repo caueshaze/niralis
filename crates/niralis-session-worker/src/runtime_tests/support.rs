@@ -12,6 +12,7 @@ use crate::identity::{
     GroupResolutionError, IdentityError, SupplementaryGroupsResolver, UnixIdentity,
     UnixIdentityResolver,
 };
+use crate::isolation::{CapabilityState, PostDropIsolationProof};
 use crate::privilege_drop::AppliedCredentials;
 use crate::runtime::WorkerAuthenticatorFactory;
 use crate::session_child::{
@@ -163,6 +164,19 @@ impl SessionChildRunner for StubChildRunner {
                 uid: expectation.target_credentials.uid,
                 gid: expectation.target_credentials.gid,
                 supplementary_gids: expectation.target_credentials.supplementary_gids,
+            },
+            isolation_proof: PostDropIsolationProof {
+                capabilities: CapabilityState {
+                    effective: vec![],
+                    permitted: vec![],
+                    inheritable: vec![],
+                    ambient: vec![],
+                    bounding: vec![],
+                    cap_last_cap: 0,
+                },
+                securebits: 0,
+                no_new_privs: false,
+                open_fds: vec![0, 1, 2],
             },
         })
     }

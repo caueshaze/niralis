@@ -270,7 +270,15 @@ fn run_pam_session<
                 uid = child_report.applied_credentials.uid,
                 gid = child_report.applied_credentials.gid,
                 supplementary_group_count = child_report.applied_credentials.supplementary_gids.len(),
-                "worker session child verified privilege drop"
+                effective_capability_count = child_report.isolation_proof.capabilities.effective.len(),
+                permitted_capability_count = child_report.isolation_proof.capabilities.permitted.len(),
+                inheritable_capability_count = child_report.isolation_proof.capabilities.inheritable.len(),
+                ambient_capability_count = child_report.isolation_proof.capabilities.ambient.len(),
+                bounding_capability_count = child_report.isolation_proof.capabilities.bounding.len(),
+                securebits = child_report.isolation_proof.securebits,
+                no_new_privs = child_report.isolation_proof.no_new_privs,
+                open_fd_count = child_report.isolation_proof.open_fds.len(),
+                "worker session child verified post-drop isolation"
             );
             drop(transaction);
             info!(username = %canonical_username, session = %session.session.id, "worker PAM transaction closed");
