@@ -50,11 +50,15 @@ fn child_that_never_reads_still_times_out() {
 }
 
 #[test]
-fn ready_child_that_hangs_is_killed_by_exit_deadline() {
-    let error = runner(env!("CARGO_BIN_EXE_fixture-child-ready-hang"))
+fn ready_child_remains_alive_after_startup_proof() {
+    let runner = runner(env!("CARGO_BIN_EXE_fixture-child-ready-hang"));
+    runner
         .run_child(expectation())
-        .expect_err("ready child that hangs should time out");
-    assert_eq!(error, SessionChildError::TimedOut);
+        .expect("startup proof should succeed");
+    let status = runner
+        .wait_for_child()
+        .expect("session child should eventually exit");
+    assert!(status.success());
 }
 
 #[test]

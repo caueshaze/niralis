@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::isolation::PostDropIsolationProof;
 use crate::privilege_drop::{AppliedCredentials, PrivilegeDropTarget};
 
-pub const SESSION_CHILD_PROTOCOL_VERSION: u32 = 4;
+pub const SESSION_CHILD_PROTOCOL_VERSION: u32 = 5;
 pub const SESSION_EXEC_PROBE_VERSION: u32 = 1;
 pub const MAX_SESSION_CHILD_MESSAGE_BYTES: usize = 1024 * 1024;
 

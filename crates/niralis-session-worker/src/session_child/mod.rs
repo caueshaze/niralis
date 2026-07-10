@@ -8,9 +8,13 @@ pub use protocol::{
 pub use protocol::{SessionChildRuntimeContext, SessionChildUnixPath};
 
 use std::io::{Read, Write};
+use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::mpsc::{self, Receiver};
+use std::sync::{
+    mpsc::{self, Receiver},
+    Arc, Mutex,
+};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -85,6 +89,10 @@ pub trait SessionChildRunner: Send + Sync {
         &self,
         expectation: SessionChildExpectation,
     ) -> Result<SessionChildReport, SessionChildError>;
+
+    fn wait_for_child(&self) -> Result<std::process::ExitStatus, SessionChildError> {
+        Ok(std::process::ExitStatus::from_raw(0))
+    }
 }
 
 pub trait SessionChildRunnerFactory: Send + Sync {
@@ -105,6 +113,7 @@ impl SessionChildRunnerFactory for ProcessSessionChildRunnerFactory {
 #[derive(Debug, Clone)]
 pub struct ProcessSessionChildRunner {
     path: PathBuf,
+    live_child: Arc<Mutex<Option<Child>>>,
 }
 
 impl ProcessSessionChildRunner {
@@ -112,7 +121,21 @@ impl ProcessSessionChildRunner {
         if !path.is_absolute() {
             return Err(SessionChildError::InvalidPath);
         }
-        Ok(Self { path })
+        Ok(Self {
+            path,
+            live_child: Arc::new(Mutex::new(None)),
+        })
+    }
+}
+
+impl Drop for ProcessSessionChildRunner {
+    fn drop(&mut self) {
+        if let Ok(mut child) = self.live_child.lock() {
+            if let Some(mut child) = child.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
     }
 }
 
@@ -136,36 +159,57 @@ impl SessionChildRunner for ProcessSessionChildRunner {
             return Err(SessionChildError::ProtocolFailed);
         }
         let mut attempt = SessionChildAttempt::spawn(&self.path, payload)?;
-        let pid = attempt.child.id();
+        let pid = attempt.child.as_ref().expect("child exists").id();
         let writer_result = attempt.wait_writer(deadline);
         let reader_result = match &writer_result {
             Ok(()) => attempt.wait_reader(deadline),
             Err(error) => Err(error.clone()),
         };
-        let status_result = if writer_result.is_ok() && reader_result.is_ok() {
-            attempt.wait_child(deadline)
-        } else {
-            Ok(None)
-        };
-        let needs_cleanup = writer_result.is_err()
-            || reader_result.is_err()
-            || status_result.is_err()
-            || matches!(status_result, Ok(None));
+        let needs_cleanup = writer_result.is_err() || reader_result.is_err();
         if needs_cleanup {
             attempt.kill_and_reap();
         }
         attempt.finish();
         writer_result?;
         let bytes = reader_result?;
-        let status = status_result?.ok_or(SessionChildError::TimedOut)?;
-        if !status.success() {
-            return Err(SessionChildError::ExitFailed);
-        }
         let response: SessionChildEnvelope<SessionChildResponse> = parse_response(&bytes)?;
         if response.version != SESSION_CHILD_PROTOCOL_VERSION {
             return Err(SessionChildError::ProtocolFailed);
         }
-        validate_ready_response(response.message, &expectation, pid)
+        if let Some(status) = attempt
+            .child
+            .as_mut()
+            .expect("child exists")
+            .try_wait()
+            .map_err(|_| SessionChildError::IoFailed)?
+        {
+            if !status.success() {
+                return Err(SessionChildError::ExitFailed);
+            }
+            return Err(SessionChildError::ExitFailed);
+        }
+        let report = validate_ready_response(response.message, &expectation, pid)?;
+        let child = attempt.take_child();
+        *self
+            .live_child
+            .lock()
+            .map_err(|_| SessionChildError::IoFailed)? = Some(child);
+        Ok(report)
+    }
+
+    fn wait_for_child(&self) -> Result<std::process::ExitStatus, SessionChildError> {
+        let mut child = self
+            .live_child
+            .lock()
+            .map_err(|_| SessionChildError::IoFailed)?
+            .take()
+            .ok_or(SessionChildError::IoFailed)?;
+        loop {
+            if let Some(status) = child.try_wait().map_err(|_| SessionChildError::IoFailed)? {
+                return Ok(status);
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
     }
 }
 
@@ -256,14 +300,18 @@ fn normalized_groups(mut groups: Vec<u32>, primary_gid: u32) -> Vec<u32> {
 
 pub const DEFAULT_SESSION_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
 
-const CHILD_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
-
 struct SessionChildAttempt {
-    child: Child,
+    child: Option<Child>,
     writer: Option<JoinHandle<Result<(), SessionChildError>>>,
     writer_rx: Receiver<Result<(), SessionChildError>>,
     reader: Option<JoinHandle<()>>,
     response_rx: Receiver<Result<Vec<u8>, SessionChildError>>,
+}
+
+impl SessionChildAttempt {
+    fn take_child(&mut self) -> Child {
+        self.child.take().expect("child exists")
+    }
 }
 
 impl SessionChildAttempt {
@@ -308,7 +356,7 @@ impl SessionChildAttempt {
             let _ = response_tx.send(read_child_response(&mut stdout));
         });
         Ok(Self {
-            child,
+            child: Some(child),
             writer: Some(writer),
             writer_rx,
             reader: Some(reader),
@@ -324,27 +372,10 @@ impl SessionChildAttempt {
         wait_result(&self.response_rx, deadline)
     }
 
-    fn wait_child(
-        &mut self,
-        deadline: Instant,
-    ) -> Result<Option<std::process::ExitStatus>, SessionChildError> {
-        loop {
-            remaining(deadline)?;
-            if let Some(status) = self
-                .child
-                .try_wait()
-                .map_err(|_| SessionChildError::IoFailed)?
-            {
-                remaining(deadline)?;
-                return Ok(Some(status));
-            }
-            let remaining = remaining(deadline)?;
-            thread::sleep(CHILD_WAIT_POLL_INTERVAL.min(remaining));
-        }
-    }
-
     fn kill_and_reap(&mut self) {
-        kill_and_reap(&mut self.child);
+        if let Some(child) = self.child.as_mut() {
+            kill_and_reap(child);
+        }
     }
 
     fn finish(&mut self) {
@@ -384,10 +415,19 @@ fn wait_result<T: Send + 'static>(
 
 fn read_child_response(reader: &mut impl Read) -> Result<Vec<u8>, SessionChildError> {
     let mut bytes = Vec::new();
-    reader
-        .take((protocol::MAX_SESSION_CHILD_MESSAGE_BYTES + 1) as u64)
-        .read_to_end(&mut bytes)
-        .map_err(|_| SessionChildError::IoFailed)?;
+    let mut byte = [0u8; 1];
+    loop {
+        reader
+            .read_exact(&mut byte)
+            .map_err(|_| SessionChildError::IoFailed)?;
+        bytes.push(byte[0]);
+        if byte[0] == b'\n' {
+            break;
+        }
+        if bytes.len() > protocol::MAX_SESSION_CHILD_MESSAGE_BYTES {
+            return Err(SessionChildError::ProtocolFailed);
+        }
+    }
     if bytes.is_empty() || bytes.len() > protocol::MAX_SESSION_CHILD_MESSAGE_BYTES {
         return Err(SessionChildError::ProtocolFailed);
     }

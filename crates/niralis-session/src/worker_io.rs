@@ -34,10 +34,23 @@ pub fn read_envelope<T: DeserializeOwned, R: Read>(
 
 fn read_message_bytes<R: Read>(reader: &mut R) -> Result<Zeroizing<Vec<u8>>, SessionError> {
     let mut bytes = Zeroizing::new(Vec::new());
-    reader
-        .take((MAX_WORKER_MESSAGE_BYTES + 1) as u64)
-        .read_to_end(&mut *bytes)
-        .map_err(|_| SessionError::WorkerIoFailed)?;
+    let mut byte = [0u8; 1];
+    loop {
+        if let Err(error) = reader.read_exact(&mut byte) {
+            return Err(if error.kind() == std::io::ErrorKind::UnexpectedEof {
+                SessionError::WorkerProtocolFailed
+            } else {
+                SessionError::WorkerIoFailed
+            });
+        }
+        bytes.push(byte[0]);
+        if byte[0] == b'\n' {
+            break;
+        }
+        if bytes.len() > MAX_WORKER_MESSAGE_BYTES {
+            return Err(SessionError::WorkerProtocolFailed);
+        }
+    }
     if bytes.is_empty() || bytes.len() > MAX_WORKER_MESSAGE_BYTES {
         return Err(SessionError::WorkerProtocolFailed);
     }

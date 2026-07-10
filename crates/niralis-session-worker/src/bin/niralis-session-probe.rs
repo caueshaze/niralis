@@ -104,4 +104,6 @@ fn main() {
     if serde_json::to_writer(&mut out, &response).is_err() || out.write_all(b"\n").is_err() {
         std::process::exit(1);
     }
+    let _ = out.flush();
+    std::thread::sleep(std::time::Duration::from_secs(60));
 }

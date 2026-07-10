@@ -20,4 +20,6 @@ pub enum SessionError {
     WorkerRejected,
     #[error("session start failed")]
     StartFailed,
+    #[error("worker exited after reporting startup")]
+    WorkerExitedAfterStart,
 }

@@ -50,6 +50,23 @@ fn worker_launcher_returns_started_session() {
 }
 
 #[test]
+fn started_worker_returns_before_worker_exit() {
+    let launcher = launcher_for(env!("CARGO_BIN_EXE_fixture-started-then-hang"));
+    let started_at = std::time::Instant::now();
+    let started = launcher
+        .start_session(request())
+        .expect("started response should succeed");
+    assert_eq!(
+        started,
+        StartedSession {
+            username: "test".into(),
+            session: request().session
+        }
+    );
+    assert!(started_at.elapsed() < Duration::from_secs(1));
+}
+
+#[test]
 fn relative_worker_path_is_rejected() {
     let error = WorkerSessionLauncher::new(
         PathBuf::from("relative-worker"),

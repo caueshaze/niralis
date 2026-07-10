@@ -60,12 +60,12 @@ Inside `niralis-session-worker`, the same authenticated transaction is used for:
 7. session close and credential cleanup through RAII
 8. `pam_end`
 
-In this phase, the worker performs a short PAM lifecycle with a child boundary:
+The worker now performs a two-phase PAM lifecycle with a long-lived fixture:
 
-`authenticate -> open_session -> child handshake -> child exit -> close_session -> exit`
+`authenticate -> open_session -> child startup proof -> Started -> fixture exit -> close_session -> exit`
 
-The worker remains the owner of the PAM transaction while the child exists. No
-compositor or session command is started yet.
+The worker remains the owner of the PAM transaction for the entire fixture
+lifetime. No compositor or session command is started yet.
 
 ## Canonical Unix Identity
 
@@ -161,7 +161,8 @@ Current cleanup points:
 
 ## Worker Boundary
 
-`niralis-session-worker` is a dedicated, one-shot process per login attempt.
+`niralis-session-worker` is a dedicated process per login attempt and remains
+alive until its session fixture exits.
 
 The daemon spawns it directly with:
 
@@ -187,23 +188,21 @@ Workers that hang are killed and reaped. The timeout covers:
 
 After canonical credentials are resolved and `open_session()` succeeds, the
 worker starts `niralis-session-child` as a separate executable process. The
-child receives only a bounded v3 `ApplyCredentials` handshake containing the
+child receives only a bounded v5 `ApplyCredentials` handshake containing the
 canonical username, session ID, and numeric UID/GID/supplementary groups. It
 never receives home, shell, password, PAM handle, transaction, or final
 environment.
 
 The child response is bound to the expected canonical username, session ID,
-and real spawned PID. The child must exit successfully; invalid responses,
-timeouts, and non-zero exits are post-authentication session failures. The
-runner kills and reaps the child on failure, and the PAM transaction is dropped
-only after the child has terminated.
+and real spawned PID. A validated startup proof produces `Started`; the child
+and worker then remain alive. The worker reaps the child and closes PAM only
+after the fixture exits.
 
-The entire handshake uses one absolute two-second deadline covering request
-write, response read, and child exit. A child that sends a valid `Ready` and
-then remains alive is still a timeout. Writer and reader helper threads are
-always joined before normal return, and cleanup kills and reaps a live child
-before returning an error. The daemon's worker timeout remains an external
-defense, not a substitute for this local supervision.
+The startup handshake uses one absolute two-second deadline covering request
+write and startup proof read. The long-lived fixture lifetime is supervised
+separately and is not limited by the startup timeout. Writer and reader helper
+threads are always joined before ownership transfer, and cleanup kills and
+reaps a live child on startup failure.
 
 The child rejects UID 0 before any mutation, then applies and verifies
 `setgroups -> setgid -> setuid`. It checks real/effective/saved UID and GID
@@ -239,7 +238,7 @@ does not execute a compositor or initialize a desktop session.
 
 The session configuration contains a separately trusted `probe_path`. The
 worker passes canonical home, shell, session type, and the probe path through a
-bounded byte-safe child protocol v4. After descriptor sanitization, credential
+bounded byte-safe child protocol v5. After descriptor sanitization, credential
 drop, isolation audit, and `setsid()`, the child changes to the canonical HOME,
 constructs only `HOME`, `USER`, `LOGNAME`, `SHELL`, `PATH`, and
 `XDG_SESSION_TYPE`, and replaces itself with `niralis-session-probe` using

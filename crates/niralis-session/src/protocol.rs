@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{SessionRequest, StartedSession, WorkerSecret};
 
-pub const WORKER_PROTOCOL_VERSION: u32 = 5;
+pub const WORKER_PROTOCOL_VERSION: u32 = 6;
 pub const MAX_WORKER_MESSAGE_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -29,10 +29,21 @@ pub enum WorkerRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WorkerResponse {
-    Ready { session: StartedSession },
+    Started {
+        session: StartedSession,
+        session_pid: u32,
+        fixture_version: u32,
+    },
+    Ready {
+        session: StartedSession,
+    },
     AuthenticationFailed,
-    SessionFailed { code: WorkerSessionFailureCode },
-    Rejected { code: WorkerErrorCode },
+    SessionFailed {
+        code: WorkerSessionFailureCode,
+    },
+    Rejected {
+        code: WorkerErrorCode,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

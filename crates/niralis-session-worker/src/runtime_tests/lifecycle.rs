@@ -13,7 +13,7 @@ use super::support::{
 };
 
 #[test]
-fn pam_worker_returns_ready_after_short_lifecycle() {
+fn pam_worker_reports_started_before_lifecycle_completion() {
     let mut reader = Cursor::new(format!(
         "{}\n",
         serde_json::to_string(&request()).expect("json")
@@ -59,7 +59,7 @@ fn pam_worker_returns_ready_after_short_lifecycle() {
     assert_eq!(state.drops.load(Ordering::SeqCst), 1);
     assert_eq!(state.child_calls.load(Ordering::SeqCst), 1);
     assert_eq!(state.child_drop_observations.load(Ordering::SeqCst), 0);
-    assert!(matches!(response.message, WorkerResponse::Ready { .. }));
+    assert!(matches!(response.message, WorkerResponse::Started { .. }));
 }
 
 #[test]

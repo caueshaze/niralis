@@ -320,9 +320,31 @@ fn run_pam_session<
                 probe_version = child_report.exec_probe_version,
                 "worker session exec probe verified"
             );
+            write_envelope(
+                writer,
+                WorkerResponse::Started {
+                    session: session.clone(),
+                    session_pid: child_report.child_pid,
+                    fixture_version: child_report.exec_probe_version,
+                },
+            )?;
+            info!(username = %canonical_username, session = %session.session.id, pid = child_report.child_pid, "worker session started; PAM transaction remains open");
+            let child_status = match child_runner.wait_for_child() {
+                Ok(status) => status,
+                Err(error) => {
+                    warn!(username = %canonical_username, session = %session.session.id, ?error, "worker failed while waiting for session child");
+                    drop(transaction);
+                    return Err(SessionError::AuthenticatedSessionFailed);
+                }
+            };
+            info!(username = %canonical_username, session = %session.session.id, ?child_status, "worker session child reaped");
             drop(transaction);
             info!(username = %canonical_username, session = %session.session.id, "worker PAM transaction closed");
-            write_envelope(writer, WorkerResponse::Ready { session })
+            if child_status.success() {
+                Ok(())
+            } else {
+                Err(SessionError::AuthenticatedSessionFailed)
+            }
         }
         Ok(Err(_)) => {
             warn!(username = %canonical_username, session = %session.session.id, "worker PAM session open failed");

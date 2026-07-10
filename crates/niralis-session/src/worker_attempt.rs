@@ -12,7 +12,7 @@ use crate::{
 };
 
 pub(crate) struct WorkerAttempt {
-    child: Child,
+    child: Option<Child>,
     writer: Option<JoinHandle<()>>,
     writer_rx: Receiver<Result<(), SessionError>>,
     reader: Option<JoinHandle<()>>,
@@ -20,6 +20,19 @@ pub(crate) struct WorkerAttempt {
 }
 
 impl WorkerAttempt {
+    pub(crate) fn is_alive(&mut self) -> Result<bool, SessionError> {
+        Ok(self
+            .child
+            .as_mut()
+            .expect("worker child exists")
+            .try_wait()
+            .map_err(|_| SessionError::WorkerIoFailed)?
+            .is_none())
+    }
+
+    pub(crate) fn take_child(&mut self) -> Child {
+        self.child.take().expect("worker child ownership exists")
+    }
     pub(crate) fn spawn(worker_path: &Path, request: WorkerRequest) -> Result<Self, SessionError> {
         let mut child = spawn_worker(worker_path)?;
         let stdin = child.stdin.take().ok_or(SessionError::WorkerIoFailed)?;
@@ -28,7 +41,7 @@ impl WorkerAttempt {
         let (reader, reader_rx) = spawn_reader(stdout);
 
         Ok(Self {
-            child,
+            child: Some(child),
             writer: Some(writer),
             writer_rx,
             reader: Some(reader),
@@ -37,25 +50,35 @@ impl WorkerAttempt {
     }
 
     pub(crate) fn wait_writer(&mut self, deadline: Instant) -> Result<(), SessionError> {
-        wait_thread_result(&self.writer_rx, deadline, &mut self.child)
+        wait_thread_result(
+            &self.writer_rx,
+            deadline,
+            self.child.as_mut().expect("worker child exists"),
+        )
     }
 
     pub(crate) fn wait_reader(
         &mut self,
         deadline: Instant,
     ) -> Result<WorkerEnvelope<WorkerResponse>, SessionError> {
-        wait_thread_result(&self.reader_rx, deadline, &mut self.child)
+        wait_thread_result(
+            &self.reader_rx,
+            deadline,
+            self.child.as_mut().expect("worker child exists"),
+        )
     }
 
     pub(crate) fn wait_child(
         &mut self,
         deadline: Instant,
     ) -> Result<Option<ExitStatus>, SessionError> {
-        wait_for_exit(&mut self.child, deadline).map(Some)
+        wait_for_exit(self.child.as_mut().expect("worker child exists"), deadline).map(Some)
     }
 
     pub(crate) fn kill_and_reap(&mut self) {
-        kill_and_reap(&mut self.child);
+        if let Some(child) = self.child.as_mut() {
+            kill_and_reap(child);
+        }
     }
 
     pub(crate) fn finish(&mut self) {
