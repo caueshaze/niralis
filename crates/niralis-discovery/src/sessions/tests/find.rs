@@ -2,8 +2,10 @@ use std::path::PathBuf;
 
 use niralis_protocol::{SessionInfo, SessionKind};
 
-use super::fixtures::{find, tempdir, write_file};
-use crate::sessions::{DesktopSessionDirectory, SessionDirectory, SessionDiscoveryConfig};
+use super::fixtures::{find, make_executable, tempdir, write_file};
+use crate::sessions::{
+    DesktopSessionDirectory, SessionDirectory, SessionDiscoveryConfig, SessionSourceTrustPolicy,
+};
 use crate::DiscoveryError;
 
 #[test]
@@ -62,6 +64,7 @@ fn find_handles_x11_flag_and_discovery_errors() {
         include_x11: false,
         x11_dirs: vec![x11.path().to_path_buf()],
         exec_search_path: Vec::new(),
+        source_trust: SessionSourceTrustPolicy::Permissive,
     };
     assert_eq!(
         DesktopSessionDirectory::new(disabled)
@@ -75,6 +78,7 @@ fn find_handles_x11_flag_and_discovery_errors() {
         include_x11: true,
         x11_dirs: vec![x11.path().to_path_buf()],
         exec_search_path: Vec::new(),
+        source_trust: SessionSourceTrustPolicy::Permissive,
     };
     assert_eq!(
         DesktopSessionDirectory::new(enabled)
@@ -92,8 +96,36 @@ fn find_handles_x11_flag_and_discovery_errors() {
         include_x11: false,
         x11_dirs: Vec::new(),
         exec_search_path: Vec::new(),
+        source_trust: SessionSourceTrustPolicy::Permissive,
     })
     .find_session("niri")
     .expect_err("non-directory should fail");
     assert!(matches!(error, DiscoveryError::ReadDir { .. }));
+}
+
+#[test]
+fn resolution_keeps_the_selected_entry_provenance_and_uses_explicit_path() {
+    let temp = tempdir();
+    let bin = temp.path().join("bin");
+    std::fs::create_dir(&bin).expect("bin should exist");
+    make_executable(&bin.join("niri-session"));
+    write_file(
+        &temp.path().join("niri.desktop"),
+        "[Desktop Entry]\nType=Application\nName=Niri\nExec=niri-session --flag \"hello world\"\n",
+    );
+    let mut config = super::fixtures::config_for(temp.path());
+    config.exec_search_path = vec![bin.clone()];
+    let spec = DesktopSessionDirectory::new(config)
+        .resolve_launch_spec("niri")
+        .expect("resolution should work")
+        .expect("session should exist");
+    assert_eq!(
+        spec.source_path,
+        std::fs::canonicalize(temp.path().join("niri.desktop")).unwrap()
+    );
+    assert_eq!(
+        spec.executable,
+        std::fs::canonicalize(bin.join("niri-session")).unwrap()
+    );
+    assert_eq!(spec.argv, vec!["niri-session", "--flag", "hello world"]);
 }

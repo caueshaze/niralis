@@ -16,4 +16,10 @@ pub enum DiscoveryError {
         path: PathBuf,
         source: std::io::Error,
     },
+    #[error("session source is untrusted: {path}")]
+    UntrustedSessionSource { path: PathBuf },
+    #[error("desktop entry is malformed: {path}")]
+    MalformedDesktopEntry { path: PathBuf },
+    #[error("session launch specification is invalid")]
+    InvalidLaunchSpec,
 }

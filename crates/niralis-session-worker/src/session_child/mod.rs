@@ -17,6 +17,7 @@ use std::sync::{
 };
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
+use tracing::info;
 
 use crate::isolation::{
     validate_isolation_proof, InheritedFdSanitizer, LinuxInheritedFdSanitizer,
@@ -250,6 +251,7 @@ impl SessionChildRunner for ProcessSessionChildRunner {
             .take()
             .ok_or(SessionChildError::IoFailed)?;
         let _ = terminate_group(live.pgid, libc::SIGTERM);
+        info!(pgid = live.pgid, "session process group SIGTERM sent");
         let deadline = Instant::now() + grace;
         loop {
             if let Some(status) = live
@@ -260,7 +262,9 @@ impl SessionChildRunner for ProcessSessionChildRunner {
                 return Ok(status);
             }
             if Instant::now() >= deadline {
+                info!(pgid = live.pgid, "session termination grace period expired");
                 terminate_group(live.pgid, libc::SIGKILL)?;
+                info!(pgid = live.pgid, "session process group SIGKILL sent");
                 return live.child.wait().map_err(|_| SessionChildError::IoFailed);
             }
             thread::sleep(Duration::from_millis(10));

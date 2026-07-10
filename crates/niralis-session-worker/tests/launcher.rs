@@ -66,6 +66,48 @@ fn started_worker_returns_before_worker_exit() {
     assert!(started_at.elapsed() < Duration::from_secs(1));
 }
 
+fn controlled_launcher(bin: &str) -> WorkerSessionLauncher {
+    WorkerSessionLauncher::new(
+        PathBuf::from(bin),
+        PathBuf::from("/usr/libexec/niralis-session-child"),
+        PathBuf::from("/usr/libexec/niralis-session-probe"),
+        Duration::from_secs(2),
+    )
+    .expect("controlled launcher should build")
+}
+
+#[test]
+fn test_control_smoke_graceful_terminates_owned_runtime() {
+    let launcher = controlled_launcher(env!("CARGO_BIN_EXE_fixture-control-graceful"));
+    let (started, runtime_id) = launcher
+        .start_pam_session_for_test(
+            request(),
+            "test".to_owned(),
+            WorkerSecret::new("test".to_owned()),
+        )
+        .expect("controlled fixture should start");
+    assert_eq!(started.username, "test");
+    assert_eq!(started.session, request().session);
+    launcher
+        .terminate_runtime_session_for_test(runtime_id)
+        .expect("graceful termination should be accepted");
+}
+
+#[test]
+fn test_control_smoke_stubborn_escalates_after_grace_period() {
+    let launcher = controlled_launcher(env!("CARGO_BIN_EXE_fixture-control-stubborn"));
+    let (_, runtime_id) = launcher
+        .start_pam_session_for_test(
+            request(),
+            "test".to_owned(),
+            WorkerSecret::new("test".to_owned()),
+        )
+        .expect("stubborn fixture should start");
+    launcher
+        .terminate_runtime_session_for_test(runtime_id)
+        .expect("stubborn termination should be accepted");
+}
+
 #[test]
 fn relative_worker_path_is_rejected() {
     let error = WorkerSessionLauncher::new(

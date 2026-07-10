@@ -17,3 +17,4 @@ tracing-subscriber.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+niralis-session = { workspace = true, features = ["integration-test-control"] }

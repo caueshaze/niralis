@@ -2,6 +2,7 @@ mod local;
 mod pam_worker;
 
 use niralis_auth::MockAuthenticator;
+use niralis_discovery::ResolvedSessionLaunchSpec;
 use niralis_protocol::SessionInfo;
 use niralis_session::{StartedSession, WorkerSecret};
 use thiserror::Error;
@@ -18,6 +19,7 @@ pub struct LoginAttempt {
     pub username: String,
     pub password: Zeroizing<String>,
     pub session: SessionInfo,
+    pub launch_spec: ResolvedSessionLaunchSpec,
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]

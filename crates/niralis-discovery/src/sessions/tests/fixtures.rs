@@ -4,7 +4,9 @@ use std::path::Path;
 
 use tempfile::TempDir;
 
-use crate::sessions::{DesktopSessionDirectory, SessionDirectory, SessionDiscoveryConfig};
+use crate::sessions::{
+    DesktopSessionDirectory, SessionDirectory, SessionDiscoveryConfig, SessionSourceTrustPolicy,
+};
 
 pub(super) fn write_file(path: &Path, content: &str) {
     fs::write(path, content).expect("fixture should be written");
@@ -25,6 +27,7 @@ pub(super) fn config_for(dir: &Path) -> SessionDiscoveryConfig {
         include_x11: false,
         x11_dirs: Vec::new(),
         exec_search_path: Vec::new(),
+        source_trust: SessionSourceTrustPolicy::Permissive,
     }
 }
 

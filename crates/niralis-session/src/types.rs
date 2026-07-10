@@ -2,6 +2,22 @@ use niralis_protocol::SessionInfo;
 use serde::{Deserialize, Serialize};
 
 use crate::SessionError;
+use std::fmt;
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct RuntimeSessionId(String);
+
+impl RuntimeSessionId {
+    pub(crate) fn new(value: String) -> Self {
+        Self(value)
+    }
+}
+
+impl fmt::Debug for RuntimeSessionId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("RuntimeSessionId([opaque])")
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionRequest {

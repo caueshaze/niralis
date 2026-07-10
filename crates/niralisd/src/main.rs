@@ -3,9 +3,9 @@ use std::path::PathBuf;
 use clap::Parser;
 use niralis_discovery::{
     DesktopSessionDirectory, NssUserDirectory, SessionDirectory, SessionDiscoveryConfig,
-    UserDirectory, UserDiscoveryConfig,
+    SessionSourceTrustPolicy, UserDirectory, UserDiscoveryConfig,
 };
-use niralisd::config::{Config, DEFAULT_CONFIG_PATH};
+use niralisd::config::{AuthBackend, Config, DEFAULT_CONFIG_PATH};
 use niralisd::handler::DaemonHandler;
 use niralisd::login_backend::build_login_backend;
 use tracing::info;
@@ -62,6 +62,11 @@ fn build_session_directory(config: &Config) -> Box<dyn SessionDirectory> {
         include_x11: config.sessions.include_x11,
         x11_dirs: config.sessions.x11_dirs.clone(),
         exec_search_path: config.sessions.exec_search_path.clone(),
+        source_trust: if matches!(config.auth.backend, AuthBackend::Pam) {
+            SessionSourceTrustPolicy::RootOwned
+        } else {
+            SessionSourceTrustPolicy::Permissive
+        },
     }))
 }
 

@@ -444,6 +444,7 @@ fn wait_for_session(
                             && expected_session_pid == session_pid
                             && expected_session_pgid == session_pgid =>
                         {
+                            info!("worker session termination requested");
                             return child_runner
                                 .terminate(SESSION_TERMINATION_GRACE)
                                 .map_err(|_| SessionError::AuthenticatedSessionFailed);

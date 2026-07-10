@@ -3,7 +3,9 @@ use std::fs;
 use niralis_protocol::{SessionInfo, SessionKind};
 
 use super::fixtures::{config_for, list, make_executable, tempdir, write_file};
-use crate::sessions::{DesktopSessionDirectory, SessionDirectory, SessionDiscoveryConfig};
+use crate::sessions::{
+    DesktopSessionDirectory, SessionDirectory, SessionDiscoveryConfig, SessionSourceTrustPolicy,
+};
 
 #[test]
 fn list_filters_and_sorts_wayland_entries() {
@@ -98,6 +100,7 @@ fn list_uses_relative_search_path_and_supports_x11_when_enabled() {
         include_x11: true,
         x11_dirs: vec![x11.path().to_path_buf()],
         exec_search_path: Vec::new(),
+        source_trust: SessionSourceTrustPolicy::Permissive,
     };
     let sessions = DesktopSessionDirectory::new(config)
         .list_sessions()

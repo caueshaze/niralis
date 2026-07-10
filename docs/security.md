@@ -19,6 +19,31 @@ session setup remain out of scope.
   failures only.
 - Sessions are resolved canonically through discovery before any login backend
   is called.
+- A selected desktop session is resolved into an internal launch specification
+  before PAM: the public `SessionInfo` remains metadata-only, while the bound
+  internal object retains the canonical `.desktop` source, absolute executable,
+  and bounded argv. It is not sent to the worker in this phase and is never
+  executed yet.
+- Desktop sources in PAM mode must be regular, non-symlink files below a
+  configured canonical root, with root-owned, non-group/world-writable file and
+  ancestor path components. Duplicate IDs use first configured root, then
+  lexical filename order. Session executable symlinks are resolved to a
+  canonical absolute executable for distro compatibility.
+- Exec is parsed without a shell. Only `%%` is supported (as a literal `%`);
+  every other field code fails closed. Resolution uses only the configured
+  session search path, never inherited `PATH`; `TryExec` is an availability
+  check only and is never spawned. Path validation has an unavoidable TOCTOU
+  window until a future fd-based execution design.
+
+### Read-only installed-session smoke
+
+The diagnostic example below validates an installed desktop entry and prints
+its canonical launch specification. It does not start PAM, a worker, a
+compositor, or any program named by `Exec`:
+
+```sh
+cargo run -p niralis-discovery --example resolve-installed-session -- niri
+```
 - Worker launches are versioned, size-limited, supervised, and shell-free.
 - Session child launches use an explicit trusted executable path and a separate
   versioned, size-limited handshake.

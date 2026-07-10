@@ -26,18 +26,23 @@ where
         return login_failed();
     }
 
-    let Some(session) = (match handler.session_directory.find_session(&session) {
+    let Some(launch_spec) = (match handler.session_directory.resolve_launch_spec(&session) {
         Ok(session) => session,
-        Err(error) => return super::discovery_error_response("sessions", error),
+        Err(error) => {
+            debug!(session_id = %session, error = %error, resolution_stage = "launch_spec", "session launch specification unavailable");
+            return session_unavailable();
+        }
     }) else {
         info!(username = %username, "requested session is unavailable");
         return session_unavailable();
     };
+    let session = launch_spec.session.clone();
 
     match handler.login_backend.login(LoginAttempt {
         username: username.clone(),
         password,
         session: session.clone(),
+        launch_spec,
     }) {
         Ok(_started) => {
             reset_rate_limit(handler, &username);

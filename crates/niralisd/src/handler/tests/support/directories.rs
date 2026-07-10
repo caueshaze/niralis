@@ -1,4 +1,6 @@
-use niralis_discovery::{DiscoveryError, SessionDirectory, UserDirectory};
+use niralis_discovery::{
+    DiscoveryError, ResolvedSessionLaunchSpec, SessionDirectory, UserDirectory,
+};
 use niralis_protocol::SessionInfo;
 
 use super::niri_session;
@@ -83,6 +85,20 @@ impl SessionDirectory for StubSessionDirectory {
             }
             StubSessionDirectoryResult::Error => Err(DiscoveryError::UserEnumeration),
         }
+    }
+
+    fn resolve_launch_spec(
+        &self,
+        id: &str,
+    ) -> Result<Option<ResolvedSessionLaunchSpec>, DiscoveryError> {
+        Ok(self
+            .find_session(id)?
+            .map(|session| ResolvedSessionLaunchSpec {
+                session,
+                source_path: "/test/session.desktop".into(),
+                executable: "/bin/true".into(),
+                argv: vec!["true".into()],
+            }))
     }
 }
 

@@ -12,9 +12,9 @@ use tempfile::{Builder, TempDir};
 use tracing::debug;
 
 use crate::{
-    worker_attempt::WorkerAttempt, write_control_request, SessionError, SessionLauncher,
-    SessionRequest, StartedSession, WorkerControlRequest, WorkerEnvelope, WorkerRequest,
-    WorkerResponse, WorkerSecret,
+    types::RuntimeSessionId, worker_attempt::WorkerAttempt, write_control_request, SessionError,
+    SessionLauncher, SessionRequest, StartedSession, WorkerControlRequest, WorkerEnvelope,
+    WorkerRequest, WorkerResponse, WorkerSecret,
 };
 
 #[derive(Debug, Clone)]
@@ -29,6 +29,7 @@ pub struct WorkerSessionLauncher {
 #[derive(Debug)]
 enum WorkerSupervisorMessage {
     Register {
+        runtime_id: RuntimeSessionId,
         child: Child,
         session: StartedSession,
         session_pid: u32,
@@ -39,6 +40,7 @@ enum WorkerSupervisorMessage {
     },
     Terminate {
         session: StartedSession,
+        runtime_id: Option<RuntimeSessionId>,
         result: mpsc::Sender<Result<(), SessionError>>,
     },
     Shutdown,
@@ -51,6 +53,7 @@ struct WorkerSupervisor {
 }
 
 struct SupervisedWorker {
+    runtime_id: RuntimeSessionId,
     child: Child,
     session: StartedSession,
     session_pid: u32,
@@ -68,6 +71,7 @@ impl WorkerSupervisor {
             loop {
                 match receiver.recv_timeout(Duration::from_millis(25)) {
                     Ok(WorkerSupervisorMessage::Register {
+                        runtime_id,
                         child,
                         session,
                         session_pid,
@@ -76,6 +80,7 @@ impl WorkerSupervisor {
                         control_path,
                         control_dir,
                     }) => children.push(SupervisedWorker {
+                        runtime_id,
                         child,
                         session,
                         session_pid,
@@ -84,26 +89,17 @@ impl WorkerSupervisor {
                         control_path,
                         _control_dir: control_dir,
                     }),
-                    Ok(WorkerSupervisorMessage::Terminate { session, result }) => {
-                        let outcome = if let Some(worker) =
-                            children.iter_mut().find(|worker| worker.session == session)
-                        {
-                            if worker.worker_id.is_empty() {
-                                Err(SessionError::WorkerIoFailed)
-                            } else {
-                                match UnixStream::connect(&worker.control_path) {
-                                    Ok(mut control) => write_control_request(
-                                        &mut control,
-                                        WorkerControlRequest::Terminate {
-                                            worker_id: worker.worker_id.clone(),
-                                            expected_worker_pid: worker.child.id(),
-                                            expected_session_pid: worker.session_pid,
-                                            expected_session_pgid: worker.session_pgid,
-                                        },
-                                    ),
-                                    Err(_) => Err(SessionError::WorkerIoFailed),
-                                }
-                            }
+                    Ok(WorkerSupervisorMessage::Terminate {
+                        session,
+                        runtime_id,
+                        result,
+                    }) => {
+                        let outcome = if let Some(worker) = children.iter_mut().find(|worker| {
+                            runtime_id
+                                .as_ref()
+                                .map_or(worker.session == session, |id| worker.runtime_id == *id)
+                        }) {
+                            request_worker_termination(worker)
                         } else {
                             Ok(())
                         };
@@ -180,7 +176,7 @@ impl WorkerSupervisor {
         worker_id: String,
         control_path: PathBuf,
         control_dir: TempDir,
-    ) -> Result<(), SessionError> {
+    ) -> Result<RuntimeSessionId, SessionError> {
         let mut child = child;
         if child
             .try_wait()
@@ -189,7 +185,9 @@ impl WorkerSupervisor {
         {
             return Err(SessionError::WorkerExitedAfterStart);
         }
+        let runtime_id = RuntimeSessionId::new(worker_id.clone());
         match self.sender.send(WorkerSupervisorMessage::Register {
+            runtime_id: runtime_id.clone(),
             child,
             session,
             session_pid,
@@ -198,7 +196,7 @@ impl WorkerSupervisor {
             control_path,
             control_dir,
         }) {
-            Ok(()) => Ok(()),
+            Ok(()) => Ok(runtime_id),
             Err(error) => {
                 if let WorkerSupervisorMessage::Register { mut child, .. } = error.0 {
                     let _ = child.kill();
@@ -212,11 +210,93 @@ impl WorkerSupervisor {
     fn terminate(&self, session: StartedSession) -> Result<(), SessionError> {
         let (result, receiver) = mpsc::channel();
         self.sender
-            .send(WorkerSupervisorMessage::Terminate { session, result })
+            .send(WorkerSupervisorMessage::Terminate {
+                session,
+                runtime_id: None,
+                result,
+            })
             .map_err(|_| SessionError::WorkerIoFailed)?;
         receiver
             .recv_timeout(Duration::from_secs(1))
             .map_err(|_| SessionError::WorkerIoFailed)?
+    }
+
+    #[cfg(any(test, feature = "integration-test-control"))]
+    fn terminate_runtime(&self, runtime_id: RuntimeSessionId) -> Result<(), SessionError> {
+        let (result, receiver) = mpsc::channel();
+        self.sender
+            .send(WorkerSupervisorMessage::Terminate {
+                session: StartedSession {
+                    username: String::new(),
+                    session: niralis_protocol::SessionInfo {
+                        id: String::new(),
+                        name: String::new(),
+                        kind: niralis_protocol::SessionKind::Wayland,
+                    },
+                },
+                runtime_id: Some(runtime_id),
+                result,
+            })
+            .map_err(|_| SessionError::WorkerIoFailed)?;
+        receiver
+            .recv_timeout(Duration::from_secs(1))
+            .map_err(|_| SessionError::WorkerIoFailed)?
+    }
+}
+
+fn request_worker_termination(worker: &mut SupervisedWorker) -> Result<(), SessionError> {
+    if worker.worker_id.is_empty() {
+        return Err(SessionError::WorkerIoFailed);
+    }
+
+    if worker
+        .child
+        .try_wait()
+        .map_err(|_| SessionError::WorkerIoFailed)?
+        .is_some()
+    {
+        return Ok(());
+    }
+
+    let mut control = match UnixStream::connect(&worker.control_path) {
+        Ok(control) => control,
+        Err(_) => {
+            return if worker
+                .child
+                .try_wait()
+                .map_err(|_| SessionError::WorkerIoFailed)?
+                .is_some()
+            {
+                Ok(())
+            } else {
+                Err(SessionError::WorkerIoFailed)
+            }
+        }
+    };
+
+    let result = write_control_request(
+        &mut control,
+        WorkerControlRequest::Terminate {
+            worker_id: worker.worker_id.clone(),
+            expected_worker_pid: worker.child.id(),
+            expected_session_pid: worker.session_pid,
+            expected_session_pgid: worker.session_pgid,
+        },
+    );
+
+    if result.is_ok() {
+        return Ok(());
+    }
+
+    if worker
+        .child
+        .try_wait()
+        .map_err(|_| SessionError::WorkerIoFailed)?
+        .is_some()
+    {
+        Ok(())
+    } else {
+        result
     }
 }
 
@@ -261,6 +341,14 @@ impl WorkerSessionLauncher {
         self.supervisor.terminate(session)
     }
 
+    #[cfg(any(test, feature = "integration-test-control"))]
+    pub fn terminate_runtime_session_for_test(
+        &self,
+        runtime_id: RuntimeSessionId,
+    ) -> Result<(), SessionError> {
+        self.supervisor.terminate_runtime(runtime_id)
+    }
+
     pub fn shutdown_sessions(&self) {
         let _ = self
             .supervisor
@@ -286,13 +374,35 @@ impl WorkerSessionLauncher {
             },
             expected_started_session(&request),
         )
+        .map(|(session, _)| session)
+    }
+
+    #[cfg(any(test, feature = "integration-test-control"))]
+    pub fn start_pam_session_for_test(
+        &self,
+        request: SessionRequest,
+        pam_service: String,
+        password: WorkerSecret,
+    ) -> Result<(StartedSession, RuntimeSessionId), SessionError> {
+        self.start_worker(
+            WorkerRequest::PamSession {
+                request: request.clone(),
+                pam_service,
+                password,
+                session_child_path: self.session_child_path.clone(),
+                session_probe_path: self.session_probe_path.clone(),
+                control_path: PathBuf::new(),
+                worker_id: String::new(),
+            },
+            expected_started_session(&request),
+        )
     }
 
     fn start_worker(
         &self,
         mut request: WorkerRequest,
         expected: StartedSession,
-    ) -> Result<StartedSession, SessionError> {
+    ) -> Result<(StartedSession, RuntimeSessionId), SessionError> {
         let (control_dir, control_path, worker_id) = create_control_endpoint()?;
         install_control_request(&mut request, control_path.clone(), worker_id.clone());
         let deadline = Instant::now() + self.timeout;
@@ -327,7 +437,7 @@ impl WorkerSessionLauncher {
                     }
                     attempt.finish();
                     let child = attempt.take_child();
-                    self.supervisor.register(
+                    let runtime_id = self.supervisor.register(
                         child,
                         expected.clone(),
                         session_pid,
@@ -336,7 +446,7 @@ impl WorkerSessionLauncher {
                         control_path,
                         control_dir,
                     )?;
-                    return Ok(expected);
+                    return Ok((expected, runtime_id));
                 }
                 WorkerResponse::Started { .. } => return Err(SessionError::WorkerProtocolFailed),
                 _ => unreachable!(),
@@ -363,6 +473,7 @@ impl WorkerSessionLauncher {
         let status = status_result?.ok_or(SessionError::WorkerProtocolFailed)?;
         debug!(?status, "session worker exited");
         map_response(response, status, expected)
+            .map(|session| (session, RuntimeSessionId::new("completed".to_owned())))
     }
 }
 
@@ -374,6 +485,7 @@ impl SessionLauncher for WorkerSessionLauncher {
             },
             expected_started_session(&request),
         )
+        .map(|(session, _)| session)
     }
 }
 

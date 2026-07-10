@@ -84,9 +84,7 @@ fn invalid_session_does_not_increment_rate_limit_and_discovery_errors_skip_auth(
 
     assert_eq!(
         handler.handle(login_request("test", "niri")),
-        NiralisResponse::Error {
-            message: "failed to discover sessions: failed to enumerate users".to_owned(),
-        }
+        session_unavailable()
     );
     assert_eq!(auth_calls.load(Ordering::SeqCst), 0);
     assert_eq!(launch_calls.load(Ordering::SeqCst), 0);

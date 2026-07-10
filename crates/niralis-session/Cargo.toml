@@ -4,6 +4,9 @@ edition.workspace = true
 license.workspace = true
 version.workspace = true
 
+[features]
+integration-test-control = []
+
 [dependencies]
 libc.workspace = true
 niralis-protocol.workspace = true
