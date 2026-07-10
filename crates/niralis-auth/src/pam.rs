@@ -79,10 +79,3 @@ impl PamAuthenticatedTransaction {
         self.transaction.password_is_cleared()
     }
 }
-
-pub(crate) fn authenticated_user_from_pam(pam_username: String) -> AuthenticatedUser {
-    AuthenticatedUser {
-        username: pam_username.clone(),
-        display_name: pam_username,
-    }
-}
