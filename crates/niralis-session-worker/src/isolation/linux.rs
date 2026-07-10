@@ -6,6 +6,7 @@ use std::fs;
 use std::os::fd::RawFd;
 
 const CAPGET_VERSION: u32 = 0x2008_0522;
+const CAPABILITY_U32S_V3: usize = 2;
 const PR_CAPBSET_READ: libc::c_int = 23;
 const PR_CAP_AMBIENT: libc::c_int = 47;
 const PR_CAP_AMBIENT_IS_SET: libc::c_ulong = 1;
@@ -71,14 +72,13 @@ impl PostDropAuditor for LinuxPostDropAuditor {
             version: CAPGET_VERSION,
             pid: 0,
         };
-        let words = (last as usize / 32) + 1;
         let mut data = vec![
             CapData {
                 effective: 0,
                 permitted: 0,
                 inheritable: 0
             };
-            words
+            CAPABILITY_U32S_V3
         ];
         if unsafe { libc::syscall(libc::SYS_capget, &mut header, data.as_mut_ptr()) } != 0 {
             return Err(PostDropAuditError::Failed);
