@@ -433,7 +433,18 @@ pub(crate) fn run_child_process_with_dependencies(
             return 1;
         }
     };
-    if validate_isolation_proof(&proof).is_err() {
+    if let Err(error) = validate_isolation_proof(&proof) {
+        eprintln!(
+            "session child isolation policy failed error={error} effective_capability_count={} permitted_capability_count={} inheritable_capability_count={} ambient_capability_count={} bounding_capability_count={} securebits={} no_new_privs={} open_fd_count={}",
+            proof.capabilities.effective.len(),
+            proof.capabilities.permitted.len(),
+            proof.capabilities.inheritable.len(),
+            proof.capabilities.ambient.len(),
+            proof.capabilities.bounding.len(),
+            proof.securebits,
+            proof.no_new_privs,
+            proof.open_fds.len(),
+        );
         let _ = write_rejection(&mut writer, SessionChildErrorCode::IsolationPolicyFailed);
         return 1;
     }
