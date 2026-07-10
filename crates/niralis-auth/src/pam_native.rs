@@ -2,6 +2,7 @@ use std::ffi::{CStr, CString};
 use std::ptr::NonNull;
 
 use pam::{Conversation, PamFlag, PamItemType, PamReturnCode};
+use tracing::debug;
 
 use crate::conversation::SilentPasswordConversation;
 use crate::{
@@ -40,11 +41,16 @@ impl NativePamTransaction {
             session_open: false,
             ended: false,
         };
-        let authenticated = pam::authenticate(transaction.handle_mut(), PamFlag::None)
-            == PamReturnCode::Success
-            && pam::acct_mgmt(transaction.handle_mut(), PamFlag::None) == PamReturnCode::Success;
+        let authenticate_result = pam::authenticate(transaction.handle_mut(), PamFlag::None);
         transaction.conversation.clear_password();
-        if !authenticated {
+        if authenticate_result != PamReturnCode::Success {
+            debug!(stage = "pam_authenticate", result = ?authenticate_result, "PAM authentication failed");
+            transaction.cleanup();
+            return Err(());
+        }
+        let account_result = pam::acct_mgmt(transaction.handle_mut(), PamFlag::None);
+        if account_result != PamReturnCode::Success {
+            debug!(stage = "pam_acct_mgmt", result = ?account_result, "PAM account validation failed");
             transaction.cleanup();
             return Err(());
         }
@@ -191,18 +197,18 @@ unsafe extern "C" fn converse(
             return PamReturnCode::Conv_Err as libc::c_int;
         }
         let text = CStr::from_ptr((*message).msg);
-        let answer = match (*message).msg_style {
-            1 => conversation.prompt_echo(text),
-            2 => conversation.prompt_blind(text),
-            3 => {
-                conversation.info(text);
-                continue;
-            }
-            4 => {
+        let answer = match conversation_action((*message).msg_style) {
+            ConversationAction::EchoOff => conversation.prompt_blind(text),
+            ConversationAction::EchoOn => conversation.prompt_echo(text),
+            ConversationAction::Error => {
                 conversation.error(text);
                 continue;
             }
-            _ => Err(()),
+            ConversationAction::Info => {
+                conversation.info(text);
+                continue;
+            }
+            ConversationAction::Invalid => Err(()),
         };
         let Ok(answer) = answer else {
             libc::free(output.cast());
@@ -216,4 +222,37 @@ unsafe extern "C" fn converse(
     }
     *responses = output;
     PamReturnCode::Success as libc::c_int
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConversationAction {
+    EchoOff,
+    EchoOn,
+    Error,
+    Info,
+    Invalid,
+}
+
+fn conversation_action(style: libc::c_int) -> ConversationAction {
+    match style {
+        1 => ConversationAction::EchoOff,
+        2 => ConversationAction::EchoOn,
+        3 => ConversationAction::Error,
+        4 => ConversationAction::Info,
+        _ => ConversationAction::Invalid,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{conversation_action, ConversationAction};
+
+    #[test]
+    fn maps_linux_pam_message_styles() {
+        assert_eq!(conversation_action(1), ConversationAction::EchoOff);
+        assert_eq!(conversation_action(2), ConversationAction::EchoOn);
+        assert_eq!(conversation_action(3), ConversationAction::Error);
+        assert_eq!(conversation_action(4), ConversationAction::Info);
+        assert_eq!(conversation_action(0), ConversationAction::Invalid);
+    }
 }
