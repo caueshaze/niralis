@@ -20,5 +20,5 @@ pub use protocol::{
 pub use secret::WorkerSecret;
 #[cfg(any(test, feature = "integration-test-control"))]
 pub use types::RuntimeSessionId;
-pub use types::{SessionLauncher, SessionRequest, StartedSession};
+pub use types::{LogindSessionId, SessionLauncher, SessionRequest, StartedSession};
 pub use worker_io::{read_control_request, read_envelope, write_control_request, write_envelope};

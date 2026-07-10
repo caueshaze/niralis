@@ -1,6 +1,9 @@
 use crate::conversation::SilentPasswordConversation;
 use crate::pam::authenticated_user_from_pam;
-use crate::{AuthError, Authenticator, MockAuthenticator, PamAuthenticator};
+use crate::{
+    AuthError, Authenticator, MockAuthenticator, PamAuthenticator, PamSessionClass,
+    PamSessionMetadata, PamSessionType,
+};
 
 #[test]
 fn accepts_mock_user_transaction() {
@@ -13,7 +16,11 @@ fn accepts_mock_user_transaction() {
     assert_eq!(transaction.user().username, "test");
     assert_eq!(transaction.user().display_name, "Test User");
     transaction
-        .open_session()
+        .open_session(&PamSessionMetadata {
+            session_type: PamSessionType::Wayland,
+            session_class: PamSessionClass::User,
+            session_desktop: "niri".to_owned(),
+        })
         .expect("mock transaction should allow opening session");
 }
 

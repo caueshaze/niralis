@@ -5,6 +5,7 @@ license.workspace = true
 version.workspace = true
 
 [dependencies]
+libc.workspace = true
 pam.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

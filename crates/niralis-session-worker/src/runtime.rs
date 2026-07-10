@@ -18,6 +18,7 @@ use crate::identity::{
     NssSupplementaryGroupsResolver, NssUnixIdentityResolver, ResolvedUnixCredentials,
     SupplementaryGroupsResolver, UnixIdentityResolver,
 };
+use crate::logind::{LogindSessionIdentity, LogindSessionResolver, SdLoginResolver};
 use crate::privilege_drop::PrivilegeDropTarget;
 use crate::session_child::{
     ProcessSessionChildRunnerFactory, SessionChildExpectation, SessionChildRunnerFactory,
@@ -28,11 +29,12 @@ pub trait WorkerAuthenticatorFactory: Send + Sync {
     fn build(&self, pam_service: &str) -> Box<dyn Authenticator>;
 }
 
-pub struct WorkerDependencies<'a, F, I, G, C> {
+pub struct WorkerDependencies<'a, F, I, G, C, L> {
     pub authenticator_factory: &'a F,
     pub identity_resolver: &'a I,
     pub supplementary_groups_resolver: &'a G,
     pub session_child_runner_factory: &'a C,
+    pub logind_resolver: &'a L,
 }
 
 #[derive(Debug, Default)]
@@ -56,6 +58,7 @@ pub fn run_worker_process<R: Read, W: Write>(
             identity_resolver: &NssUnixIdentityResolver,
             supplementary_groups_resolver: &NssSupplementaryGroupsResolver,
             session_child_runner_factory: &ProcessSessionChildRunnerFactory,
+            logind_resolver: &SdLoginResolver,
         },
     )
 }
@@ -67,10 +70,11 @@ pub fn run_worker_process_with_dependencies<
     I: UnixIdentityResolver,
     G: SupplementaryGroupsResolver,
     C: SessionChildRunnerFactory,
+    L: LogindSessionResolver,
 >(
     reader: &mut R,
     writer: &mut W,
-    dependencies: WorkerDependencies<'_, F, I, G, C>,
+    dependencies: WorkerDependencies<'_, F, I, G, C, L>,
 ) -> Result<(), SessionError> {
     let envelope = match read_envelope::<WorkerRequest, _>(reader) {
         Ok(envelope) => envelope,
@@ -118,6 +122,7 @@ pub fn run_worker_process_with_dependencies<
             dependencies.identity_resolver,
             dependencies.supplementary_groups_resolver,
             dependencies.session_child_runner_factory,
+            dependencies.logind_resolver,
             request,
             pam_service,
             password,
@@ -135,12 +140,14 @@ fn run_pam_session<
     I: UnixIdentityResolver,
     G: SupplementaryGroupsResolver,
     C: SessionChildRunnerFactory,
+    L: LogindSessionResolver,
 >(
     writer: &mut W,
     factory: &F,
     identity_resolver: &I,
     supplementary_groups_resolver: &G,
     session_child_runner_factory: &C,
+    logind_resolver: &L,
     request: niralis_session::SessionRequest,
     pam_service: String,
     password: niralis_session::WorkerSecret,
@@ -240,7 +247,19 @@ fn run_pam_session<
     );
     let canonical_username = credentials.identity.username.clone();
 
-    let open_result = catch_unwind(AssertUnwindSafe(|| transaction.open_session()));
+    let expected_type = match request.session.kind {
+        niralis_protocol::SessionKind::Wayland => "wayland",
+        niralis_protocol::SessionKind::X11 => "x11",
+    };
+    let metadata = niralis_auth::PamSessionMetadata {
+        session_type: match request.session.kind {
+            niralis_protocol::SessionKind::Wayland => niralis_auth::PamSessionType::Wayland,
+            niralis_protocol::SessionKind::X11 => niralis_auth::PamSessionType::X11,
+        },
+        session_class: niralis_auth::PamSessionClass::User,
+        session_desktop: request.session.id.clone(),
+    };
+    let open_result = catch_unwind(AssertUnwindSafe(|| transaction.open_session(&metadata)));
     let session = StartedSession {
         username: request.username,
         session: request.session,
@@ -249,6 +268,28 @@ fn run_pam_session<
     match open_result {
         Ok(Ok(())) => {
             info!(username = %canonical_username, session = %session.session.id, "worker PAM session opened");
+            let logind = match logind_resolver.resolve_by_pid(std::process::id()) {
+                Ok(Some(identity))
+                    if valid_logind_identity(
+                        &identity,
+                        credentials.identity.uid,
+                        expected_type,
+                        &session.session.id,
+                    ) =>
+                {
+                    identity
+                }
+                _ => {
+                    drop(transaction);
+                    write_envelope(
+                        writer,
+                        WorkerResponse::SessionFailed {
+                            code: WorkerSessionFailureCode::LogindFailed,
+                        },
+                    )?;
+                    return Err(SessionError::AuthenticatedSessionFailed);
+                }
+            };
             let child_runner = match session_child_runner_factory
                 .build(Path::new(&session_child_path))
             {
@@ -310,6 +351,27 @@ fn run_pam_session<
                     return Err(SessionError::AuthenticatedSessionFailed);
                 }
             };
+            match logind_resolver.resolve_by_pid(child_report.child_pid) {
+                Ok(Some(child_identity))
+                    if child_identity.id == logind.id
+                        && valid_logind_identity(
+                            &child_identity,
+                            credentials.identity.uid,
+                            expected_type,
+                            &session.session.id,
+                        ) => {}
+                _ => {
+                    let _ = child_runner.terminate(SESSION_TERMINATION_GRACE);
+                    drop(transaction);
+                    write_envelope(
+                        writer,
+                        WorkerResponse::SessionFailed {
+                            code: WorkerSessionFailureCode::LogindFailed,
+                        },
+                    )?;
+                    return Err(SessionError::AuthenticatedSessionFailed);
+                }
+            }
             info!(
                 username = %canonical_username,
                 session = %session.session.id,
@@ -344,6 +406,10 @@ fn run_pam_session<
                     session_pgid: child_report.process_identity.pgid,
                     fixture_version: child_report.exec_probe_version,
                     worker_id: worker_id.clone(),
+                    logind_session_id: niralis_session::LogindSessionId::new(
+                        logind.id.as_str().to_owned(),
+                    )
+                    .expect("validated logind id"),
                 },
             )?;
             info!(username = %canonical_username, session = %session.session.id, pid = child_report.child_pid, "worker session started; PAM transaction remains open");
@@ -393,6 +459,21 @@ fn run_pam_session<
             Err(SessionError::AuthenticatedSessionFailed)
         }
     }
+}
+
+fn valid_logind_identity(
+    identity: &LogindSessionIdentity,
+    uid: u32,
+    expected_type: &str,
+    desktop: &str,
+) -> bool {
+    identity.uid == uid
+        && identity.session_type == expected_type
+        && identity.class == "user"
+        && identity
+            .desktop
+            .as_deref()
+            .map_or(true, |value| value == desktop)
 }
 
 const SESSION_TERMINATION_GRACE: Duration = Duration::from_secs(5);

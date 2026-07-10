@@ -1,6 +1,7 @@
 mod conversation;
 mod mock;
 mod pam;
+mod pam_native;
 #[cfg(test)]
 mod tests;
 
@@ -12,6 +13,43 @@ use thiserror::Error;
 pub struct AuthenticatedUser {
     pub username: String,
     pub display_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PamSessionMetadata {
+    pub session_type: PamSessionType,
+    pub session_class: PamSessionClass,
+    pub session_desktop: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PamSessionType {
+    Wayland,
+    X11,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PamSessionClass {
+    User,
+    Greeter,
+}
+
+impl PamSessionMetadata {
+    pub(crate) fn entries(&self) -> [String; 3] {
+        let session_type = match self.session_type {
+            PamSessionType::Wayland => "wayland",
+            PamSessionType::X11 => "x11",
+        };
+        let session_class = match self.session_class {
+            PamSessionClass::User => "user",
+            PamSessionClass::Greeter => "greeter",
+        };
+        [
+            format!("XDG_SESSION_TYPE={session_type}"),
+            format!("XDG_SESSION_CLASS={session_class}"),
+            format!("XDG_SESSION_DESKTOP={}", self.session_desktop),
+        ]
+    }
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -33,7 +71,7 @@ pub enum AuthSessionError {
 pub trait AuthenticatedTransaction: Send {
     fn user(&self) -> &AuthenticatedUser;
 
-    fn open_session(&mut self) -> Result<(), AuthSessionError>;
+    fn open_session(&mut self, metadata: &PamSessionMetadata) -> Result<(), AuthSessionError>;
 }
 
 pub trait Authenticator: Send + Sync {

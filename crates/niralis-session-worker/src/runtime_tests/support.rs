@@ -19,6 +19,7 @@ use crate::session_child::{
     SessionChildError, SessionChildExpectation, SessionChildReport, SessionChildRunner,
     SessionChildRunnerFactory,
 };
+use crate::{LogindError, LogindSessionId, LogindSessionIdentity, LogindSessionResolver};
 
 #[derive(Clone, Default)]
 pub(super) struct TrackingState {
@@ -93,7 +94,10 @@ impl AuthenticatedTransaction for StubTransaction {
         &self.user
     }
 
-    fn open_session(&mut self) -> Result<(), AuthSessionError> {
+    fn open_session(
+        &mut self,
+        _metadata: &niralis_auth::PamSessionMetadata,
+    ) -> Result<(), AuthSessionError> {
         self.state.open_calls.fetch_add(1, Ordering::SeqCst);
         if self.open_panics {
             panic!("boom");
@@ -127,6 +131,32 @@ pub(super) struct StubGroupsResolver {
 pub(super) struct StubChildFactory {
     pub(super) state: TrackingState,
     pub(super) result: Result<(), SessionChildError>,
+}
+
+#[derive(Default)]
+pub(super) struct StubLogind;
+
+impl LogindSessionResolver for StubLogind {
+    fn resolve_by_pid(&self, _pid: u32) -> Result<Option<LogindSessionIdentity>, LogindError> {
+        Ok(Some(LogindSessionIdentity {
+            id: LogindSessionId::new("test-logind".to_owned()).unwrap(),
+            uid: 1000,
+            session_type: "wayland".to_owned(),
+            class: "user".to_owned(),
+            desktop: Some("niri".to_owned()),
+        }))
+    }
+    fn resolve_by_id(
+        &self,
+        id: &LogindSessionId,
+    ) -> Result<Option<LogindSessionIdentity>, LogindError> {
+        self.resolve_by_pid(0).map(|identity| {
+            identity.map(|mut value| {
+                value.id = id.clone();
+                value
+            })
+        })
+    }
 }
 
 impl SessionChildRunnerFactory for StubChildFactory {

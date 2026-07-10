@@ -35,6 +35,7 @@ enum WorkerSupervisorMessage {
         session_pid: u32,
         session_pgid: u32,
         worker_id: String,
+        logind_session_id: crate::LogindSessionId,
         control_path: PathBuf,
         control_dir: TempDir,
     },
@@ -53,7 +54,7 @@ struct WorkerSupervisor {
 }
 
 struct SupervisedWorker {
-    runtime_id: RuntimeSessionId,
+    ownership: RuntimeOwnership,
     child: Child,
     session: StartedSession,
     session_pid: u32,
@@ -61,6 +62,12 @@ struct SupervisedWorker {
     worker_id: String,
     control_path: PathBuf,
     _control_dir: TempDir,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RuntimeOwnership {
+    runtime_id: RuntimeSessionId,
+    logind_session_id: crate::LogindSessionId,
 }
 
 impl WorkerSupervisor {
@@ -77,10 +84,14 @@ impl WorkerSupervisor {
                         session_pid,
                         session_pgid,
                         worker_id,
+                        logind_session_id,
                         control_path,
                         control_dir,
                     }) => children.push(SupervisedWorker {
-                        runtime_id,
+                        ownership: RuntimeOwnership {
+                            runtime_id,
+                            logind_session_id,
+                        },
                         child,
                         session,
                         session_pid,
@@ -95,9 +106,9 @@ impl WorkerSupervisor {
                         result,
                     }) => {
                         let outcome = if let Some(worker) = children.iter_mut().find(|worker| {
-                            runtime_id
-                                .as_ref()
-                                .map_or(worker.session == session, |id| worker.runtime_id == *id)
+                            runtime_id.as_ref().map_or(worker.session == session, |id| {
+                                worker.ownership.runtime_id == *id
+                            })
                         }) {
                             request_worker_termination(worker)
                         } else {
@@ -149,7 +160,7 @@ impl WorkerSupervisor {
                 while index < children.len() {
                     match children[index].child.try_wait() {
                         Ok(Some(status)) => {
-                            debug!(?status, username = %children[index].session.username, session_pid = children[index].session_pid, "session worker exited and was reaped");
+                            debug!(?status, username = %children[index].session.username, session_pid = children[index].session_pid, logind_session_id = %children[index].ownership.logind_session_id.as_str(), "session worker exited and was reaped; runtime/logind ownership removed");
                             children.swap_remove(index);
                         }
                         Ok(None) => index += 1,
@@ -174,6 +185,7 @@ impl WorkerSupervisor {
         session_pid: u32,
         session_pgid: u32,
         worker_id: String,
+        logind_session_id: crate::LogindSessionId,
         control_path: PathBuf,
         control_dir: TempDir,
     ) -> Result<RuntimeSessionId, SessionError> {
@@ -193,6 +205,7 @@ impl WorkerSupervisor {
             session_pid,
             session_pgid,
             worker_id,
+            logind_session_id,
             control_path,
             control_dir,
         }) {
@@ -427,6 +440,7 @@ impl WorkerSessionLauncher {
                     session_pgid,
                     fixture_version,
                     worker_id: started_worker_id,
+                    logind_session_id,
                 } if session == expected
                     && fixture_version == 1
                     && (started_worker_id == worker_id || started_worker_id.is_empty())
@@ -443,6 +457,7 @@ impl WorkerSessionLauncher {
                         session_pid,
                         session_pgid,
                         worker_id,
+                        logind_session_id,
                         control_path,
                         control_dir,
                     )?;
@@ -493,6 +508,40 @@ fn expected_started_session(request: &SessionRequest) -> StartedSession {
     StartedSession {
         username: request.username.clone(),
         session: request.session.clone(),
+    }
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    use super::*;
+
+    fn ownership(runtime: &str, logind: &str) -> RuntimeOwnership {
+        RuntimeOwnership {
+            runtime_id: RuntimeSessionId::new(runtime.to_owned()),
+            logind_session_id: crate::LogindSessionId::new(logind.to_owned()).unwrap(),
+        }
+    }
+
+    #[test]
+    fn swap_remove_removes_only_the_matching_runtime_logind_pair() {
+        let a = ownership("runtime-a", "c1");
+        let b = ownership("runtime-b", "c2");
+        let mut active = vec![a.clone(), b.clone()];
+        let index = active
+            .iter()
+            .position(|value| value.runtime_id == a.runtime_id)
+            .unwrap();
+        let removed = active.swap_remove(index);
+        assert_eq!(removed, a);
+        assert_eq!(active, vec![b]);
+    }
+
+    #[test]
+    fn expired_runtime_id_cannot_match_a_future_ownership() {
+        let expired = ownership("runtime-a", "c1");
+        let future = ownership("runtime-b", "c2");
+        assert_ne!(expired.runtime_id, future.runtime_id);
+        assert_ne!(expired.logind_session_id, future.logind_session_id);
     }
 }
 

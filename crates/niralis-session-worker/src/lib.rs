@@ -1,5 +1,6 @@
 mod identity;
 mod isolation;
+mod logind;
 mod privilege_drop;
 mod runtime;
 #[cfg(test)]
@@ -14,6 +15,9 @@ pub use isolation::{
     validate_isolation_proof, CapabilityState, FdSanitizationError, InheritedFdSanitizer,
     IsolationPolicyError, LinuxInheritedFdSanitizer, LinuxPostDropAuditor, PostDropAuditError,
     PostDropAuditor, PostDropIsolationProof,
+};
+pub use logind::{
+    LogindError, LogindSessionId, LogindSessionIdentity, LogindSessionResolver, SdLoginResolver,
 };
 pub use privilege_drop::{
     AppliedCredentials, LibcPrivilegeDropper, PrivilegeDropError, PrivilegeDropTarget,

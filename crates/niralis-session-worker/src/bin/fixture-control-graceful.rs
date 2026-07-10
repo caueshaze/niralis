@@ -44,6 +44,10 @@ fn run(stubborn: bool) {
                 session_pgid: pid,
                 fixture_version: 1,
                 worker_id,
+                logind_session_id: niralis_session::LogindSessionId::new(
+                    "fixture-logind".to_owned(),
+                )
+                .unwrap(),
             },
         },
     )

@@ -79,7 +79,10 @@ impl AuthenticatedTransaction for TrackingTransaction {
         &self.user
     }
 
-    fn open_session(&mut self) -> Result<(), AuthSessionError> {
+    fn open_session(
+        &mut self,
+        _metadata: &niralis_auth::PamSessionMetadata,
+    ) -> Result<(), AuthSessionError> {
         Ok(())
     }
 }

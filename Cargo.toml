@@ -18,6 +18,7 @@ version = "0.1.0"
 [workspace.dependencies]
 clap = { version = "4.5.41", features = ["derive", "env"] }
 libc = "0.2.186"
+libloading = "0.8.9"
 niralis-auth = { path = "crates/niralis-auth" }
 niralis-discovery = { path = "crates/niralis-discovery" }
 niralis-protocol = { path = "crates/niralis-protocol" }

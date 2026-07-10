@@ -21,6 +21,8 @@ fn main() {
             session_pgid: pid,
             fixture_version: 1,
             worker_id: String::new(),
+            logind_session_id: niralis_session::LogindSessionId::new("fixture-logind".to_owned())
+                .unwrap(),
         },
     };
     let stdout = std::io::stdout();

@@ -1,7 +1,6 @@
-use pam::Client;
 use tracing::debug;
 
-use crate::conversation::SilentPasswordConversation;
+use crate::pam_native::NativePamTransaction;
 use crate::{
     AuthError, AuthSessionError, AuthenticatedTransaction, AuthenticatedUser, Authenticator,
 };
@@ -29,45 +28,20 @@ impl Authenticator for PamAuthenticator {
         username: &str,
         password: &str,
     ) -> Result<Box<dyn AuthenticatedTransaction>, AuthError> {
-        let mut client: Client<'static, SilentPasswordConversation> =
-            Client::with_conversation(&self.service, SilentPasswordConversation::new()).map_err(
-                |error| {
-                    debug!(service = %self.service, ?error, "failed to initialize PAM client");
-                    AuthError::InfrastructureFailed
-                },
-            )?;
+        let (transaction, user) = NativePamTransaction::authenticate(
+            &self.service,
+            username.to_owned(),
+            password.to_owned(),
+        )
+        .map_err(|_| AuthError::LoginFailed)?;
 
-        client
-            .conversation_mut()
-            .set_credentials(username.to_owned(), password.to_owned());
-
-        let auth_result = client.authenticate();
-        client.conversation_mut().clear_password();
-        auth_result.map_err(|error| {
-            debug!(service = %self.service, username = %username, ?error, "PAM authentication failed");
-            AuthError::LoginFailed
-        })?;
-
-        let pam_username = client.get_user().map_err(|error| {
-            debug!(
-                service = %self.service,
-                requested_username = %username,
-                ?error,
-                "failed to determine PAM authenticated username"
-            );
-            AuthError::AuthenticatedIdentityUnavailable
-        })?;
-
-        Ok(Box::new(PamAuthenticatedTransaction {
-            user: authenticated_user_from_pam(pam_username),
-            client,
-        }))
+        Ok(Box::new(PamAuthenticatedTransaction { user, transaction }))
     }
 }
 
 pub(crate) struct PamAuthenticatedTransaction {
     user: AuthenticatedUser,
-    client: Client<'static, SilentPasswordConversation>,
+    transaction: NativePamTransaction,
 }
 
 impl AuthenticatedTransaction for PamAuthenticatedTransaction {
@@ -75,9 +49,12 @@ impl AuthenticatedTransaction for PamAuthenticatedTransaction {
         &self.user
     }
 
-    fn open_session(&mut self) -> Result<(), AuthSessionError> {
-        self.client.open_session().map_err(|error| {
-            debug!(username = %self.user.username, ?error, "PAM open_session failed");
+    fn open_session(
+        &mut self,
+        metadata: &crate::PamSessionMetadata,
+    ) -> Result<(), AuthSessionError> {
+        self.transaction.open_session(metadata).map_err(|_| {
+            debug!(username = %self.user.username, "PAM open_session failed");
             AuthSessionError::OpenFailed
         })
     }
@@ -87,7 +64,7 @@ impl std::fmt::Debug for PamAuthenticatedTransaction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PamAuthenticatedTransaction")
             .field("username", &self.user.username)
-            .field("client", &"[redacted]")
+            .field("transaction", &"[redacted]")
             .finish()
     }
 }
@@ -95,7 +72,7 @@ impl std::fmt::Debug for PamAuthenticatedTransaction {
 impl PamAuthenticatedTransaction {
     #[allow(dead_code)]
     pub(crate) fn password_is_cleared(&self) -> bool {
-        self.client.conversation().password_is_cleared()
+        self.transaction.password_is_cleared()
     }
 }
 

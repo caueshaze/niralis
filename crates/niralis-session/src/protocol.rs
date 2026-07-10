@@ -2,9 +2,9 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{SessionRequest, StartedSession, WorkerSecret};
+use crate::{LogindSessionId, SessionRequest, StartedSession, WorkerSecret};
 
-pub const WORKER_PROTOCOL_VERSION: u32 = 7;
+pub const WORKER_PROTOCOL_VERSION: u32 = 8;
 pub const MAX_WORKER_MESSAGE_BYTES: usize = 64 * 1024;
 pub const WORKER_CONTROL_PROTOCOL_VERSION: u32 = 1;
 pub const MAX_WORKER_CONTROL_MESSAGE_BYTES: usize = 4096;
@@ -49,6 +49,7 @@ pub enum WorkerResponse {
         session_pgid: u32,
         fixture_version: u32,
         worker_id: String,
+        logind_session_id: LogindSessionId,
     },
     Ready {
         session: StartedSession,
@@ -79,4 +80,5 @@ pub enum WorkerSessionFailureCode {
     OpenFailed,
     InternalPanic,
     SessionChildFailed,
+    LogindFailed,
 }

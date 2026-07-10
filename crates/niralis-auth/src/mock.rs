@@ -34,7 +34,10 @@ impl AuthenticatedTransaction for MockAuthenticatedTransaction {
         &self.user
     }
 
-    fn open_session(&mut self) -> Result<(), AuthSessionError> {
+    fn open_session(
+        &mut self,
+        _metadata: &crate::PamSessionMetadata,
+    ) -> Result<(), AuthSessionError> {
         Ok(())
     }
 }
