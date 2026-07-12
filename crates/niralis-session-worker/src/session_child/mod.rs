@@ -828,7 +828,8 @@ pub(crate) fn run_child_process_with_dependencies(
             let _ = write_rejection(&mut writer, SessionChildErrorCode::RootUidDisallowed);
             return 1;
         }
-        Err(_) => {
+        Err(error) => {
+            eprintln!("session child privilege drop failed error={error}");
             let _ = write_rejection(&mut writer, SessionChildErrorCode::PrivilegeDropFailed);
             return 1;
         }
