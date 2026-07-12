@@ -20,6 +20,19 @@ pub enum NiralisdError {
     Json(#[from] serde_json::Error),
     #[error("invalid socket path: {0}")]
     InvalidSocketPath(PathBuf),
+    #[error("greeter user name contains a NUL byte")]
+    GreeterUserNameContainsNul,
+    #[error("greeter user does not exist: {0}")]
+    GreeterUserNotFound(String),
+    #[error("greeter identity lookup failed for {username}: {source}")]
+    GreeterIdentityLookupFailed {
+        username: String,
+        source: std::io::Error,
+    },
+    #[error("greeter user must not resolve to UID 0")]
+    InvalidGreeterUid,
+    #[error("greeter primary group must not resolve to GID 0")]
+    InvalidGreeterGid,
     #[error("invalid worker path: {0}")]
     InvalidWorkerPath(PathBuf),
     #[error("invalid worker timeout: {0}")]

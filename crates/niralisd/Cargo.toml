@@ -6,6 +6,7 @@ version.workspace = true
 
 [dependencies]
 clap.workspace = true
+libc.workspace = true
 niralis-auth.workspace = true
 niralis-discovery.workspace = true
 niralis-protocol.workspace = true
