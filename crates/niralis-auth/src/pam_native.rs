@@ -95,13 +95,17 @@ impl NativePamTransaction {
             return Err(AuthSessionError::OpenFailed);
         }
         self.credentials_established = true;
+        // A required module later in the stack can fail after an earlier one
+        // has performed session setup (for example, pam_selinux relabeling
+        // PAM_TTY).  Mark cleanup as needed before dispatch so close_session
+        // gets the matching rollback call even when open_session fails.
+        self.session_open = true;
         let open_result = pam::open_session(self.handle_mut(), false);
         if open_result != PamReturnCode::Success {
             tracing::warn!(stage = "pam_open_session", result = ?open_result, "PAM session open failed");
             self.cleanup();
             return Err(AuthSessionError::OpenFailed);
         }
-        self.session_open = true;
         let reinitialize_result = pam::setcred(self.handle_mut(), PamFlag::Reinitialize_Cred);
         if reinitialize_result != PamReturnCode::Success {
             tracing::warn!(stage = "pam_setcred_reinitialize", result = ?reinitialize_result, "PAM credential reinitialization failed");
