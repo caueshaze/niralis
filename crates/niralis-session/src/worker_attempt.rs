@@ -99,16 +99,31 @@ impl Drop for WorkerAttempt {
 }
 
 fn spawn_worker(worker_path: &Path) -> Result<Child, SessionError> {
-    let child = Command::new(worker_path)
+    let result = Command::new(worker_path)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .env_clear()
         .current_dir("/")
-        .spawn()
-        .map_err(|_| SessionError::WorkerSpawnFailed)?;
-    info!(path = %worker_path.display(), "spawned session worker");
-    Ok(child)
+        .spawn();
+
+    match result {
+        Ok(child) => {
+            info!(path = %worker_path.display(), "spawned session worker");
+            Ok(child)
+        }
+        Err(error) => {
+            tracing::error!(
+                path = %worker_path.display(),
+                errno = ?error.raw_os_error(),
+                kind = ?error.kind(),
+                error = %error,
+                "failed to spawn session worker"
+            );
+
+            Err(SessionError::WorkerSpawnFailed)
+        }
+    }
 }
 
 fn spawn_writer(
