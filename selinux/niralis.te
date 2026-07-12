@@ -27,11 +27,10 @@ manage_sock_files_pattern(niralis_t, niralis_var_run_t, niralis_var_run_t)
 
 auth_use_nsswitch(niralis_t)
 auth_use_pam(niralis_t)
-auth_domtrans_pam(niralis_t)
+auth_domtrans_pam_timestamp(niralis_t)
 systemd_dbus_chat_logind(niralis_t)
-dev_read_console(niralis_t)
-dev_write_console(niralis_t)
-term_use_all_terms(niralis_t)
+term_use_console(niralis_t)
+term_use_unallocated_ttys(niralis_t)
 
 ########################################
 # pam_selinux provides the final user context. niralis_t may request it only
@@ -39,4 +38,4 @@ term_use_all_terms(niralis_t)
 # privileged child in that target context.
 
 allow niralis_t niralis_t:process setexec;
-userdom_login_user_domain(niralis_t)
+userdom_transition_login_userdomain(niralis_t)
