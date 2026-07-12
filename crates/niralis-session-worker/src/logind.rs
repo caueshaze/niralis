@@ -60,7 +60,7 @@ impl LogindSessionResolver for SdLoginResolver {
                 .map_err(|_| LogindError::Unavailable)?;
             let mut value = std::ptr::null_mut();
             let result = function(pid as libc::pid_t, &mut value);
-            if result == -libc::ENXIO || result == -libc::ENOENT {
+            if pid_has_no_logind_session(result) {
                 return Ok(None);
             }
             if result < 0 || value.is_null() {
@@ -129,6 +129,13 @@ impl LogindSessionResolver for SdLoginResolver {
     }
 }
 
+fn pid_has_no_logind_session(result: libc::c_int) -> bool {
+    // sd_pid_get_session() reports a PID outside a logind session as ENODATA
+    // on current systemd releases. Older implementations may return ENXIO;
+    // ENOENT remains useful for a PID whose proc entry disappeared mid-query.
+    result == -libc::ENODATA || result == -libc::ENXIO || result == -libc::ENOENT
+}
+
 fn load() -> Result<Library, LogindError> {
     unsafe { Library::new("libsystemd.so.0").map_err(|_| LogindError::Unavailable) }
 }
@@ -168,5 +175,18 @@ unsafe fn optional_vtnr(
         None
     } else {
         Some(value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pid_has_no_logind_session;
+
+    #[test]
+    fn recognizes_systemd_no_session_results() {
+        assert!(pid_has_no_logind_session(-libc::ENODATA));
+        assert!(pid_has_no_logind_session(-libc::ENXIO));
+        assert!(pid_has_no_logind_session(-libc::ENOENT));
+        assert!(!pid_has_no_logind_session(-libc::EACCES));
     }
 }
