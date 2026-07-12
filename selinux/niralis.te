@@ -33,6 +33,11 @@ auth_use_nsswitch(niralis_t)
 auth_use_pam(niralis_t)
 auth_domtrans_pam_timestamp(niralis_t)
 systemd_dbus_chat_logind(niralis_t)
+
+# sd-login APIs such as sd_seat_can_graphical() read logind runtime
+# state from /run/systemd, including /run/systemd/seats/seat0.
+systemd_login_read_pid_files(niralis_t)
+
 term_use_console(niralis_t)
 term_use_unallocated_ttys(niralis_t)
 

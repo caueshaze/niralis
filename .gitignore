@@ -65,3 +65,9 @@ Thumbs.db
 # Generated binaries copied into the repository root
 /niralisd
 /niralisctl
+
+# Generated SELinux policy build artifacts
+/selinux/*.if
+/selinux/*.mod
+/selinux/*.pp
+/selinux/tmp/
