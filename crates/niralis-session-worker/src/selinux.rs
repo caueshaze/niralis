@@ -25,11 +25,11 @@ impl PamSelinuxExecContext {
         {
             return Err(SelinuxError::InvalidContext);
         }
-        let mut fields = value.split(':');
-        if fields.by_ref().take(4).count() != 4
-            || fields.next().is_some()
-            || value.split(':').any(str::is_empty)
-        {
+        // SELinux contexts have user:role:type:range shape, but an MLS/MCS
+        // range itself may contain colons (for example s0-s0:c0.c1023).
+        // Validate the fixed prefix and keep the range opaque.
+        let mut fields = value.splitn(4, ':');
+        if fields.by_ref().take(4).count() != 4 || fields.any(str::is_empty) {
             return Err(SelinuxError::InvalidContext);
         }
         Ok(Self(value))
@@ -195,6 +195,14 @@ mod tests {
             PamSelinuxExecContext::new("unconfined_u:unconfined_r:unconfined_t:s0".to_owned())
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn accepts_a_pam_selinux_context_with_an_mls_range() {
+        assert!(PamSelinuxExecContext::new(
+            "unconfined_u:unconfined_r:unconfined_t:s0-s0:c0.c1023".to_owned()
+        )
+        .is_ok());
     }
 
     #[test]
