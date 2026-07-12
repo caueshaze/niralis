@@ -63,6 +63,8 @@ userdom_relabel_user_ttys(niralis_t)
 # Between credential drop and final setexeccon, the child makes the
 # PAM-labelled user VT its controlling terminal.
 allow niralis_t user_tty_device_t:chr_file ioctl;
+# The child enters the authenticated account's home before the final exec.
+userdom_search_user_home_dirs(niralis_t)
 
 # niralisd sets the IPC socket ownership to root:<greeter primary gid>.
 allow niralis_t self:capability chown;
