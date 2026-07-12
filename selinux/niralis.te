@@ -38,6 +38,11 @@ systemd_dbus_chat_logind(niralis_t)
 # state from /run/systemd, including /run/systemd/seats/seat0.
 systemd_login_read_pid_files(niralis_t)
 
+# pam_selinux resolves the PAM user through /etc/selinux/{config,seusers}
+# and optional per-user entries under /etc/selinux/targeted/logins.
+seutil_read_config(niralis_t)
+seutil_read_login_config(niralis_t)
+
 # sd_pid_get_session() reads the worker's dynamically-labelled
 # /proc/<pid>/cgroup and PID 1's cgroup to resolve the namespace root.
 read_files_pattern(niralis_t, niralis_t, niralis_t)
