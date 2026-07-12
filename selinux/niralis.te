@@ -39,8 +39,9 @@ systemd_dbus_chat_logind(niralis_t)
 systemd_login_read_pid_files(niralis_t)
 
 # sd_pid_get_session() reads the worker's dynamically-labelled
-# /proc/<pid>/cgroup. Permit only niralis_t to read its own proc state.
+# /proc/<pid>/cgroup and PID 1's cgroup to resolve the namespace root.
 read_files_pattern(niralis_t, niralis_t, niralis_t)
+init_read_state(niralis_t)
 
 term_use_console(niralis_t)
 term_use_unallocated_ttys(niralis_t)
