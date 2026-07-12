@@ -240,6 +240,10 @@ impl SessionChildRunner for ProcessSessionChildRunner {
         if response.version != SESSION_CHILD_PROTOCOL_VERSION {
             return Err(SessionChildError::ProtocolFailed);
         }
+        if let SessionChildResponse::Rejected { code } = &response.message {
+            warn!(?code, "session child rejected its credential handoff");
+            return Err(SessionChildError::ProtocolFailed);
+        }
         if let Some(status) = attempt
             .child
             .as_mut()
