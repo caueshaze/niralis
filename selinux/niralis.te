@@ -32,6 +32,9 @@ systemd_dbus_chat_logind(niralis_t)
 term_use_console(niralis_t)
 term_use_unallocated_ttys(niralis_t)
 
+# niralisd sets the IPC socket ownership to root:<greeter primary gid>.
+allow niralis_t self:capability chown;
+
 ########################################
 # pam_selinux provides the final user context. niralis_t may request it only
 # for a user-domain exec after the Unix credential drop; it never runs the
