@@ -54,6 +54,7 @@ fn runtime() -> SessionChildRuntimeContext {
         vtnr: 1,
         dbus_session_bus_address: None,
         imported_locale: Vec::new(),
+        selinux_exec_context: None,
         probe_path: SessionChildUnixPath {
             bytes: b"/probe".to_vec(),
         },
@@ -98,6 +99,7 @@ fn request(uid: u32) -> Vec<u8> {
 
 #[test]
 fn protocol_round_trip_preserves_probe_and_ready() {
+    assert_eq!(SESSION_CHILD_PROTOCOL_VERSION, 9);
     let request = SessionChildEnvelope {
         version: SESSION_CHILD_PROTOCOL_VERSION,
         message: SessionChildRequest::ApplyCredentials {
@@ -124,6 +126,31 @@ fn protocol_round_trip_preserves_probe_and_ready() {
     let decoded: SessionChildResponse =
         serde_json::from_str(&encoded).expect("response should deserialize");
     assert_eq!(decoded, rejected);
+}
+
+#[test]
+fn child_rejects_the_previous_private_protocol_version() {
+    let mut payload = request(1000);
+    let mut request: SessionChildEnvelope<SessionChildRequest> =
+        serde_json::from_slice(&payload[..payload.len() - 1]).expect("request should parse");
+    request.version = 8;
+    payload = serde_json::to_vec(&request).expect("request should serialize");
+    payload.push(b'\n');
+    let mut output = Vec::new();
+    let dropper = StubDropper {
+        result: Ok(AppliedCredentials {
+            uid: 1000,
+            gid: 1000,
+            supplementary_gids: vec![10, 20],
+        }),
+        calls: AtomicUsize::new(0),
+        target: Mutex::new(None),
+    };
+    assert_ne!(
+        super::run_child_process_with_dropper(Cursor::new(payload), &mut output, &dropper, 42),
+        0
+    );
+    assert_eq!(dropper.calls.load(Ordering::SeqCst), 0);
 }
 
 #[test]

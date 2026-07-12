@@ -1,0 +1,42 @@
+policy_module(niralis, 1.0.0)
+
+########################################
+# Types and entrypoint
+
+type niralis_t;
+type niralis_exec_t;
+init_daemon_domain(niralis_t, niralis_exec_t)
+
+type niralis_etc_t;
+files_config_file(niralis_etc_t)
+
+type niralis_var_run_t;
+files_pid_file(niralis_var_run_t)
+
+########################################
+# Niralis-owned configuration and runtime state
+
+manage_dirs_pattern(niralis_t, niralis_etc_t, niralis_etc_t)
+manage_files_pattern(niralis_t, niralis_etc_t, niralis_etc_t)
+manage_dirs_pattern(niralis_t, niralis_var_run_t, niralis_var_run_t)
+manage_files_pattern(niralis_t, niralis_var_run_t, niralis_var_run_t)
+manage_sock_files_pattern(niralis_t, niralis_var_run_t, niralis_var_run_t)
+
+########################################
+# Explicitly required service operations
+
+auth_use_nsswitch(niralis_t)
+auth_use_pam(niralis_t)
+auth_domtrans_pam(niralis_t)
+systemd_dbus_chat_logind(niralis_t)
+dev_read_console(niralis_t)
+dev_write_console(niralis_t)
+term_use_all_terms(niralis_t)
+
+########################################
+# pam_selinux provides the final user context. niralis_t may request it only
+# for a user-domain exec after the Unix credential drop; it never runs the
+# privileged child in that target context.
+
+allow niralis_t niralis_t:process setexec;
+userdom_login_user_domain(niralis_t)

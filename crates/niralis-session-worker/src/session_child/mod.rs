@@ -29,6 +29,7 @@ use crate::privilege_drop::{
     AppliedCredentials, LibcPrivilegeDropper, PrivilegeDropError, PrivilegeDropTarget,
     PrivilegeDropper,
 };
+use crate::selinux::{LinuxSelinuxContextManager, SelinuxContextManager};
 use protocol::SessionChildRequest;
 
 pub const SESSION_CHILD_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -996,6 +997,22 @@ pub(crate) fn run_child_process_with_dependencies(
             };
         if !matches!(commit.message, SessionChildCommit::Exec) {
             return 1;
+        }
+        if let Some(context) = runtime.selinux_exec_context.as_ref() {
+            if LinuxSelinuxContextManager.apply_pending(context).is_err() {
+                let failure = FinalExecFailure {
+                    stage: "selinux_setexeccon".to_owned(),
+                    errno: std::io::Error::last_os_error()
+                        .raw_os_error()
+                        .unwrap_or(libc::EIO),
+                };
+                if let Ok(bytes) = serde_json::to_vec(&failure) {
+                    unsafe {
+                        libc::write(4, bytes.as_ptr().cast(), bytes.len());
+                    }
+                }
+                return 1;
+            }
         }
         if exec_final(&runtime.exec_plan).is_err() {
             let failure = FinalExecFailure {

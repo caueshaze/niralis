@@ -12,7 +12,7 @@ use crate::runtime::{
 
 use super::support::{
     identity, request, StubChildFactory, StubFactory, StubGroupsResolver, StubIdentityResolver,
-    StubLogind, StubVtAllocator, TrackingState,
+    StubLogind, StubSelinux, StubVtAllocator, TrackingState,
 };
 
 #[test]
@@ -164,6 +164,7 @@ fn pam_worker_distinguishes_auth_identity_and_session_failures() {
                 logind_resolver: &StubLogind::default(),
                 virtual_terminal_allocator: &StubVtAllocator,
                 runtime_dir_validator: &StubRuntimeDirValidator,
+                selinux_context_manager: &StubSelinux::default(),
             },
         );
 
@@ -246,6 +247,7 @@ fn pam_worker_rejects_an_inherited_logind_session_before_pam_or_vt() {
             logind_resolver: &ExistingSessionLogind,
             virtual_terminal_allocator: &StubVtAllocator,
             runtime_dir_validator: &StubRuntimeDirValidator,
+            selinux_context_manager: &StubSelinux::default(),
         },
     );
 

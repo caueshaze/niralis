@@ -22,6 +22,7 @@ use crate::identity::{
 };
 use crate::logind::{LogindSessionIdentity, LogindSessionResolver, SdLoginResolver};
 use crate::privilege_drop::PrivilegeDropTarget;
+use crate::selinux::{LinuxSelinuxContextManager, SelinuxContextManager};
 use crate::session_child::{
     ProcessSessionChildRunnerFactory, SessionChildExpectation, SessionChildRunnerFactory,
     SessionChildRuntimeContext, SessionChildTerminalContext, SessionChildUnixPath,
@@ -40,6 +41,7 @@ pub struct WorkerDependencies<'a, F, I, G, C, L> {
     pub logind_resolver: &'a L,
     pub virtual_terminal_allocator: &'a dyn VirtualTerminalAllocator,
     pub runtime_dir_validator: &'a dyn RuntimeDirValidator,
+    pub selinux_context_manager: &'a dyn SelinuxContextManager,
 }
 
 pub trait RuntimeDirValidator: Send + Sync {
@@ -114,6 +116,7 @@ pub fn run_worker_process<R: Read, W: Write>(
             logind_resolver: &SdLoginResolver,
             virtual_terminal_allocator: &LinuxVirtualTerminalAllocator,
             runtime_dir_validator: &LinuxRuntimeDirValidator,
+            selinux_context_manager: &LinuxSelinuxContextManager,
         },
     )
 }
@@ -188,6 +191,7 @@ pub fn run_worker_process_with_dependencies<
             worker_id,
             dependencies.virtual_terminal_allocator,
             dependencies.runtime_dir_validator,
+            dependencies.selinux_context_manager,
             launch_plan,
         ),
     }
@@ -216,6 +220,7 @@ fn run_pam_session<
     worker_id: String,
     virtual_terminal_allocator: &dyn VirtualTerminalAllocator,
     runtime_dir_validator: &dyn RuntimeDirValidator,
+    selinux_context_manager: &dyn SelinuxContextManager,
     launch_plan: niralis_session::SessionExecPlan,
 ) -> Result<(), SessionError> {
     if launch_plan.validate().is_err() {
@@ -478,6 +483,38 @@ fn run_pam_session<
                 )?;
                 return Err(SessionError::AuthenticatedSessionFailed);
             }
+            let selinux_exec_context = match selinux_context_manager.capture_pending() {
+                Ok(context) => context,
+                Err(error) => {
+                    warn!(
+                        stage = "capture_pam_selinux_exec_context",
+                        ?error,
+                        "worker could not capture the PAM SELinux exec context"
+                    );
+                    drop(transaction);
+                    write_envelope(
+                        writer,
+                        WorkerResponse::SessionFailed {
+                            code: WorkerSessionFailureCode::SessionChildFailed,
+                        },
+                    )?;
+                    return Err(SessionError::AuthenticatedSessionFailed);
+                }
+            };
+            if selinux_exec_context.is_some() && selinux_context_manager.clear_pending().is_err() {
+                warn!(
+                    stage = "clear_pam_selinux_exec_context",
+                    "worker could not clear the pending PAM SELinux exec context"
+                );
+                drop(transaction);
+                write_envelope(
+                    writer,
+                    WorkerResponse::SessionFailed {
+                        code: WorkerSessionFailureCode::SessionChildFailed,
+                    },
+                )?;
+                return Err(SessionError::AuthenticatedSessionFailed);
+            }
             let child_terminal_fd = match terminal.lease().duplicate_terminal_fd() {
                 Ok(fd) => fd,
                 Err(error) => {
@@ -508,6 +545,11 @@ fn run_pam_session<
                     return Err(SessionError::AuthenticatedSessionFailed);
                 }
             };
+            debug!(
+                stage = "before_child_spawn",
+                pam_selinux_exec_context_present = selinux_exec_context.is_some(),
+                "prepared SELinux exec-context handoff for session child"
+            );
             let runtime = match (
                 SessionChildUnixPath::new(&credentials.identity.home),
                 SessionChildUnixPath::new(&credentials.identity.shell),
@@ -531,6 +573,7 @@ fn run_pam_session<
                     vtnr: terminal.lease().vtnr().number(),
                     dbus_session_bus_address: None,
                     imported_locale: pam_environment.imported_locale,
+                    selinux_exec_context: selinux_exec_context.clone(),
                     probe_path,
                     exec_plan: launch_plan,
                 },
@@ -571,6 +614,27 @@ fn run_pam_session<
                     return Err(SessionError::AuthenticatedSessionFailed);
                 }
             };
+            if let Some(expected_context) = &selinux_exec_context {
+                match selinux_context_manager.context_for_pid(child_report.child_pid) {
+                    Ok(observed_context) if expected_context.matches(&observed_context) => {}
+                    Ok(_) | Err(_) => {
+                        warn!(
+                            stage = "post_exec_selinux_context",
+                            pid = child_report.child_pid,
+                            "final session process SELinux context did not match the PAM context"
+                        );
+                        let _ = child_runner.terminate(SESSION_TERMINATION_GRACE);
+                        drop(transaction);
+                        write_envelope(
+                            writer,
+                            WorkerResponse::SessionFailed {
+                                code: WorkerSessionFailureCode::SessionChildFailed,
+                            },
+                        )?;
+                        return Err(SessionError::AuthenticatedSessionFailed);
+                    }
+                }
+            }
             if !valid_terminal_proof(
                 &child_report,
                 terminal.lease().seat().as_str(),

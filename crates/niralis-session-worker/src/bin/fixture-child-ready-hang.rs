@@ -11,7 +11,7 @@ fn main() {
         &mut request,
     );
     let response = serde_json::json!({
-        "version": 8,
+        "version": 9,
         "message": {
             "Ready": {
                 "canonical_username": "canonical-user",

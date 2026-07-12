@@ -34,6 +34,7 @@ fn expectation() -> SessionChildExpectation {
             vtnr: 0,
             dbus_session_bus_address: None,
             imported_locale: Vec::new(),
+            selinux_exec_context: None,
             probe_path: SessionChildUnixPath {
                 bytes: b"/probe".to_vec(),
             },
