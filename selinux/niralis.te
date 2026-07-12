@@ -47,6 +47,8 @@ seutil_read_default_contexts(niralis_t)
 # pam_selinux validates the final context built from default_contexts before
 # preparing the session exec context.
 selinux_validate_context(niralis_t)
+# pam_selinux computes the per-user label for the allocated virtual terminal.
+selinux_compute_relabel_context(niralis_t)
 
 # sd_pid_get_session() reads the worker's dynamically-labelled
 # /proc/<pid>/cgroup and PID 1's cgroup to resolve the namespace root.
