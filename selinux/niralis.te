@@ -57,6 +57,9 @@ init_read_state(niralis_t)
 
 term_use_console(niralis_t)
 term_use_unallocated_ttys(niralis_t)
+# pam_selinux hands the allocated VT to the authenticated user domain.
+term_relabel_unallocated_ttys(niralis_t)
+userdom_relabel_user_ttys(niralis_t)
 
 # niralisd sets the IPC socket ownership to root:<greeter primary gid>.
 allow niralis_t self:capability chown;
@@ -67,4 +70,7 @@ allow niralis_t self:capability chown;
 # privileged child in that target context.
 
 allow niralis_t niralis_t:process setexec;
+# pam_selinux sets the key-creation context alongside the pending exec
+# context; the reference policy exposes no narrower interface for it.
+allow niralis_t niralis_t:process setkeycreate;
 userdom_transition_login_userdomain(niralis_t)
