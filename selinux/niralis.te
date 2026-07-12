@@ -38,6 +38,9 @@ systemd_dbus_chat_logind(niralis_t)
 # state from /run/systemd, including /run/systemd/seats/seat0.
 systemd_login_read_pid_files(niralis_t)
 
+# sd_pid_get_session() determines membership from /proc/<pid>/cgroup.
+kernel_read_proc_files(niralis_t)
+
 term_use_console(niralis_t)
 term_use_unallocated_ttys(niralis_t)
 
