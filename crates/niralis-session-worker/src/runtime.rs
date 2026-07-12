@@ -243,6 +243,36 @@ fn run_pam_session<
         )?;
         return Err(SessionError::AuthenticatedSessionFailed);
     }
+    // pam_systemd deliberately returns PAM_SUCCESS without creating a session
+    // when the calling PID is already a member of one. A daemon started via
+    // ssh -> sudo inherits that session cgroup, and env_clear() cannot change
+    // it. Fail before acquiring a VT or beginning PAM so this is explicit.
+    match logind_resolver.resolve_by_pid(std::process::id()) {
+        Ok(Some(_)) => {
+            warn!(
+                stage = "pre_pam_logind_membership",
+                worker_already_in_logind_session = true,
+                "worker must be launched by the system manager, not from an inherited login session"
+            );
+            write_envelope(
+                writer,
+                WorkerResponse::SessionFailed {
+                    code: WorkerSessionFailureCode::WorkerAlreadyInLogindSession,
+                },
+            )?;
+            return Err(SessionError::AuthenticatedSessionFailed);
+        }
+        Ok(None) => debug!(
+            stage = "pre_pam_logind_membership",
+            worker_already_in_logind_session = false,
+            "worker is not associated with an existing logind session"
+        ),
+        Err(error) => warn!(
+            stage = "pre_pam_logind_membership",
+            ?error,
+            "could not determine worker logind membership; continuing so PAM/logind remains authoritative"
+        ),
+    }
     info!(
         source_path = ?launch_plan.source_path,
         executable = ?launch_plan.executable,

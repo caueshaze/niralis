@@ -190,10 +190,17 @@ pub(super) struct StubChildFactory {
 }
 
 #[derive(Default)]
-pub(super) struct StubLogind;
+pub(super) struct StubLogind {
+    resolve_by_pid_calls: AtomicUsize,
+}
 
 impl LogindSessionResolver for StubLogind {
     fn resolve_by_pid(&self, _pid: u32) -> Result<Option<LogindSessionIdentity>, LogindError> {
+        // The worker first queries membership before PAM. The fixture models
+        // a system-manager worker there, then the new session after PAM.
+        if self.resolve_by_pid_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            return Ok(None);
+        }
         Ok(Some(LogindSessionIdentity {
             id: LogindSessionId::new("test-logind".to_owned()).unwrap(),
             uid: 1000,

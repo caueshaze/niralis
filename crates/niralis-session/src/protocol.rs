@@ -119,6 +119,9 @@ pub enum WorkerSessionFailureCode {
     OpenFailed,
     InternalPanic,
     SessionChildFailed,
+    /// The worker inherited an existing logind session, preventing pam_systemd
+    /// from creating the Niralis-owned session.
+    WorkerAlreadyInLogindSession,
     LogindFailed,
     LogindSessionIdMismatch,
     RuntimeEnvironmentFailed,
