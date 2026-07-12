@@ -865,12 +865,14 @@ pub(crate) fn run_child_process_with_dependencies(
     // synthetic PIDs and retain the response path for deterministic unit tests.
     let terminal_proof = if child_pid == std::process::id() {
         if unsafe { libc::setsid() } < 0 {
+            eprintln!("session child terminal setup failed stage=setsid");
             let _ = write_rejection(&mut writer, SessionChildErrorCode::SessionBoundaryFailed);
             return 1;
         }
         let terminal = match terminal.as_ref() {
             Some(terminal) if terminal.fd == 3 => terminal,
             _ => {
+                eprintln!("session child terminal setup failed stage=terminal_fd");
                 let _ = write_rejection(&mut writer, SessionChildErrorCode::TerminalProofFailed);
                 return 1;
             }
@@ -880,10 +882,12 @@ pub(crate) fn run_child_process_with_dependencies(
             || libc::major(stat.st_rdev) as u32 != terminal.device_major
             || libc::minor(stat.st_rdev) as u32 != terminal.device_minor
         {
+            eprintln!("session child terminal setup failed stage=fstat");
             let _ = write_rejection(&mut writer, SessionChildErrorCode::TerminalProofFailed);
             return 1;
         }
         if unsafe { libc::ioctl(terminal.fd, libc::TIOCSCTTY, 0) } < 0 {
+            eprintln!("session child terminal setup failed stage=tiocsctty");
             let _ = write_rejection(&mut writer, SessionChildErrorCode::TerminalProofFailed);
             return 1;
         }
@@ -891,6 +895,7 @@ pub(crate) fn run_child_process_with_dependencies(
         let foreground = unsafe { libc::tcsetpgrp(terminal.fd, libc::getpgrp()) };
         unsafe { libc::signal(libc::SIGTTOU, previous_sigttou) };
         if foreground != 0 {
+            eprintln!("session child terminal setup failed stage=tcsetpgrp");
             let _ = write_rejection(&mut writer, SessionChildErrorCode::TerminalProofFailed);
             return 1;
         }
@@ -898,6 +903,7 @@ pub(crate) fn run_child_process_with_dependencies(
         let pgid = unsafe { libc::tcgetpgrp(terminal.fd) };
         let pid = unsafe { libc::getpid() };
         if sid <= 0 || pgid <= 0 || sid as u32 != pid as u32 || pgid as u32 != pid as u32 {
+            eprintln!("session child terminal setup failed stage=terminal_identity");
             let _ = write_rejection(&mut writer, SessionChildErrorCode::TerminalProofFailed);
             return 1;
         }
