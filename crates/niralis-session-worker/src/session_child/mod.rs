@@ -504,6 +504,16 @@ impl SessionChildAttempt {
         let mut command = Command::new(path);
         let (status_read, status_write) = make_status_pipe()?;
         let status_raw = status_write.as_raw_fd();
+        let terminal_source_fd = terminal_fd.as_ref().map(AsRawFd::as_raw_fd);
+        let fd_mapping_collision = terminal_source_fd == Some(4) || status_raw == 3;
+        tracing::debug!(
+            status_source_fd = status_raw,
+            status_target_fd = 4,
+            terminal_source_fd = ?terminal_source_fd,
+            terminal_target_fd = 3,
+            fd_mapping_collision,
+            "prepared session child fd mapping"
+        );
         unsafe {
             use std::os::unix::process::CommandExt;
             command.pre_exec(move || {
@@ -539,7 +549,19 @@ impl SessionChildAttempt {
             .env_clear()
             .current_dir("/")
             .spawn()
-            .map_err(|_| SessionChildError::SpawnFailed)?;
+            .map_err(|error| {
+                warn!(
+                    path = %path.display(),
+                    errno = ?error.raw_os_error(),
+                    kind = ?error.kind(),
+                    error = %error,
+                    status_source_fd = status_raw,
+                    terminal_source_fd = ?terminal_source_fd,
+                    fd_mapping_collision,
+                    "failed to spawn session child"
+                );
+                SessionChildError::SpawnFailed
+            })?;
         let mut child = child;
         let stdin = match child.stdin.take() {
             Some(stdin) => stdin,
