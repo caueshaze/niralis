@@ -6,7 +6,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use niralis_auth::{AuthError, Authenticator, PamAuthenticator};
 use niralis_session::{
@@ -27,6 +27,7 @@ use crate::session_child::{
     ProcessSessionChildRunnerFactory, SessionChildExpectation, SessionChildRunnerFactory,
     SessionChildRuntimeContext, SessionChildTerminalContext, SessionChildUnixPath,
 };
+use crate::smoke::authorize_real_graphical_smoke_for_runtime;
 use crate::vt::{LinuxVirtualTerminalAllocator, VirtualTerminalAllocator, VirtualTerminalGuard};
 
 pub trait WorkerAuthenticatorFactory: Send + Sync {
@@ -248,6 +249,14 @@ fn run_pam_session<
         )?;
         return Err(SessionError::AuthenticatedSessionFailed);
     }
+    let watchdog = match authorize_real_graphical_smoke_for_runtime(&request.session.id) {
+        Ok(duration) => duration,
+        Err(error) => {
+            warn!(session = %request.session.id, ?error, "real graphical session rejected before PAM");
+            write_rejection(writer, WorkerErrorCode::RealGraphicalSessionNotAuthorized)?;
+            return Err(SessionError::WorkerRejected);
+        }
+    };
     // pam_systemd deliberately returns PAM_SUCCESS without creating a session
     // when the calling PID is already a member of one. A daemon started via
     // ssh -> sudo inherits that session cgroup, and env_clear() cannot change
@@ -735,6 +744,7 @@ fn run_pam_session<
                 worker_id,
                 child_report.child_pid,
                 child_report.process_identity.pgid,
+                Instant::now() + watchdog,
             ) {
                 Ok(status) => status,
                 Err(error) => {
@@ -832,8 +842,15 @@ fn wait_for_session(
     worker_id: String,
     session_pid: u32,
     session_pgid: u32,
+    watchdog_deadline: Instant,
 ) -> Result<std::process::ExitStatus, SessionError> {
     loop {
+        if Instant::now() >= watchdog_deadline {
+            info!("real graphical session watchdog expired");
+            return child_runner
+                .terminate(SESSION_TERMINATION_GRACE)
+                .map_err(|_| SessionError::AuthenticatedSessionFailed);
+        }
         if let Some(status) = child_runner
             .poll_child()
             .map_err(|_| SessionError::AuthenticatedSessionFailed)?

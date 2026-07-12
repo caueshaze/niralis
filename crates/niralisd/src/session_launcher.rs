@@ -27,8 +27,39 @@ pub fn build_worker_session_launcher(config: &Config) -> Result<WorkerSessionLau
         config.session.child_path.clone(),
         config.session.probe_path.clone(),
         Duration::from_secs(config.session.worker_timeout_seconds),
+        real_graphical_gate_environment(),
     )
     .map_err(|_| NiralisdError::InvalidWorkerPath(config.session.worker_path.clone()))
+}
+
+fn real_graphical_gate_environment() -> Vec<(String, String)> {
+    const ALLOW: &str = "NIRALIS_ALLOW_REAL_GRAPHICAL_SESSION";
+    const SESSION: &str = "NIRALIS_REAL_GRAPHICAL_SESSION";
+    const WATCHDOG: &str = "NIRALIS_REAL_GRAPHICAL_SMOKE_MAX_SECONDS";
+
+    let (Ok(allow), Ok(session), Ok(watchdog)) = (
+        std::env::var(ALLOW),
+        std::env::var(SESSION),
+        std::env::var(WATCHDOG),
+    ) else {
+        return Vec::new();
+    };
+    if allow != "1"
+        || session.is_empty()
+        || session.len() > 128
+        || watchdog
+            .parse::<u64>()
+            .ok()
+            .filter(|seconds| (1..=3600).contains(seconds))
+            .is_none()
+    {
+        return Vec::new();
+    }
+    vec![
+        (ALLOW.to_owned(), allow),
+        (SESSION.to_owned(), session),
+        (WATCHDOG.to_owned(), watchdog),
+    ]
 }
 
 fn validate_worker_timeout(timeout_seconds: u64) -> Result<()> {

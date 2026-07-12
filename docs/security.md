@@ -7,7 +7,8 @@ session setup remain out of scope.
 
 ## Current Guarantees
 
-- Passwords are accepted only through local IPC login requests.
+- Passwords are accepted only through local IPC login requests. `niralisctl`
+  accepts them through `--password-stdin`, never a command-line argument.
 - Passwords are never written to logs, worker arguments, worker environment, or
   daemon responses.
 - `LoginFailed` remains generic and does not reveal whether rejection came from

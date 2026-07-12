@@ -23,6 +23,7 @@ pub struct WorkerSessionLauncher {
     session_child_path: PathBuf,
     session_probe_path: PathBuf,
     timeout: Duration,
+    worker_environment: Vec<(String, String)>,
     supervisor: Arc<WorkerSupervisor>,
 }
 
@@ -330,6 +331,7 @@ impl WorkerSessionLauncher {
         session_child_path: PathBuf,
         session_probe_path: PathBuf,
         timeout: Duration,
+        worker_environment: Vec<(String, String)>,
     ) -> Result<Self, SessionError> {
         if !worker_path.is_absolute()
             || !session_child_path.is_absolute()
@@ -342,6 +344,7 @@ impl WorkerSessionLauncher {
             session_child_path,
             session_probe_path,
             timeout,
+            worker_environment,
             supervisor: Arc::new(WorkerSupervisor::new()),
         })
     }
@@ -423,7 +426,8 @@ impl WorkerSessionLauncher {
         let (control_dir, control_path, worker_id) = create_control_endpoint()?;
         install_control_request(&mut request, control_path.clone(), worker_id.clone());
         let deadline = Instant::now() + self.timeout;
-        let mut attempt = WorkerAttempt::spawn(&self.worker_path, request)?;
+        let mut attempt =
+            WorkerAttempt::spawn(&self.worker_path, &self.worker_environment, request)?;
         let writer_result = attempt.wait_writer(deadline);
         let response_result = attempt.wait_reader(deadline);
         let started_response = response_result

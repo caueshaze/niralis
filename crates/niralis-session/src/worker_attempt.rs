@@ -33,8 +33,12 @@ impl WorkerAttempt {
     pub(crate) fn take_child(&mut self) -> Child {
         self.child.take().expect("worker child ownership exists")
     }
-    pub(crate) fn spawn(worker_path: &Path, request: WorkerRequest) -> Result<Self, SessionError> {
-        let mut child = spawn_worker(worker_path)?;
+    pub(crate) fn spawn(
+        worker_path: &Path,
+        worker_environment: &[(String, String)],
+        request: WorkerRequest,
+    ) -> Result<Self, SessionError> {
+        let mut child = spawn_worker(worker_path, worker_environment)?;
         let stdin = child.stdin.take().ok_or(SessionError::WorkerIoFailed)?;
         let stdout = child.stdout.take().ok_or(SessionError::WorkerIoFailed)?;
         let (writer, writer_rx) = spawn_writer(stdin, request);
@@ -98,12 +102,16 @@ impl Drop for WorkerAttempt {
     }
 }
 
-fn spawn_worker(worker_path: &Path) -> Result<Child, SessionError> {
+fn spawn_worker(
+    worker_path: &Path,
+    worker_environment: &[(String, String)],
+) -> Result<Child, SessionError> {
     let result = Command::new(worker_path)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .env_clear()
+        .envs(worker_environment.iter().cloned())
         .current_dir("/")
         .spawn();
 
