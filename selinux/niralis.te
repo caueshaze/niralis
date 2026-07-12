@@ -60,12 +60,17 @@ term_use_unallocated_ttys(niralis_t)
 # pam_selinux hands the allocated VT to the authenticated user domain.
 term_relabel_unallocated_ttys(niralis_t)
 userdom_relabel_user_ttys(niralis_t)
+# Between credential drop and final setexeccon, the child makes the
+# PAM-labelled user VT its controlling terminal.
+allow niralis_t user_tty_device_t:chr_file ioctl;
 
 # niralisd sets the IPC socket ownership to root:<greeter primary gid>.
 allow niralis_t self:capability chown;
 # The dedicated session child clears supplementary groups, then drops to the
 # PAM-authenticated gid and uid before any user-controlled execution.
 allow niralis_t self:capability { setgid setuid };
+# Required for TIOCSCTTY on the dedicated PAM-labelled virtual terminal.
+allow niralis_t self:capability sys_tty_config;
 
 ########################################
 # pam_selinux provides the final user context. niralis_t may request it only
