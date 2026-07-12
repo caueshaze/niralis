@@ -7,6 +7,10 @@ type niralis_t;
 type niralis_exec_t;
 init_daemon_domain(niralis_t, niralis_exec_t)
 
+# niralisd, worker and session child currently share niralis_t. Helper
+# execution therefore occurs without a domain transition.
+can_exec(niralis_t, niralis_exec_t)
+
 type niralis_etc_t;
 files_config_file(niralis_etc_t)
 
