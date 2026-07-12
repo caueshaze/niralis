@@ -42,6 +42,9 @@ systemd_login_read_pid_files(niralis_t)
 # and optional per-user entries under /etc/selinux/targeted/logins.
 seutil_read_config(niralis_t)
 seutil_read_login_config(niralis_t)
+# pam_selinux asks the security server for the contexts permitted to the
+# resolved SELinux user before preparing the session exec context.
+selinux_compute_user_contexts(niralis_t)
 
 # sd_pid_get_session() reads the worker's dynamically-labelled
 # /proc/<pid>/cgroup and PID 1's cgroup to resolve the namespace root.
