@@ -69,7 +69,7 @@ allow niralis_t self:capability chown;
 # for a user-domain exec after the Unix credential drop; it never runs the
 # privileged child in that target context.
 
-allow niralis_t niralis_t:process setexec;
+allow niralis_t niralis_t:process { setexec setsched };
 # pam_selinux sets the key-creation context alongside the pending exec
 # context; the reference policy exposes no narrower interface for it.
 allow niralis_t niralis_t:process setkeycreate;
