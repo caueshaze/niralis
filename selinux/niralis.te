@@ -63,6 +63,9 @@ userdom_relabel_user_ttys(niralis_t)
 
 # niralisd sets the IPC socket ownership to root:<greeter primary gid>.
 allow niralis_t self:capability chown;
+# The dedicated session child clears supplementary groups, then drops to the
+# PAM-authenticated gid and uid before any user-controlled execution.
+allow niralis_t self:capability { setgid setuid };
 
 ########################################
 # pam_selinux provides the final user context. niralis_t may request it only
