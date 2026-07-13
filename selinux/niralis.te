@@ -73,6 +73,16 @@ role_transition system_r unconfined_t unconfined_r;
 # remains a normal user-domain target selected by pam_selinux.
 domain_subj_id_change_exemption(niralis_t)
 domain_role_change_exemption(niralis_t)
+# After exec, verify the kernel-reported context of the freshly-created
+# PAM user process through /proc/<pid>/attr/current.  The reference policy
+# exposes this verification access for user domains as a single interface.
+userdom_read_all_users_state(niralis_t)
+# The worker supervises only the process group it created: SIGTERM first,
+# then SIGKILL after its bounded grace period.  User domains have distinct
+# Unix UIDs, so the kernel also requires CAP_KILL for that supervision.
+userdom_signal_all_users(niralis_t)
+userdom_kill_all_users(niralis_t)
+allow niralis_t self:capability kill;
 allow unconfined_t niralis_t:fd use;
 allow unconfined_t niralis_t:fifo_file rw_file_perms;
 allow unconfined_t niralis_t:process sigchld;
