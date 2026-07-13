@@ -231,7 +231,25 @@ impl SessionChildRunner for ProcessSessionChildRunner {
         let mut attempt = SessionChildAttempt::spawn(&self.path, payload, terminal_fd)?;
         let pid = attempt.child.as_ref().expect("child exists").id();
         let reader_result = attempt.wait_reader(deadline);
-        if reader_result.is_err() {
+        if let Err(error) = &reader_result {
+            match attempt.child.as_mut().expect("child exists").try_wait() {
+                Ok(Some(status)) => {
+                    warn!(
+                        ?error,
+                        ?status,
+                        "session child exited before sending its ready response"
+                    );
+                }
+                Ok(None) => {
+                    warn!(
+                        ?error,
+                        "session child response read failed while the child remained alive"
+                    );
+                }
+                Err(wait_error) => {
+                    warn!(?error, errno = ?wait_error.raw_os_error(), wait_error = %wait_error, "could not inspect session child after its response read failed");
+                }
+            }
             attempt.kill_and_reap();
         }
         attempt.finish();
@@ -1066,10 +1084,22 @@ pub(crate) fn run_child_process_with_dependencies(
             terminal_proof,
         },
     };
-    if serde_json::to_writer(&mut writer, &response).is_err()
-        || writer.write_all(b"\n").is_err()
-        || writer.flush().is_err()
-    {
+    if let Err(error) = serde_json::to_writer(&mut writer, &response) {
+        eprintln!("session child ready response failed stage=serialize error={error}");
+        return 1;
+    }
+    if let Err(error) = writer.write_all(b"\n") {
+        eprintln!(
+            "session child ready response failed stage=write errno={:?} error={error}",
+            error.raw_os_error()
+        );
+        return 1;
+    }
+    if let Err(error) = writer.flush() {
+        eprintln!(
+            "session child ready response failed stage=flush errno={:?} error={error}",
+            error.raw_os_error()
+        );
         return 1;
     }
     if child_pid == std::process::id() {
