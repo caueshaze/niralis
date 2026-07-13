@@ -244,21 +244,30 @@ impl SessionChildRunner for ProcessSessionChildRunner {
             warn!(?code, "session child rejected its credential handoff");
             return Err(SessionChildError::ProtocolFailed);
         }
-        if let Some(status) = attempt
+        let ready_status = attempt
             .child
             .as_mut()
             .expect("child exists")
             .try_wait()
-            .map_err(|_| SessionChildError::IoFailed)?
-        {
+            .map_err(|error| {
+                warn!(errno = ?error.raw_os_error(), error = %error, "checking session child state after ready failed");
+                SessionChildError::IoFailed
+            })?;
+        if let Some(status) = ready_status {
             if !status.success() {
                 return Err(SessionChildError::ExitFailed);
             }
             return Err(SessionChildError::ExitFailed);
         }
         let report = validate_ready_response(response.message, &expectation, pid, true)?;
-        attempt.send_commit(deadline)?;
-        match attempt.wait_exec_status(deadline)? {
+        attempt.send_commit(deadline).map_err(|error| {
+            warn!(?error, "sending CommitExec to the session child failed");
+            error
+        })?;
+        match attempt.wait_exec_status(deadline).map_err(|error| {
+            warn!(?error, "waiting for the session child exec handoff failed");
+            error
+        })? {
             ExecStatus::Success => {}
             ExecStatus::Failure(failure) => {
                 warn!(stage = %failure.stage, errno = failure.errno, "final execve failed");
@@ -266,14 +275,16 @@ impl SessionChildRunner for ProcessSessionChildRunner {
                 return Err(SessionChildError::ExitFailed);
             }
         }
-        if attempt
+        let exec_status = attempt
             .child
             .as_mut()
             .expect("child exists")
             .try_wait()
-            .map_err(|_| SessionChildError::IoFailed)?
-            .is_some()
-        {
+            .map_err(|error| {
+                warn!(errno = ?error.raw_os_error(), error = %error, "checking session child state after exec handoff failed");
+                SessionChildError::IoFailed
+            })?;
+        if exec_status.is_some() {
             attempt.kill_and_reap();
             return Err(SessionChildError::ExitFailed);
         }
@@ -623,11 +634,20 @@ impl SessionChildAttempt {
             version: SESSION_CHILD_PROTOCOL_VERSION,
             message: SessionChildCommit::Exec,
         };
-        serde_json::to_writer(&mut stdin, &message).map_err(|_| SessionChildError::IoFailed)?;
+        serde_json::to_writer(&mut stdin, &message).map_err(|error| {
+            warn!(error = %error, "serializing CommitExec for the session child failed");
+            SessionChildError::IoFailed
+        })?;
         stdin
             .write_all(b"\n")
-            .map_err(|_| SessionChildError::IoFailed)?;
-        stdin.flush().map_err(|_| SessionChildError::IoFailed)
+            .map_err(|error| {
+                warn!(errno = ?error.raw_os_error(), error = %error, "writing CommitExec to the session child failed");
+                SessionChildError::IoFailed
+            })?;
+        stdin.flush().map_err(|error| {
+            warn!(errno = ?error.raw_os_error(), error = %error, "flushing CommitExec to the session child failed");
+            SessionChildError::IoFailed
+        })
     }
 
     fn wait_exec_status(&mut self, deadline: Instant) -> Result<ExecStatus, SessionChildError> {
