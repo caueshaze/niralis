@@ -594,6 +594,7 @@ impl SessionChildAttempt {
         let stdin = match child.stdin.take() {
             Some(stdin) => stdin,
             None => {
+                warn!("session child did not provide stdin for the private request");
                 kill_and_reap(&mut child);
                 return Err(SessionChildError::IoFailed);
             }
@@ -601,6 +602,7 @@ impl SessionChildAttempt {
         let mut stdout = match child.stdout.take() {
             Some(stdout) => stdout,
             None => {
+                warn!("session child did not provide stdout for the private response");
                 kill_and_reap(&mut child);
                 return Err(SessionChildError::IoFailed);
             }
@@ -610,7 +612,15 @@ impl SessionChildAttempt {
             .write_all(&payload)
             .and_then(|_| stdin.write_all(b"\n"))
             .and_then(|_| stdin.flush())
-            .map_err(|_| SessionChildError::IoFailed)?;
+            .map_err(|error| {
+                warn!(
+                    errno = ?error.raw_os_error(),
+                    error = %error,
+                    request_bytes = payload.len(),
+                    "writing the private session-child request failed"
+                );
+                SessionChildError::IoFailed
+            })?;
         let (response_tx, response_rx) = mpsc::channel();
         let reader = thread::spawn(move || {
             let _ = response_tx.send(read_child_response(&mut stdout));
