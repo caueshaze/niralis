@@ -626,11 +626,30 @@ fn run_pam_session<
             if let Some(expected_context) = &selinux_exec_context {
                 match selinux_context_manager.context_for_pid(child_report.child_pid) {
                     Ok(observed_context) if expected_context.matches(&observed_context) => {}
-                    Ok(_) | Err(_) => {
+                    Ok(observed_context) => {
                         warn!(
                             stage = "post_exec_selinux_context",
                             pid = child_report.child_pid,
+                            expected_context = %expected_context.as_str(),
+                            observed_context = %observed_context.as_str(),
                             "final session process SELinux context did not match the PAM context"
+                        );
+                        let _ = child_runner.terminate(SESSION_TERMINATION_GRACE);
+                        drop(transaction);
+                        write_envelope(
+                            writer,
+                            WorkerResponse::SessionFailed {
+                                code: WorkerSessionFailureCode::SessionChildFailed,
+                            },
+                        )?;
+                        return Err(SessionError::AuthenticatedSessionFailed);
+                    }
+                    Err(error) => {
+                        warn!(
+                            stage = "post_exec_selinux_context",
+                            pid = child_report.child_pid,
+                            ?error,
+                            "could not read the final session process SELinux context"
                         );
                         let _ = child_runner.terminate(SESSION_TERMINATION_GRACE);
                         drop(transaction);

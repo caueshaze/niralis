@@ -39,6 +39,13 @@ impl PamSelinuxExecContext {
         self.0 == observed.0
     }
 
+    /// SELinux contexts are policy labels, not credentials.  Keep the normal
+    /// Debug implementation redacted, but permit targeted audit logging when
+    /// verifying PAM's post-exec label handoff.
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+
     fn as_c_str(&self) -> Result<CString, SelinuxError> {
         CString::new(self.0.as_bytes()).map_err(|_| SelinuxError::InvalidContext)
     }
