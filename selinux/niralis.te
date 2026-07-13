@@ -77,6 +77,11 @@ domain_role_change_exemption(niralis_t)
 # PAM user process through /proc/<pid>/attr/current.  The reference policy
 # exposes this verification access for user domains as a single interface.
 userdom_read_all_users_state(niralis_t)
+userdom_getattr_all_users(niralis_t)
+# Linux gates cross-UID reads of /proc/<pid>/attr/current through its ptrace
+# access check.  CAP_SYS_PTRACE satisfies that DAC check only; Niralis still
+# receives no SELinux process:ptrace permission.
+allow niralis_t self:capability sys_ptrace;
 # The worker supervises only the process group it created: SIGTERM first,
 # then SIGKILL after its bounded grace period.  User domains have distinct
 # Unix UIDs, so the kernel also requires CAP_KILL for that supervision.
