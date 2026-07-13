@@ -1,4 +1,4 @@
-use std::io::{BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 
@@ -26,7 +26,7 @@ enum Command {
         #[arg(long)]
         user: String,
         #[arg(long)]
-        password: String,
+        password_stdin: bool,
         #[arg(long)]
         session: String,
     },
@@ -34,6 +34,10 @@ enum Command {
 
 #[derive(Debug, Error)]
 enum CliError {
+    #[error("login requires --password-stdin")]
+    PasswordStdinRequired,
+    #[error("password stdin ended before a line was read")]
+    PasswordStdinEof,
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("ipc json error: {0}")]
@@ -55,19 +59,37 @@ fn run() -> Result<(), CliError> {
         Command::Sessions => NiralisRequest::GetSessions,
         Command::Login {
             user,
-            password,
+            password_stdin,
             session,
-        } => NiralisRequest::Login {
-            username: user,
-            password,
-            session,
-        },
+        } => {
+            if !password_stdin {
+                return Err(CliError::PasswordStdinRequired);
+            }
+            NiralisRequest::Login {
+                username: user,
+                password: read_password_line(io::stdin().lock())?,
+                session,
+            }
+        }
     };
 
     let response = send_request(&cli.socket, &request)?;
     print_response(&response);
 
     Ok(())
+}
+
+fn read_password_line(mut reader: impl BufRead) -> Result<String, CliError> {
+    let mut password = String::new();
+    if reader.read_line(&mut password)? == 0 {
+        return Err(CliError::PasswordStdinEof);
+    }
+    if password.ends_with("\r\n") {
+        password.truncate(password.len() - 2);
+    } else if password.ends_with('\n') {
+        password.pop();
+    }
+    Ok(password)
 }
 
 fn send_request(socket: &PathBuf, request: &NiralisRequest) -> Result<NiralisResponse, CliError> {
@@ -122,5 +144,29 @@ fn print_response(response: &NiralisResponse) {
         NiralisResponse::LoginFailed { message } | NiralisResponse::Error { message } => {
             println!("{message}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::read_password_line;
+    use std::io::Cursor;
+
+    #[test]
+    fn password_stdin_preserves_password_bytes_except_line_ending() {
+        for (input, expected) in [
+            ("secret\n", "secret"),
+            ("secret\r\n", "secret"),
+            ("secret", "secret"),
+            ("\n", ""),
+            (" senha ", " senha "),
+        ] {
+            assert_eq!(read_password_line(Cursor::new(input)).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn password_stdin_rejects_immediate_eof() {
+        assert!(read_password_line(Cursor::new("")).is_err());
     }
 }

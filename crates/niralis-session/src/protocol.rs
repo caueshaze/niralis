@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{LogindSessionId, SessionRequest, StartedSession, WorkerSecret};
 
-pub const WORKER_PROTOCOL_VERSION: u32 = 9;
+pub const WORKER_PROTOCOL_VERSION: u32 = 10;
 pub const MAX_WORKER_MESSAGE_BYTES: usize = 64 * 1024;
 pub const WORKER_CONTROL_PROTOCOL_VERSION: u32 = 1;
 pub const MAX_WORKER_CONTROL_MESSAGE_BYTES: usize = 4096;
@@ -108,6 +108,7 @@ pub enum WorkerErrorCode {
     UnsupportedVersion,
     InvalidRequest,
     InternalError,
+    RealGraphicalSessionNotAuthorized,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -119,6 +120,9 @@ pub enum WorkerSessionFailureCode {
     OpenFailed,
     InternalPanic,
     SessionChildFailed,
+    /// The worker inherited an existing logind session, preventing pam_systemd
+    /// from creating the Niralis-owned session.
+    WorkerAlreadyInLogindSession,
     LogindFailed,
     LogindSessionIdMismatch,
     RuntimeEnvironmentFailed,

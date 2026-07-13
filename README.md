@@ -80,7 +80,7 @@ Then run:
 cargo run -p niralisd -- --config /tmp/niralis-test/niralis.toml
 cargo run -p niralisctl -- --socket /tmp/niralis-test/niralisd.sock status
 cargo run -p niralisctl -- --socket /tmp/niralis-test/niralisd.sock users
-cargo run -p niralisctl -- --socket /tmp/niralis-test/niralisd.sock login --user test --password test --session niri
+printf '%s\n' test | cargo run -p niralisctl -- --socket /tmp/niralis-test/niralisd.sock login --user test --password-stdin --session niri
 ```
 
 ## PAM Setup

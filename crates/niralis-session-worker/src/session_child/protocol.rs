@@ -2,9 +2,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::isolation::PostDropIsolationProof;
 use crate::privilege_drop::{AppliedCredentials, PrivilegeDropTarget};
+use crate::selinux::PamSelinuxExecContext;
 use niralis_session::SessionExecPlan;
 
-pub const SESSION_CHILD_PROTOCOL_VERSION: u32 = 8;
+pub const SESSION_CHILD_PROTOCOL_VERSION: u32 = 9;
 pub const SESSION_EXEC_PROBE_VERSION: u32 = 2;
 pub const MAX_SESSION_CHILD_MESSAGE_BYTES: usize = 1024 * 1024;
 
@@ -72,6 +73,8 @@ pub struct SessionChildRuntimeContext {
     pub dbus_session_bus_address: Option<String>,
     #[serde(default)]
     pub imported_locale: Vec<(String, String)>,
+    /// Present only when pam_selinux prepared a context for this session.
+    pub selinux_exec_context: Option<PamSelinuxExecContext>,
     pub probe_path: SessionChildUnixPath,
     pub exec_plan: SessionExecPlan,
 }

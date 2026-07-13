@@ -16,6 +16,16 @@ const VT_MAX: u32 = 63;
 pub enum VirtualTerminalError {
     #[error("seat does not support virtual terminals")]
     UnsupportedSeat,
+    #[error("libsystemd is unavailable")]
+    LibraryUnavailable,
+    #[error("libsystemd does not export sd_seat_can_graphical")]
+    SymbolUnavailable,
+    #[error("seat name contains a NUL byte")]
+    InvalidSeatName,
+    #[error("seat is not graphical")]
+    SeatNotGraphical,
+    #[error("could not query whether seat is graphical: {0}")]
+    SeatQueryFailed(libc::c_int),
     #[error("virtual terminal allocation failed")]
     AllocationFailed,
     #[error("virtual terminal operation failed")]
@@ -91,17 +101,29 @@ impl VirtualTerminalAllocator for LinuxVirtualTerminalAllocator {
             return Err(VirtualTerminalError::UnsupportedSeat);
         }
         let library = unsafe {
-            Library::new("libsystemd.so.0").map_err(|_| VirtualTerminalError::UnsupportedSeat)?
+            Library::new("libsystemd.so.0").map_err(|_| VirtualTerminalError::LibraryUnavailable)?
         };
         let can_graphical: Symbol<unsafe extern "C" fn(*const libc::c_char) -> libc::c_int> =
             unsafe { library.get(b"sd_seat_can_graphical\0") }
-                .map_err(|_| VirtualTerminalError::UnsupportedSeat)?;
-        let seat_name = std::ffi::CString::new(seat.as_str())
-            .map_err(|_| VirtualTerminalError::UnsupportedSeat)?;
-        if unsafe { can_graphical(seat_name.as_ptr()) } <= 0 {
-            return Err(VirtualTerminalError::UnsupportedSeat);
-        }
+                .map_err(|_| VirtualTerminalError::SymbolUnavailable)?;
+        ensure_graphical_seat(seat.as_str(), |seat_name| {
+            // SAFETY: `seat_name` is NUL-terminated and remains valid during the call.
+            Ok(unsafe { can_graphical(seat_name.as_ptr()) })
+        })?;
         Ok(Box::new(OwnedVirtualTerminal::allocate(seat.clone())?))
+    }
+}
+
+fn ensure_graphical_seat<F>(seat: &str, query: F) -> Result<(), VirtualTerminalError>
+where
+    F: FnOnce(&CStr) -> Result<libc::c_int, VirtualTerminalError>,
+{
+    let seat_name =
+        std::ffi::CString::new(seat).map_err(|_| VirtualTerminalError::InvalidSeatName)?;
+    match query(seat_name.as_c_str())? {
+        result if result > 0 => Ok(()),
+        0 => Err(VirtualTerminalError::SeatNotGraphical),
+        result => Err(VirtualTerminalError::SeatQueryFailed(result)),
     }
 }
 
@@ -287,6 +309,41 @@ mod tests {
         guard.release().unwrap();
         guard.release().unwrap();
         assert_eq!(releases.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn graphical_seat_query_distinguishes_not_graphical_from_query_failure() {
+        let not_graphical = ensure_graphical_seat("seat0", |_| Ok(0)).unwrap_err();
+        let query_failure = ensure_graphical_seat("seat0", |_| Ok(-libc::EACCES)).unwrap_err();
+
+        assert_eq!(not_graphical, VirtualTerminalError::SeatNotGraphical);
+        assert_eq!(
+            query_failure,
+            VirtualTerminalError::SeatQueryFailed(-libc::EACCES)
+        );
+    }
+
+    #[test]
+    fn graphical_seat_query_preserves_loader_and_symbol_failures() {
+        let library_failure =
+            ensure_graphical_seat("seat0", |_| Err(VirtualTerminalError::LibraryUnavailable))
+                .unwrap_err();
+        let symbol_failure =
+            ensure_graphical_seat("seat0", |_| Err(VirtualTerminalError::SymbolUnavailable))
+                .unwrap_err();
+
+        assert_eq!(library_failure, VirtualTerminalError::LibraryUnavailable);
+        assert_eq!(symbol_failure, VirtualTerminalError::SymbolUnavailable);
+    }
+
+    #[test]
+    fn graphical_seat_query_rejects_nul_before_querying() {
+        let error = ensure_graphical_seat("seat\0invalid", |_| {
+            panic!("invalid seat names must not reach libsystemd")
+        })
+        .unwrap_err();
+
+        assert_eq!(error, VirtualTerminalError::InvalidSeatName);
     }
 }
 

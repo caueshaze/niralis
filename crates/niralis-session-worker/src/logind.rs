@@ -34,8 +34,11 @@ pub enum LogindError {
     Unavailable,
     #[error("logind session id is invalid")]
     InvalidSessionId,
-    #[error("logind query failed")]
-    QueryFailed,
+    #[error("{operation} failed with {result}")]
+    QueryFailed {
+        operation: &'static str,
+        result: libc::c_int,
+    },
 }
 
 pub trait LogindSessionResolver: Send + Sync {
@@ -60,11 +63,14 @@ impl LogindSessionResolver for SdLoginResolver {
                 .map_err(|_| LogindError::Unavailable)?;
             let mut value = std::ptr::null_mut();
             let result = function(pid as libc::pid_t, &mut value);
-            if result == -libc::ENXIO || result == -libc::ENOENT {
+            if pid_has_no_logind_session(result) {
                 return Ok(None);
             }
             if result < 0 || value.is_null() {
-                return Err(LogindError::QueryFailed);
+                return Err(LogindError::QueryFailed {
+                    operation: "sd_pid_get_session",
+                    result,
+                });
             }
             let id = CStr::from_ptr(value)
                 .to_str()
@@ -119,44 +125,60 @@ impl LogindSessionResolver for SdLoginResolver {
             Ok(Some(LogindSessionIdentity {
                 id: id.clone(),
                 uid: value_uid,
-                session_type: string_value(ty, id_c.as_ptr())?,
-                class: string_value(class, id_c.as_ptr())?,
-                desktop: string_value(desktop, id_c.as_ptr()).ok(),
-                seat: optional_string_value(seat, id_c.as_ptr()),
+                session_type: string_value("sd_session_get_type", ty, id_c.as_ptr())?,
+                class: string_value("sd_session_get_class", class, id_c.as_ptr())?,
+                desktop: string_value("sd_session_get_desktop", desktop, id_c.as_ptr()).ok(),
+                seat: optional_string_value("sd_session_get_seat", seat, id_c.as_ptr()),
                 vtnr: optional_vtnr(vt, id_c.as_ptr()),
             }))
         }
     }
 }
 
+fn pid_has_no_logind_session(result: libc::c_int) -> bool {
+    // sd_pid_get_session() reports a PID outside a logind session as ENODATA
+    // on current systemd releases. Older implementations may return ENXIO;
+    // ENOENT remains useful for a PID whose proc entry disappeared mid-query.
+    result == -libc::ENODATA || result == -libc::ENXIO || result == -libc::ENOENT
+}
+
 fn load() -> Result<Library, LogindError> {
     unsafe { Library::new("libsystemd.so.0").map_err(|_| LogindError::Unavailable) }
 }
 unsafe fn string_value(
+    operation: &'static str,
     function: Symbol<
         unsafe extern "C" fn(*const libc::c_char, *mut *mut libc::c_char) -> libc::c_int,
     >,
     id: *const libc::c_char,
 ) -> Result<String, LogindError> {
     let mut value = std::ptr::null_mut();
-    if function(id, &mut value) < 0 || value.is_null() {
-        return Err(LogindError::QueryFailed);
+    let status = function(id, &mut value);
+    if status < 0 || value.is_null() {
+        return Err(LogindError::QueryFailed {
+            operation,
+            result: status,
+        });
     }
     let result = CStr::from_ptr(value)
         .to_str()
-        .map_err(|_| LogindError::QueryFailed)?
+        .map_err(|_| LogindError::QueryFailed {
+            operation,
+            result: status,
+        })?
         .to_owned();
     libc::free(value.cast());
     Ok(result)
 }
 
 unsafe fn optional_string_value(
+    operation: &'static str,
     function: Symbol<
         unsafe extern "C" fn(*const libc::c_char, *mut *mut libc::c_char) -> libc::c_int,
     >,
     id: *const libc::c_char,
 ) -> Option<String> {
-    string_value(function, id).ok()
+    string_value(operation, function, id).ok()
 }
 
 unsafe fn optional_vtnr(
@@ -168,5 +190,18 @@ unsafe fn optional_vtnr(
         None
     } else {
         Some(value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pid_has_no_logind_session;
+
+    #[test]
+    fn recognizes_systemd_no_session_results() {
+        assert!(pid_has_no_logind_session(-libc::ENODATA));
+        assert!(pid_has_no_logind_session(-libc::ENXIO));
+        assert!(pid_has_no_logind_session(-libc::ENOENT));
+        assert!(!pid_has_no_logind_session(-libc::EACCES));
     }
 }

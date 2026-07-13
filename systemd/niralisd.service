@@ -9,6 +9,7 @@ ExecStart=/usr/bin/niralisd --config /etc/niralis/niralis.toml
 Restart=on-failure
 RuntimeDirectory=niralis
 RuntimeDirectoryMode=0755
+UMask=0077
 
 [Install]
 WantedBy=graphical.target

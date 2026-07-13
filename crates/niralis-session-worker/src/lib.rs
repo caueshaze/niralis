@@ -5,6 +5,7 @@ mod privilege_drop;
 mod runtime;
 #[cfg(test)]
 mod runtime_tests;
+mod selinux;
 mod session_child;
 mod smoke;
 mod user_bus;
@@ -29,6 +30,9 @@ pub use privilege_drop::{
 pub use runtime::{
     run_worker_process, LinuxRuntimeDirValidator, RuntimeDirValidationError, RuntimeDirValidator,
     StubRuntimeDirValidator, WorkerAuthenticatorFactory,
+};
+pub use selinux::{
+    LinuxSelinuxContextManager, PamSelinuxExecContext, SelinuxContextManager, SelinuxError,
 };
 pub use session_child::{
     ProcessSessionChildRunner, ProcessSessionChildRunnerFactory, SessionChildCredentialProof,

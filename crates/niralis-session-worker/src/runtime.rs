@@ -6,7 +6,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use niralis_auth::{AuthError, Authenticator, PamAuthenticator};
 use niralis_session::{
@@ -22,10 +22,12 @@ use crate::identity::{
 };
 use crate::logind::{LogindSessionIdentity, LogindSessionResolver, SdLoginResolver};
 use crate::privilege_drop::PrivilegeDropTarget;
+use crate::selinux::{LinuxSelinuxContextManager, SelinuxContextManager};
 use crate::session_child::{
     ProcessSessionChildRunnerFactory, SessionChildExpectation, SessionChildRunnerFactory,
     SessionChildRuntimeContext, SessionChildTerminalContext, SessionChildUnixPath,
 };
+use crate::smoke::authorize_real_graphical_smoke_for_runtime;
 use crate::vt::{LinuxVirtualTerminalAllocator, VirtualTerminalAllocator, VirtualTerminalGuard};
 
 pub trait WorkerAuthenticatorFactory: Send + Sync {
@@ -40,6 +42,7 @@ pub struct WorkerDependencies<'a, F, I, G, C, L> {
     pub logind_resolver: &'a L,
     pub virtual_terminal_allocator: &'a dyn VirtualTerminalAllocator,
     pub runtime_dir_validator: &'a dyn RuntimeDirValidator,
+    pub selinux_context_manager: &'a dyn SelinuxContextManager,
 }
 
 pub trait RuntimeDirValidator: Send + Sync {
@@ -114,6 +117,7 @@ pub fn run_worker_process<R: Read, W: Write>(
             logind_resolver: &SdLoginResolver,
             virtual_terminal_allocator: &LinuxVirtualTerminalAllocator,
             runtime_dir_validator: &LinuxRuntimeDirValidator,
+            selinux_context_manager: &LinuxSelinuxContextManager,
         },
     )
 }
@@ -188,6 +192,7 @@ pub fn run_worker_process_with_dependencies<
             worker_id,
             dependencies.virtual_terminal_allocator,
             dependencies.runtime_dir_validator,
+            dependencies.selinux_context_manager,
             launch_plan,
         ),
     }
@@ -216,6 +221,7 @@ fn run_pam_session<
     worker_id: String,
     virtual_terminal_allocator: &dyn VirtualTerminalAllocator,
     runtime_dir_validator: &dyn RuntimeDirValidator,
+    selinux_context_manager: &dyn SelinuxContextManager,
     launch_plan: niralis_session::SessionExecPlan,
 ) -> Result<(), SessionError> {
     if launch_plan.validate().is_err() {
@@ -242,6 +248,44 @@ fn run_pam_session<
             },
         )?;
         return Err(SessionError::AuthenticatedSessionFailed);
+    }
+    let watchdog = match authorize_real_graphical_smoke_for_runtime(&request.session.id) {
+        Ok(duration) => duration,
+        Err(error) => {
+            warn!(session = %request.session.id, ?error, "real graphical session rejected before PAM");
+            write_rejection(writer, WorkerErrorCode::RealGraphicalSessionNotAuthorized)?;
+            return Err(SessionError::WorkerRejected);
+        }
+    };
+    // pam_systemd deliberately returns PAM_SUCCESS without creating a session
+    // when the calling PID is already a member of one. A daemon started via
+    // ssh -> sudo inherits that session cgroup, and env_clear() cannot change
+    // it. Fail before acquiring a VT or beginning PAM so this is explicit.
+    match logind_resolver.resolve_by_pid(std::process::id()) {
+        Ok(Some(_)) => {
+            warn!(
+                stage = "pre_pam_logind_membership",
+                worker_already_in_logind_session = true,
+                "worker must be launched by the system manager, not from an inherited login session"
+            );
+            write_envelope(
+                writer,
+                WorkerResponse::SessionFailed {
+                    code: WorkerSessionFailureCode::WorkerAlreadyInLogindSession,
+                },
+            )?;
+            return Err(SessionError::AuthenticatedSessionFailed);
+        }
+        Ok(None) => debug!(
+            stage = "pre_pam_logind_membership",
+            worker_already_in_logind_session = false,
+            "worker is not associated with an existing logind session"
+        ),
+        Err(error) => warn!(
+            stage = "pre_pam_logind_membership",
+            ?error,
+            "could not determine worker logind membership; continuing so PAM/logind remains authoritative"
+        ),
     }
     info!(
         source_path = ?launch_plan.source_path,
@@ -380,7 +424,13 @@ fn run_pam_session<
         Ok(Ok(())) => {
             let pam_environment = match transaction.session_environment() {
                 Ok(environment) => environment,
-                Err(_) => {
+                Err(error) => {
+                    warn!(
+                        username = %canonical_username,
+                        session = %session.session.id,
+                        ?error,
+                        "worker failed to extract PAM graphical runtime environment"
+                    );
                     drop(transaction);
                     write_envelope(
                         writer,
@@ -442,6 +492,38 @@ fn run_pam_session<
                 )?;
                 return Err(SessionError::AuthenticatedSessionFailed);
             }
+            let selinux_exec_context = match selinux_context_manager.capture_pending() {
+                Ok(context) => context,
+                Err(error) => {
+                    warn!(
+                        stage = "capture_pam_selinux_exec_context",
+                        ?error,
+                        "worker could not capture the PAM SELinux exec context"
+                    );
+                    drop(transaction);
+                    write_envelope(
+                        writer,
+                        WorkerResponse::SessionFailed {
+                            code: WorkerSessionFailureCode::SessionChildFailed,
+                        },
+                    )?;
+                    return Err(SessionError::AuthenticatedSessionFailed);
+                }
+            };
+            if selinux_exec_context.is_some() && selinux_context_manager.clear_pending().is_err() {
+                warn!(
+                    stage = "clear_pam_selinux_exec_context",
+                    "worker could not clear the pending PAM SELinux exec context"
+                );
+                drop(transaction);
+                write_envelope(
+                    writer,
+                    WorkerResponse::SessionFailed {
+                        code: WorkerSessionFailureCode::SessionChildFailed,
+                    },
+                )?;
+                return Err(SessionError::AuthenticatedSessionFailed);
+            }
             let child_terminal_fd = match terminal.lease().duplicate_terminal_fd() {
                 Ok(fd) => fd,
                 Err(error) => {
@@ -472,6 +554,11 @@ fn run_pam_session<
                     return Err(SessionError::AuthenticatedSessionFailed);
                 }
             };
+            debug!(
+                stage = "before_child_spawn",
+                pam_selinux_exec_context_present = selinux_exec_context.is_some(),
+                "prepared SELinux exec-context handoff for session child"
+            );
             let runtime = match (
                 SessionChildUnixPath::new(&credentials.identity.home),
                 SessionChildUnixPath::new(&credentials.identity.shell),
@@ -495,6 +582,7 @@ fn run_pam_session<
                     vtnr: terminal.lease().vtnr().number(),
                     dbus_session_bus_address: None,
                     imported_locale: pam_environment.imported_locale,
+                    selinux_exec_context: selinux_exec_context.clone(),
                     probe_path,
                     exec_plan: launch_plan,
                 },
@@ -535,6 +623,46 @@ fn run_pam_session<
                     return Err(SessionError::AuthenticatedSessionFailed);
                 }
             };
+            if let Some(expected_context) = &selinux_exec_context {
+                match selinux_context_manager.context_for_pid(child_report.child_pid) {
+                    Ok(observed_context) if expected_context.matches(&observed_context) => {}
+                    Ok(observed_context) => {
+                        warn!(
+                            stage = "post_exec_selinux_context",
+                            pid = child_report.child_pid,
+                            expected_context = %expected_context.as_str(),
+                            observed_context = %observed_context.as_str(),
+                            "final session process SELinux context did not match the PAM context"
+                        );
+                        let _ = child_runner.terminate(SESSION_TERMINATION_GRACE);
+                        drop(transaction);
+                        write_envelope(
+                            writer,
+                            WorkerResponse::SessionFailed {
+                                code: WorkerSessionFailureCode::SessionChildFailed,
+                            },
+                        )?;
+                        return Err(SessionError::AuthenticatedSessionFailed);
+                    }
+                    Err(error) => {
+                        warn!(
+                            stage = "post_exec_selinux_context",
+                            pid = child_report.child_pid,
+                            ?error,
+                            "could not read the final session process SELinux context"
+                        );
+                        let _ = child_runner.terminate(SESSION_TERMINATION_GRACE);
+                        drop(transaction);
+                        write_envelope(
+                            writer,
+                            WorkerResponse::SessionFailed {
+                                code: WorkerSessionFailureCode::SessionChildFailed,
+                            },
+                        )?;
+                        return Err(SessionError::AuthenticatedSessionFailed);
+                    }
+                }
+            }
             if !valid_terminal_proof(
                 &child_report,
                 terminal.lease().seat().as_str(),
@@ -635,6 +763,7 @@ fn run_pam_session<
                 worker_id,
                 child_report.child_pid,
                 child_report.process_identity.pgid,
+                Instant::now() + watchdog,
             ) {
                 Ok(status) => status,
                 Err(error) => {
@@ -732,8 +861,15 @@ fn wait_for_session(
     worker_id: String,
     session_pid: u32,
     session_pgid: u32,
+    watchdog_deadline: Instant,
 ) -> Result<std::process::ExitStatus, SessionError> {
     loop {
+        if Instant::now() >= watchdog_deadline {
+            info!("real graphical session watchdog expired");
+            return child_runner
+                .terminate(SESSION_TERMINATION_GRACE)
+                .map_err(|_| SessionError::AuthenticatedSessionFailed);
+        }
         if let Some(status) = child_runner
             .poll_child()
             .map_err(|_| SessionError::AuthenticatedSessionFailed)?

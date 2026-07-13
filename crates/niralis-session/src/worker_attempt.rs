@@ -33,8 +33,12 @@ impl WorkerAttempt {
     pub(crate) fn take_child(&mut self) -> Child {
         self.child.take().expect("worker child ownership exists")
     }
-    pub(crate) fn spawn(worker_path: &Path, request: WorkerRequest) -> Result<Self, SessionError> {
-        let mut child = spawn_worker(worker_path)?;
+    pub(crate) fn spawn(
+        worker_path: &Path,
+        worker_environment: &[(String, String)],
+        request: WorkerRequest,
+    ) -> Result<Self, SessionError> {
+        let mut child = spawn_worker(worker_path, worker_environment)?;
         let stdin = child.stdin.take().ok_or(SessionError::WorkerIoFailed)?;
         let stdout = child.stdout.take().ok_or(SessionError::WorkerIoFailed)?;
         let (writer, writer_rx) = spawn_writer(stdin, request);
@@ -98,17 +102,36 @@ impl Drop for WorkerAttempt {
     }
 }
 
-fn spawn_worker(worker_path: &Path) -> Result<Child, SessionError> {
-    let child = Command::new(worker_path)
+fn spawn_worker(
+    worker_path: &Path,
+    worker_environment: &[(String, String)],
+) -> Result<Child, SessionError> {
+    let result = Command::new(worker_path)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .env_clear()
+        .envs(worker_environment.iter().cloned())
         .current_dir("/")
-        .spawn()
-        .map_err(|_| SessionError::WorkerSpawnFailed)?;
-    info!(path = %worker_path.display(), "spawned session worker");
-    Ok(child)
+        .spawn();
+
+    match result {
+        Ok(child) => {
+            info!(path = %worker_path.display(), "spawned session worker");
+            Ok(child)
+        }
+        Err(error) => {
+            tracing::error!(
+                path = %worker_path.display(),
+                errno = ?error.raw_os_error(),
+                kind = ?error.kind(),
+                error = %error,
+                "failed to spawn session worker"
+            );
+
+            Err(SessionError::WorkerSpawnFailed)
+        }
+    }
 }
 
 fn spawn_writer(

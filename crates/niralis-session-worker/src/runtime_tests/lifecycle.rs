@@ -11,7 +11,7 @@ use crate::runtime::{
 
 use super::support::{
     identity, request, StubChildFactory, StubFactory, StubGroupsResolver, StubIdentityResolver,
-    StubLogind, StubVtAllocator, TrackingState,
+    StubLogind, StubSelinux, StubVtAllocator, TrackingState,
 };
 
 #[test]
@@ -48,9 +48,10 @@ fn pam_worker_reports_started_before_lifecycle_completion() {
                 state: state.clone(),
                 result: Ok(()),
             },
-            logind_resolver: &StubLogind,
+            logind_resolver: &StubLogind::default(),
             virtual_terminal_allocator: &StubVtAllocator,
             runtime_dir_validator: &StubRuntimeDirValidator,
+            selinux_context_manager: &StubSelinux::default(),
         },
     )
     .expect("worker should succeed");
@@ -105,9 +106,10 @@ fn identity_resolution_uses_pam_user_not_requested_username() {
                 state: state.clone(),
                 result: Ok(()),
             },
-            logind_resolver: &StubLogind,
+            logind_resolver: &StubLogind::default(),
             virtual_terminal_allocator: &StubVtAllocator,
             runtime_dir_validator: &StubRuntimeDirValidator,
+            selinux_context_manager: &StubSelinux::default(),
         },
     )
     .expect("worker should succeed");
@@ -162,9 +164,10 @@ fn child_failure_drops_pam_transaction_after_child_returns() {
                 state: state.clone(),
                 result: Err(SessionChildError::ProtocolFailed),
             },
-            logind_resolver: &StubLogind,
+            logind_resolver: &StubLogind::default(),
             virtual_terminal_allocator: &StubVtAllocator,
             runtime_dir_validator: &StubRuntimeDirValidator,
+            selinux_context_manager: &StubSelinux::default(),
         },
     );
 

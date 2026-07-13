@@ -40,6 +40,16 @@ pub fn authorize_real_graphical_smoke(
     Ok(std::time::Duration::from_secs(seconds))
 }
 
+pub fn authorize_real_graphical_smoke_for_runtime(
+    session_id: &str,
+) -> Result<std::time::Duration, RealGraphicalSmokeGuardError> {
+    if cfg!(test) {
+        Ok(std::time::Duration::from_secs(300))
+    } else {
+        authorize_real_graphical_smoke(session_id)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]

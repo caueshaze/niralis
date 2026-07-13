@@ -1,0 +1,134 @@
+policy_module(niralis, 1.0.0)
+
+########################################
+# Types and entrypoint
+
+type niralis_t;
+type niralis_exec_t;
+init_daemon_domain(niralis_t, niralis_exec_t)
+
+# niralisd, worker and session child currently share niralis_t. Helper
+# execution therefore occurs without a domain transition.
+can_exec(niralis_t, niralis_exec_t)
+
+type niralis_etc_t;
+files_config_file(niralis_etc_t)
+
+type niralis_var_run_t;
+files_pid_file(niralis_var_run_t)
+
+########################################
+# Niralis-owned configuration and runtime state
+
+manage_dirs_pattern(niralis_t, niralis_etc_t, niralis_etc_t)
+manage_files_pattern(niralis_t, niralis_etc_t, niralis_etc_t)
+manage_dirs_pattern(niralis_t, niralis_var_run_t, niralis_var_run_t)
+manage_files_pattern(niralis_t, niralis_var_run_t, niralis_var_run_t)
+manage_sock_files_pattern(niralis_t, niralis_var_run_t, niralis_var_run_t)
+
+########################################
+# Explicitly required service operations
+
+auth_use_nsswitch(niralis_t)
+auth_use_pam(niralis_t)
+auth_domtrans_pam_timestamp(niralis_t)
+systemd_dbus_chat_logind(niralis_t)
+
+# sd-login APIs such as sd_seat_can_graphical() read logind runtime
+# state from /run/systemd, including /run/systemd/seats/seat0.
+systemd_login_read_pid_files(niralis_t)
+
+# pam_selinux resolves the PAM user through /etc/selinux/{config,seusers}
+# and optional per-user entries under /etc/selinux/targeted/logins, then
+# selects an ordered session context from default_contexts.
+seutil_read_config(niralis_t)
+seutil_read_login_config(niralis_t)
+seutil_read_default_contexts(niralis_t)
+# pam_selinux validates the final context built from default_contexts before
+# preparing the session exec context.
+selinux_validate_context(niralis_t)
+# pam_selinux computes the per-user label for the allocated virtual terminal.
+selinux_compute_relabel_context(niralis_t)
+# The session child applies PAM's pending exec context, then explicitly
+# transitions through /usr/bin/niri (bin_t) into the authenticated user domain.
+userdom_bin_spec_domtrans_unpriv_users(niralis_t)
+# On this targeted policy, pam_selinux maps the local account to unconfined_t,
+# which is not an unpriv_userdomain member. Keep that explicit transition
+# narrow and retain only the inherited descriptor relationships it needs.
+gen_require(`
+    type unconfined_t;
+')
+corecmd_bin_spec_domtrans(niralis_t, unconfined_t)
+# pam_selinux selected unconfined_u:unconfined_r:unconfined_t for this local
+# account.  The child supplies that complete context with setexeccon() before
+# execve(), so RBAC checks the final process type, rather than Niri's bin_t
+# file label.
+gen_require(`
+    role system_r;
+    role unconfined_r;
+')
+role_transition system_r unconfined_t unconfined_r;
+# The final context changes both SELinux user and role.  These are the
+# reference-policy constraint exemptions used by login programs; the target
+# remains a normal user-domain target selected by pam_selinux.
+domain_subj_id_change_exemption(niralis_t)
+domain_role_change_exemption(niralis_t)
+# After exec, verify the kernel-reported context of the freshly-created
+# PAM user process through /proc/<pid>/attr/current.  The reference policy
+# exposes this verification access for user domains as a single interface.
+userdom_read_all_users_state(niralis_t)
+userdom_getattr_all_users(niralis_t)
+# Linux gates cross-UID reads of /proc/<pid>/attr/current through its ptrace
+# access check.  CAP_SYS_PTRACE satisfies that DAC check only; Niralis still
+# receives no SELinux process:ptrace permission.
+allow niralis_t self:capability sys_ptrace;
+# The worker supervises only the process group it created: SIGTERM first,
+# then SIGKILL after its bounded grace period.  User domains have distinct
+# Unix UIDs, so the kernel also requires CAP_KILL for that supervision.
+userdom_signal_all_users(niralis_t)
+userdom_kill_all_users(niralis_t)
+allow niralis_t self:capability kill;
+allow unconfined_t niralis_t:fd use;
+allow unconfined_t niralis_t:fifo_file rw_file_perms;
+allow unconfined_t niralis_t:process sigchld;
+
+# sd_pid_get_session() reads the worker's dynamically-labelled
+# /proc/<pid>/cgroup and PID 1's cgroup to resolve the namespace root.
+read_files_pattern(niralis_t, niralis_t, niralis_t)
+init_read_state(niralis_t)
+
+term_use_console(niralis_t)
+term_use_unallocated_ttys(niralis_t)
+# pam_selinux hands the allocated VT to the authenticated user domain.
+term_relabel_unallocated_ttys(niralis_t)
+userdom_relabel_user_ttys(niralis_t)
+# Between credential drop and final setexeccon, the child makes the
+# PAM-labelled user VT its controlling terminal.
+allow niralis_t user_tty_device_t:chr_file ioctl;
+# The child enters the authenticated account's home before the final exec.
+userdom_search_user_home_dirs(niralis_t)
+# Before final setexeccon, the child proves connectivity to the existing
+# authenticated user's session bus.  It never launches or manages a bus.
+userdom_search_user_tmp_dirs(niralis_t)
+dbus_write_session_tmp_sock_files(niralis_t)
+dbus_stream_connect_session_bus(niralis_t)
+dbus_chat_session_bus(niralis_t)
+
+# niralisd sets the IPC socket ownership to root:<greeter primary gid>.
+allow niralis_t self:capability chown;
+# The dedicated session child clears supplementary groups, then drops to the
+# PAM-authenticated gid and uid before any user-controlled execution.
+allow niralis_t self:capability { setgid setuid };
+# Required for TIOCSCTTY on the dedicated PAM-labelled virtual terminal.
+allow niralis_t self:capability sys_tty_config;
+
+########################################
+# pam_selinux provides the final user context. niralis_t may request it only
+# for a user-domain exec after the Unix credential drop; it never runs the
+# privileged child in that target context.
+
+allow niralis_t niralis_t:process { setexec setsched };
+# pam_selinux sets the key-creation context alongside the pending exec
+# context; the reference policy exposes no narrower interface for it.
+allow niralis_t niralis_t:process setkeycreate;
+userdom_transition_login_userdomain(niralis_t)

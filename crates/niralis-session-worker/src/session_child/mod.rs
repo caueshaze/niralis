@@ -22,13 +22,14 @@ use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
 use crate::isolation::{
-    validate_isolation_proof, validate_isolation_proof_with_allowed_fds, InheritedFdSanitizer,
-    LinuxInheritedFdSanitizer, LinuxPostDropAuditor, PostDropAuditor, PostDropIsolationProof,
+    validate_isolation_proof_with_allowed_fds, InheritedFdSanitizer, LinuxInheritedFdSanitizer,
+    LinuxPostDropAuditor, PostDropAuditor, PostDropIsolationProof,
 };
 use crate::privilege_drop::{
     AppliedCredentials, LibcPrivilegeDropper, PrivilegeDropError, PrivilegeDropTarget,
     PrivilegeDropper,
 };
+use crate::selinux::{LinuxSelinuxContextManager, SelinuxContextManager};
 use protocol::SessionChildRequest;
 
 pub const SESSION_CHILD_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -230,7 +231,25 @@ impl SessionChildRunner for ProcessSessionChildRunner {
         let mut attempt = SessionChildAttempt::spawn(&self.path, payload, terminal_fd)?;
         let pid = attempt.child.as_ref().expect("child exists").id();
         let reader_result = attempt.wait_reader(deadline);
-        if reader_result.is_err() {
+        if let Err(error) = &reader_result {
+            match attempt.child.as_mut().expect("child exists").try_wait() {
+                Ok(Some(status)) => {
+                    warn!(
+                        ?error,
+                        ?status,
+                        "session child exited before sending its ready response"
+                    );
+                }
+                Ok(None) => {
+                    warn!(
+                        ?error,
+                        "session child response read failed while the child remained alive"
+                    );
+                }
+                Err(wait_error) => {
+                    warn!(?error, errno = ?wait_error.raw_os_error(), wait_error = %wait_error, "could not inspect session child after its response read failed");
+                }
+            }
             attempt.kill_and_reap();
         }
         attempt.finish();
@@ -239,21 +258,34 @@ impl SessionChildRunner for ProcessSessionChildRunner {
         if response.version != SESSION_CHILD_PROTOCOL_VERSION {
             return Err(SessionChildError::ProtocolFailed);
         }
-        if let Some(status) = attempt
+        if let SessionChildResponse::Rejected { code } = &response.message {
+            warn!(?code, "session child rejected its credential handoff");
+            return Err(SessionChildError::ProtocolFailed);
+        }
+        let ready_status = attempt
             .child
             .as_mut()
             .expect("child exists")
             .try_wait()
-            .map_err(|_| SessionChildError::IoFailed)?
-        {
+            .map_err(|error| {
+                warn!(errno = ?error.raw_os_error(), error = %error, "checking session child state after ready failed");
+                SessionChildError::IoFailed
+            })?;
+        if let Some(status) = ready_status {
             if !status.success() {
                 return Err(SessionChildError::ExitFailed);
             }
             return Err(SessionChildError::ExitFailed);
         }
-        let report = validate_ready_response(response.message, &expectation, pid)?;
-        attempt.send_commit(deadline)?;
-        match attempt.wait_exec_status(deadline)? {
+        let report = validate_ready_response(response.message, &expectation, pid, true)?;
+        attempt.send_commit(deadline).map_err(|error| {
+            warn!(?error, "sending CommitExec to the session child failed");
+            error
+        })?;
+        match attempt.wait_exec_status(deadline).map_err(|error| {
+            warn!(?error, "waiting for the session child exec handoff failed");
+            error
+        })? {
             ExecStatus::Success => {}
             ExecStatus::Failure(failure) => {
                 warn!(stage = %failure.stage, errno = failure.errno, "final execve failed");
@@ -261,14 +293,16 @@ impl SessionChildRunner for ProcessSessionChildRunner {
                 return Err(SessionChildError::ExitFailed);
             }
         }
-        if attempt
+        let exec_status = attempt
             .child
             .as_mut()
             .expect("child exists")
             .try_wait()
-            .map_err(|_| SessionChildError::IoFailed)?
-            .is_some()
-        {
+            .map_err(|error| {
+                warn!(errno = ?error.raw_os_error(), error = %error, "checking session child state after exec handoff failed");
+                SessionChildError::IoFailed
+            })?;
+        if exec_status.is_some() {
             attempt.kill_and_reap();
             return Err(SessionChildError::ExitFailed);
         }
@@ -356,7 +390,15 @@ fn validate_ready_response(
     response: SessionChildResponse,
     expectation: &SessionChildExpectation,
     pid: u32,
+    allows_status_pipe: bool,
 ) -> Result<SessionChildReport, SessionChildError> {
+    let mut allowed_inherited_fds = expectation
+        .terminal
+        .as_ref()
+        .map_or_else(Vec::new, |terminal| vec![terminal.fd]);
+    if allows_status_pipe {
+        allowed_inherited_fds.push(4);
+    }
     match response {
         SessionChildResponse::Ready {
             canonical_username,
@@ -374,8 +416,15 @@ fn validate_ready_response(
             && child_pid == pid
             && applied_credentials
                 == SessionChildUnixCredentials::from(&expectation.target_credentials)
-            && validate_isolation_proof(&PostDropIsolationProof::from(isolation_proof.clone()))
-                .is_ok()
+            && {
+                let proof = PostDropIsolationProof::from(isolation_proof.clone());
+                let present_allowed_fds = allowed_inherited_fds
+                    .iter()
+                    .copied()
+                    .filter(|fd| proof.open_fds.binary_search(fd).is_ok())
+                    .collect::<Vec<_>>();
+                validate_isolation_proof_with_allowed_fds(&proof, &present_allowed_fds).is_ok()
+            }
             && credential_proof.real_uid == expectation.target_credentials.uid
             && credential_proof.effective_uid == expectation.target_credentials.uid
             && credential_proof.saved_uid == expectation.target_credentials.uid
@@ -504,13 +553,20 @@ impl SessionChildAttempt {
         let mut command = Command::new(path);
         let (status_read, status_write) = make_status_pipe()?;
         let status_raw = status_write.as_raw_fd();
+        let terminal_source_fd = terminal_fd.as_ref().map(AsRawFd::as_raw_fd);
+        let fd_mapping_collision = terminal_source_fd == Some(4) || status_raw == 3;
+        tracing::debug!(
+            status_source_fd = status_raw,
+            status_target_fd = 4,
+            terminal_source_fd = ?terminal_source_fd,
+            terminal_target_fd = 3,
+            fd_mapping_collision,
+            "prepared session child fd mapping"
+        );
         unsafe {
             use std::os::unix::process::CommandExt;
             command.pre_exec(move || {
                 if libc::dup2(status_raw, 4) < 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                if libc::fcntl(4, libc::F_SETFD, libc::FD_CLOEXEC) < 0 {
                     return Err(std::io::Error::last_os_error());
                 }
                 Ok(())
@@ -539,11 +595,24 @@ impl SessionChildAttempt {
             .env_clear()
             .current_dir("/")
             .spawn()
-            .map_err(|_| SessionChildError::SpawnFailed)?;
+            .map_err(|error| {
+                warn!(
+                    path = %path.display(),
+                    errno = ?error.raw_os_error(),
+                    kind = ?error.kind(),
+                    error = %error,
+                    status_source_fd = status_raw,
+                    terminal_source_fd = ?terminal_source_fd,
+                    fd_mapping_collision,
+                    "failed to spawn session child"
+                );
+                SessionChildError::SpawnFailed
+            })?;
         let mut child = child;
         let stdin = match child.stdin.take() {
             Some(stdin) => stdin,
             None => {
+                warn!("session child did not provide stdin for the private request");
                 kill_and_reap(&mut child);
                 return Err(SessionChildError::IoFailed);
             }
@@ -551,6 +620,7 @@ impl SessionChildAttempt {
         let mut stdout = match child.stdout.take() {
             Some(stdout) => stdout,
             None => {
+                warn!("session child did not provide stdout for the private response");
                 kill_and_reap(&mut child);
                 return Err(SessionChildError::IoFailed);
             }
@@ -560,7 +630,15 @@ impl SessionChildAttempt {
             .write_all(&payload)
             .and_then(|_| stdin.write_all(b"\n"))
             .and_then(|_| stdin.flush())
-            .map_err(|_| SessionChildError::IoFailed)?;
+            .map_err(|error| {
+                warn!(
+                    errno = ?error.raw_os_error(),
+                    error = %error,
+                    request_bytes = payload.len(),
+                    "writing the private session-child request failed"
+                );
+                SessionChildError::IoFailed
+            })?;
         let (response_tx, response_rx) = mpsc::channel();
         let reader = thread::spawn(move || {
             let _ = response_tx.send(read_child_response(&mut stdout));
@@ -584,11 +662,20 @@ impl SessionChildAttempt {
             version: SESSION_CHILD_PROTOCOL_VERSION,
             message: SessionChildCommit::Exec,
         };
-        serde_json::to_writer(&mut stdin, &message).map_err(|_| SessionChildError::IoFailed)?;
+        serde_json::to_writer(&mut stdin, &message).map_err(|error| {
+            warn!(error = %error, "serializing CommitExec for the session child failed");
+            SessionChildError::IoFailed
+        })?;
         stdin
             .write_all(b"\n")
-            .map_err(|_| SessionChildError::IoFailed)?;
-        stdin.flush().map_err(|_| SessionChildError::IoFailed)
+            .map_err(|error| {
+                warn!(errno = ?error.raw_os_error(), error = %error, "writing CommitExec to the session child failed");
+                SessionChildError::IoFailed
+            })?;
+        stdin.flush().map_err(|error| {
+            warn!(errno = ?error.raw_os_error(), error = %error, "flushing CommitExec to the session child failed");
+            SessionChildError::IoFailed
+        })
     }
 
     fn wait_exec_status(&mut self, deadline: Instant) -> Result<ExecStatus, SessionChildError> {
@@ -634,9 +721,24 @@ fn read_exec_status(fd: OwnedFd, timeout: Duration) -> Result<ExecStatus, Sessio
     let millis = timeout.as_millis().min(i32::MAX as u128) as i32;
     let ready = unsafe { libc::poll(&mut pollfd, 1, millis) };
     if ready == 0 {
+        warn!(
+            timeout_ms = millis,
+            "timed out waiting for the session child exec status pipe"
+        );
         return Err(SessionChildError::TimedOut);
     }
-    if ready < 0 || pollfd.revents & (libc::POLLERR | libc::POLLNVAL) != 0 {
+    if ready < 0 {
+        warn!(
+            errno = ?std::io::Error::last_os_error().raw_os_error(),
+            "polling the session child exec status pipe failed"
+        );
+        return Err(SessionChildError::IoFailed);
+    }
+    if pollfd.revents & (libc::POLLERR | libc::POLLNVAL) != 0 {
+        warn!(
+            revents = pollfd.revents,
+            "session child exec status pipe reported an error"
+        );
         return Err(SessionChildError::IoFailed);
     }
     let mut payload = [0_u8; 512];
@@ -645,6 +747,10 @@ fn read_exec_status(fd: OwnedFd, timeout: Duration) -> Result<ExecStatus, Sessio
         return Ok(ExecStatus::Success);
     }
     if count < 0 {
+        warn!(
+            errno = ?std::io::Error::last_os_error().raw_os_error(),
+            "reading the session child exec status pipe failed"
+        );
         return Err(SessionChildError::IoFailed);
     }
     let failure = serde_json::from_slice::<FinalExecFailure>(&payload[..count as usize])
@@ -672,8 +778,14 @@ fn wait_result<T: Send + 'static>(
     let timeout = remaining(deadline)?;
     match receiver.recv_timeout(timeout) {
         Ok(result) => result,
-        Err(mpsc::RecvTimeoutError::Timeout) => Err(SessionChildError::TimedOut),
-        Err(mpsc::RecvTimeoutError::Disconnected) => Err(SessionChildError::IoFailed),
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            warn!("timed out waiting for a private session-child message");
+            Err(SessionChildError::TimedOut)
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            warn!("private session-child response channel disconnected");
+            Err(SessionChildError::IoFailed)
+        }
     }
 }
 
@@ -681,9 +793,15 @@ fn read_child_response(reader: &mut impl Read) -> Result<Vec<u8>, SessionChildEr
     let mut bytes = Vec::new();
     let mut byte = [0u8; 1];
     loop {
-        reader
-            .read_exact(&mut byte)
-            .map_err(|_| SessionChildError::IoFailed)?;
+        reader.read_exact(&mut byte).map_err(|error| {
+            warn!(
+                errno = ?error.raw_os_error(),
+                error = %error,
+                received_bytes = bytes.len(),
+                "reading a private session-child message failed"
+            );
+            SessionChildError::IoFailed
+        })?;
         bytes.push(byte[0]);
         if byte[0] == b'\n' {
             break;
@@ -784,11 +902,16 @@ pub(crate) fn run_child_process_with_dependencies(
         let _ = write_rejection(&mut writer, SessionChildErrorCode::RootUidDisallowed);
         return 1;
     }
-    let allowed_terminal_fds = terminal
+    let mut allowed_inherited_fds = terminal
         .as_ref()
         .map_or_else(Vec::new, |value| vec![value.fd]);
+    // FD 4 is the parent's CLOEXEC status pipe.  It is needed until the
+    // commit/exec handoff completes, then is closed automatically by execve.
+    if child_pid == std::process::id() {
+        allowed_inherited_fds.push(4);
+    }
     if fd_sanitizer
-        .sanitize_with_allowlist(&allowed_terminal_fds)
+        .sanitize_with_allowlist(&allowed_inherited_fds)
         .is_err()
     {
         let _ = write_rejection(&mut writer, SessionChildErrorCode::FdSanitizationFailed);
@@ -801,7 +924,8 @@ pub(crate) fn run_child_process_with_dependencies(
             let _ = write_rejection(&mut writer, SessionChildErrorCode::RootUidDisallowed);
             return 1;
         }
-        Err(_) => {
+        Err(error) => {
+            eprintln!("session child privilege drop failed error={error}");
             let _ = write_rejection(&mut writer, SessionChildErrorCode::PrivilegeDropFailed);
             return 1;
         }
@@ -818,9 +942,9 @@ pub(crate) fn run_child_process_with_dependencies(
             return 1;
         }
     };
-    if let Err(error) = validate_isolation_proof_with_allowed_fds(&proof, &allowed_terminal_fds) {
+    if let Err(error) = validate_isolation_proof_with_allowed_fds(&proof, &allowed_inherited_fds) {
         eprintln!(
-            "session child isolation policy failed error={error} effective_capability_count={} permitted_capability_count={} inheritable_capability_count={} ambient_capability_count={} bounding_capability_count={} securebits={} no_new_privs={} open_fd_count={}",
+            "session child isolation policy failed error={error} effective_capability_count={} permitted_capability_count={} inheritable_capability_count={} ambient_capability_count={} bounding_capability_count={} securebits={} no_new_privs={} open_fds={:?} allowed_inherited_fds={allowed_inherited_fds:?}",
             proof.capabilities.effective.len(),
             proof.capabilities.permitted.len(),
             proof.capabilities.inheritable.len(),
@@ -828,7 +952,7 @@ pub(crate) fn run_child_process_with_dependencies(
             proof.capabilities.bounding.len(),
             proof.securebits,
             proof.no_new_privs,
-            proof.open_fds.len(),
+            proof.open_fds,
         );
         let _ = write_rejection(&mut writer, SessionChildErrorCode::IsolationPolicyFailed);
         return 1;
@@ -837,12 +961,14 @@ pub(crate) fn run_child_process_with_dependencies(
     // synthetic PIDs and retain the response path for deterministic unit tests.
     let terminal_proof = if child_pid == std::process::id() {
         if unsafe { libc::setsid() } < 0 {
+            eprintln!("session child terminal setup failed stage=setsid");
             let _ = write_rejection(&mut writer, SessionChildErrorCode::SessionBoundaryFailed);
             return 1;
         }
         let terminal = match terminal.as_ref() {
             Some(terminal) if terminal.fd == 3 => terminal,
             _ => {
+                eprintln!("session child terminal setup failed stage=terminal_fd");
                 let _ = write_rejection(&mut writer, SessionChildErrorCode::TerminalProofFailed);
                 return 1;
             }
@@ -852,10 +978,12 @@ pub(crate) fn run_child_process_with_dependencies(
             || libc::major(stat.st_rdev) as u32 != terminal.device_major
             || libc::minor(stat.st_rdev) as u32 != terminal.device_minor
         {
+            eprintln!("session child terminal setup failed stage=fstat");
             let _ = write_rejection(&mut writer, SessionChildErrorCode::TerminalProofFailed);
             return 1;
         }
         if unsafe { libc::ioctl(terminal.fd, libc::TIOCSCTTY, 0) } < 0 {
+            eprintln!("session child terminal setup failed stage=tiocsctty");
             let _ = write_rejection(&mut writer, SessionChildErrorCode::TerminalProofFailed);
             return 1;
         }
@@ -863,6 +991,7 @@ pub(crate) fn run_child_process_with_dependencies(
         let foreground = unsafe { libc::tcsetpgrp(terminal.fd, libc::getpgrp()) };
         unsafe { libc::signal(libc::SIGTTOU, previous_sigttou) };
         if foreground != 0 {
+            eprintln!("session child terminal setup failed stage=tcsetpgrp");
             let _ = write_rejection(&mut writer, SessionChildErrorCode::TerminalProofFailed);
             return 1;
         }
@@ -870,6 +999,7 @@ pub(crate) fn run_child_process_with_dependencies(
         let pgid = unsafe { libc::tcgetpgrp(terminal.fd) };
         let pid = unsafe { libc::getpid() };
         if sid <= 0 || pgid <= 0 || sid as u32 != pid as u32 || pgid as u32 != pid as u32 {
+            eprintln!("session child terminal setup failed stage=terminal_identity");
             let _ = write_rejection(&mut writer, SessionChildErrorCode::TerminalProofFailed);
             return 1;
         }
@@ -954,10 +1084,22 @@ pub(crate) fn run_child_process_with_dependencies(
             terminal_proof,
         },
     };
-    if serde_json::to_writer(&mut writer, &response).is_err()
-        || writer.write_all(b"\n").is_err()
-        || writer.flush().is_err()
-    {
+    if let Err(error) = serde_json::to_writer(&mut writer, &response) {
+        eprintln!("session child ready response failed stage=serialize error={error}");
+        return 1;
+    }
+    if let Err(error) = writer.write_all(b"\n") {
+        eprintln!(
+            "session child ready response failed stage=write errno={:?} error={error}",
+            error.raw_os_error()
+        );
+        return 1;
+    }
+    if let Err(error) = writer.flush() {
+        eprintln!(
+            "session child ready response failed stage=flush errno={:?} error={error}",
+            error.raw_os_error()
+        );
         return 1;
     }
     if child_pid == std::process::id() {
@@ -974,6 +1116,38 @@ pub(crate) fn run_child_process_with_dependencies(
             };
         if !matches!(commit.message, SessionChildCommit::Exec) {
             return 1;
+        }
+        // Keep the status pipe open for the credential/handshake proof, then
+        // make it CLOEXEC only for the final user-session exec.
+        if unsafe { libc::fcntl(4, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+            let failure = FinalExecFailure {
+                stage: "status_pipe_cloexec".to_owned(),
+                errno: std::io::Error::last_os_error()
+                    .raw_os_error()
+                    .unwrap_or(libc::EIO),
+            };
+            if let Ok(bytes) = serde_json::to_vec(&failure) {
+                unsafe {
+                    libc::write(4, bytes.as_ptr().cast(), bytes.len());
+                }
+            }
+            return 1;
+        }
+        if let Some(context) = runtime.selinux_exec_context.as_ref() {
+            if LinuxSelinuxContextManager.apply_pending(context).is_err() {
+                let failure = FinalExecFailure {
+                    stage: "selinux_setexeccon".to_owned(),
+                    errno: std::io::Error::last_os_error()
+                        .raw_os_error()
+                        .unwrap_or(libc::EIO),
+                };
+                if let Ok(bytes) = serde_json::to_vec(&failure) {
+                    unsafe {
+                        libc::write(4, bytes.as_ptr().cast(), bytes.len());
+                    }
+                }
+                return 1;
+            }
         }
         if exec_final(&runtime.exec_plan).is_err() {
             let failure = FinalExecFailure {
