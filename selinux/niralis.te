@@ -65,6 +65,12 @@ userdom_relabel_user_ttys(niralis_t)
 allow niralis_t user_tty_device_t:chr_file ioctl;
 # The child enters the authenticated account's home before the final exec.
 userdom_search_user_home_dirs(niralis_t)
+# Before final setexeccon, the child proves connectivity to the existing
+# authenticated user's session bus.  It never launches or manages a bus.
+userdom_search_user_tmp_dirs(niralis_t)
+dbus_write_session_tmp_sock_files(niralis_t)
+dbus_stream_connect_session_bus(niralis_t)
+dbus_chat_session_bus(niralis_t)
 
 # niralisd sets the IPC socket ownership to root:<greeter primary gid>.
 allow niralis_t self:capability chown;
