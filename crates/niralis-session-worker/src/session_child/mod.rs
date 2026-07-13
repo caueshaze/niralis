@@ -811,11 +811,16 @@ pub(crate) fn run_child_process_with_dependencies(
         let _ = write_rejection(&mut writer, SessionChildErrorCode::RootUidDisallowed);
         return 1;
     }
-    let allowed_terminal_fds = terminal
+    let mut allowed_inherited_fds = terminal
         .as_ref()
         .map_or_else(Vec::new, |value| vec![value.fd]);
+    // FD 4 is the parent's CLOEXEC status pipe.  It is needed until the
+    // commit/exec handoff completes, then is closed automatically by execve.
+    if child_pid == std::process::id() {
+        allowed_inherited_fds.push(4);
+    }
     if fd_sanitizer
-        .sanitize_with_allowlist(&allowed_terminal_fds)
+        .sanitize_with_allowlist(&allowed_inherited_fds)
         .is_err()
     {
         let _ = write_rejection(&mut writer, SessionChildErrorCode::FdSanitizationFailed);
@@ -846,7 +851,7 @@ pub(crate) fn run_child_process_with_dependencies(
             return 1;
         }
     };
-    if let Err(error) = validate_isolation_proof_with_allowed_fds(&proof, &allowed_terminal_fds) {
+    if let Err(error) = validate_isolation_proof_with_allowed_fds(&proof, &allowed_inherited_fds) {
         eprintln!(
             "session child isolation policy failed error={error} effective_capability_count={} permitted_capability_count={} inheritable_capability_count={} ambient_capability_count={} bounding_capability_count={} securebits={} no_new_privs={} open_fd_count={}",
             proof.capabilities.effective.len(),
