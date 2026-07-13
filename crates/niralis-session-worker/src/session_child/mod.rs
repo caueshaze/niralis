@@ -22,8 +22,8 @@ use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
 use crate::isolation::{
-    validate_isolation_proof, validate_isolation_proof_with_allowed_fds, InheritedFdSanitizer,
-    LinuxInheritedFdSanitizer, LinuxPostDropAuditor, PostDropAuditor, PostDropIsolationProof,
+    validate_isolation_proof_with_allowed_fds, InheritedFdSanitizer, LinuxInheritedFdSanitizer,
+    LinuxPostDropAuditor, PostDropAuditor, PostDropIsolationProof,
 };
 use crate::privilege_drop::{
     AppliedCredentials, LibcPrivilegeDropper, PrivilegeDropError, PrivilegeDropTarget,
@@ -256,7 +256,7 @@ impl SessionChildRunner for ProcessSessionChildRunner {
             }
             return Err(SessionChildError::ExitFailed);
         }
-        let report = validate_ready_response(response.message, &expectation, pid)?;
+        let report = validate_ready_response(response.message, &expectation, pid, true)?;
         attempt.send_commit(deadline)?;
         match attempt.wait_exec_status(deadline)? {
             ExecStatus::Success => {}
@@ -361,7 +361,15 @@ fn validate_ready_response(
     response: SessionChildResponse,
     expectation: &SessionChildExpectation,
     pid: u32,
+    allows_status_pipe: bool,
 ) -> Result<SessionChildReport, SessionChildError> {
+    let mut allowed_inherited_fds = expectation
+        .terminal
+        .as_ref()
+        .map_or_else(Vec::new, |terminal| vec![terminal.fd]);
+    if allows_status_pipe {
+        allowed_inherited_fds.push(4);
+    }
     match response {
         SessionChildResponse::Ready {
             canonical_username,
@@ -379,8 +387,15 @@ fn validate_ready_response(
             && child_pid == pid
             && applied_credentials
                 == SessionChildUnixCredentials::from(&expectation.target_credentials)
-            && validate_isolation_proof(&PostDropIsolationProof::from(isolation_proof.clone()))
-                .is_ok()
+            && {
+                let proof = PostDropIsolationProof::from(isolation_proof.clone());
+                let present_allowed_fds = allowed_inherited_fds
+                    .iter()
+                    .copied()
+                    .filter(|fd| proof.open_fds.binary_search(fd).is_ok())
+                    .collect::<Vec<_>>();
+                validate_isolation_proof_with_allowed_fds(&proof, &present_allowed_fds).is_ok()
+            }
             && credential_proof.real_uid == expectation.target_credentials.uid
             && credential_proof.effective_uid == expectation.target_credentials.uid
             && credential_proof.saved_uid == expectation.target_credentials.uid
@@ -658,9 +673,24 @@ fn read_exec_status(fd: OwnedFd, timeout: Duration) -> Result<ExecStatus, Sessio
     let millis = timeout.as_millis().min(i32::MAX as u128) as i32;
     let ready = unsafe { libc::poll(&mut pollfd, 1, millis) };
     if ready == 0 {
+        warn!(
+            timeout_ms = millis,
+            "timed out waiting for the session child exec status pipe"
+        );
         return Err(SessionChildError::TimedOut);
     }
-    if ready < 0 || pollfd.revents & (libc::POLLERR | libc::POLLNVAL) != 0 {
+    if ready < 0 {
+        warn!(
+            errno = ?std::io::Error::last_os_error().raw_os_error(),
+            "polling the session child exec status pipe failed"
+        );
+        return Err(SessionChildError::IoFailed);
+    }
+    if pollfd.revents & (libc::POLLERR | libc::POLLNVAL) != 0 {
+        warn!(
+            revents = pollfd.revents,
+            "session child exec status pipe reported an error"
+        );
         return Err(SessionChildError::IoFailed);
     }
     let mut payload = [0_u8; 512];
@@ -669,6 +699,10 @@ fn read_exec_status(fd: OwnedFd, timeout: Duration) -> Result<ExecStatus, Sessio
         return Ok(ExecStatus::Success);
     }
     if count < 0 {
+        warn!(
+            errno = ?std::io::Error::last_os_error().raw_os_error(),
+            "reading the session child exec status pipe failed"
+        );
         return Err(SessionChildError::IoFailed);
     }
     let failure = serde_json::from_slice::<FinalExecFailure>(&payload[..count as usize])
@@ -850,7 +884,7 @@ pub(crate) fn run_child_process_with_dependencies(
     };
     if let Err(error) = validate_isolation_proof_with_allowed_fds(&proof, &allowed_inherited_fds) {
         eprintln!(
-            "session child isolation policy failed error={error} effective_capability_count={} permitted_capability_count={} inheritable_capability_count={} ambient_capability_count={} bounding_capability_count={} securebits={} no_new_privs={} open_fd_count={}",
+            "session child isolation policy failed error={error} effective_capability_count={} permitted_capability_count={} inheritable_capability_count={} ambient_capability_count={} bounding_capability_count={} securebits={} no_new_privs={} open_fds={:?} allowed_inherited_fds={allowed_inherited_fds:?}",
             proof.capabilities.effective.len(),
             proof.capabilities.permitted.len(),
             proof.capabilities.inheritable.len(),
@@ -858,7 +892,7 @@ pub(crate) fn run_child_process_with_dependencies(
             proof.capabilities.bounding.len(),
             proof.securebits,
             proof.no_new_privs,
-            proof.open_fds.len(),
+            proof.open_fds,
         );
         let _ = write_rejection(&mut writer, SessionChildErrorCode::IsolationPolicyFailed);
         return 1;

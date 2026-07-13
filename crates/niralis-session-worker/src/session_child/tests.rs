@@ -377,7 +377,7 @@ fn ready_binding_rejects_each_identity_or_credential_mismatch() {
         };
 
         assert_eq!(
-            super::validate_ready_response(response, &expectation, 42),
+            super::validate_ready_response(response, &expectation, 42, false),
             Err(super::SessionChildError::ProtocolFailed),
             "mismatch in {field} must be rejected"
         );
