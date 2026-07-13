@@ -60,15 +60,14 @@ gen_require(`
 ')
 corecmd_bin_spec_domtrans(niralis_t, unconfined_t)
 # pam_selinux selected unconfined_u:unconfined_r:unconfined_t for this local
-# account.  The base policy has this role transition for unconfined_exec_t,
-# while Niri is intentionally labelled bin_t; permit only that equivalent
-# role transition for the final Niri exec.
+# account.  The child supplies that complete context with setexeccon() before
+# execve(), so RBAC checks the final process type, rather than Niri's bin_t
+# file label.
 gen_require(`
     role system_r;
     role unconfined_r;
-    type bin_t;
 ')
-role_transition system_r bin_t unconfined_r;
+role_transition system_r unconfined_t unconfined_r;
 allow unconfined_t niralis_t:fd use;
 allow unconfined_t niralis_t:fifo_file rw_file_perms;
 allow unconfined_t niralis_t:process sigchld;
