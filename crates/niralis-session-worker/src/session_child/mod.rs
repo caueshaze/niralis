@@ -760,8 +760,14 @@ fn wait_result<T: Send + 'static>(
     let timeout = remaining(deadline)?;
     match receiver.recv_timeout(timeout) {
         Ok(result) => result,
-        Err(mpsc::RecvTimeoutError::Timeout) => Err(SessionChildError::TimedOut),
-        Err(mpsc::RecvTimeoutError::Disconnected) => Err(SessionChildError::IoFailed),
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            warn!("timed out waiting for a private session-child message");
+            Err(SessionChildError::TimedOut)
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            warn!("private session-child response channel disconnected");
+            Err(SessionChildError::IoFailed)
+        }
     }
 }
 
@@ -769,9 +775,15 @@ fn read_child_response(reader: &mut impl Read) -> Result<Vec<u8>, SessionChildEr
     let mut bytes = Vec::new();
     let mut byte = [0u8; 1];
     loop {
-        reader
-            .read_exact(&mut byte)
-            .map_err(|_| SessionChildError::IoFailed)?;
+        reader.read_exact(&mut byte).map_err(|error| {
+            warn!(
+                errno = ?error.raw_os_error(),
+                error = %error,
+                received_bytes = bytes.len(),
+                "reading a private session-child message failed"
+            );
+            SessionChildError::IoFailed
+        })?;
         bytes.push(byte[0]);
         if byte[0] == b'\n' {
             break;
