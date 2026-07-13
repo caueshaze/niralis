@@ -525,9 +525,6 @@ impl SessionChildAttempt {
                 if libc::dup2(status_raw, 4) < 0 {
                     return Err(std::io::Error::last_os_error());
                 }
-                if libc::fcntl(4, libc::F_SETFD, libc::FD_CLOEXEC) < 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
                 Ok(())
             });
         }
@@ -1012,6 +1009,22 @@ pub(crate) fn run_child_process_with_dependencies(
                 _ => return 1,
             };
         if !matches!(commit.message, SessionChildCommit::Exec) {
+            return 1;
+        }
+        // Keep the status pipe open for the credential/handshake proof, then
+        // make it CLOEXEC only for the final user-session exec.
+        if unsafe { libc::fcntl(4, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+            let failure = FinalExecFailure {
+                stage: "status_pipe_cloexec".to_owned(),
+                errno: std::io::Error::last_os_error()
+                    .raw_os_error()
+                    .unwrap_or(libc::EIO),
+            };
+            if let Ok(bytes) = serde_json::to_vec(&failure) {
+                unsafe {
+                    libc::write(4, bytes.as_ptr().cast(), bytes.len());
+                }
+            }
             return 1;
         }
         if let Some(context) = runtime.selinux_exec_context.as_ref() {
