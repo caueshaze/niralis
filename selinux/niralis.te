@@ -52,6 +52,16 @@ selinux_compute_relabel_context(niralis_t)
 # The session child applies PAM's pending exec context, then explicitly
 # transitions through /usr/bin/niri (bin_t) into the authenticated user domain.
 userdom_bin_spec_domtrans_unpriv_users(niralis_t)
+# On this targeted policy, pam_selinux maps the local account to unconfined_t,
+# which is not an unpriv_userdomain member. Keep that explicit transition
+# narrow and retain only the inherited descriptor relationships it needs.
+gen_require(`
+    type unconfined_t;
+')
+corecmd_bin_spec_domtrans(niralis_t, unconfined_t)
+allow unconfined_t niralis_t:fd use;
+allow unconfined_t niralis_t:fifo_file rw_file_perms;
+allow unconfined_t niralis_t:process sigchld;
 
 # sd_pid_get_session() reads the worker's dynamically-labelled
 # /proc/<pid>/cgroup and PID 1's cgroup to resolve the namespace root.
