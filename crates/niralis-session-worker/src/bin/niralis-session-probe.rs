@@ -37,16 +37,15 @@ fn main() {
     } else {
         None
     };
+    let terminal_requested = terminal_args.is_some();
     let terminal_proof = terminal_args.and_then(|(seat, vtnr, major, minor)| {
         let (Some(vtnr), Some(major), Some(minor)) = (vtnr, major, minor) else {
             return None;
         };
-        let fd = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open("/dev/tty")
-            .ok()?;
-        let fd_number = std::os::fd::AsRawFd::as_raw_fd(&fd);
+        // FD 3 is the only deliberate terminal capability inherited from the
+        // child. Do not reopen /dev/tty here: a new descriptor would not prove
+        // the exact capability that crossed the privileged boundary.
+        let fd_number = 3;
         let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
         if unsafe { libc::fstat(fd_number, &mut stat) } < 0
             || libc::major(stat.st_rdev) as u32 != major
@@ -226,6 +225,13 @@ fn main() {
         std::process::exit(1);
     }
     drop(out);
+
+    // The terminal has been proved and is no longer needed as an inherited
+    // descriptor. Keep the controlling terminal association, but ensure the
+    // final compositor cannot inherit FD 3.
+    if terminal_requested && unsafe { libc::close(3) } < 0 {
+        std::process::exit(1);
+    }
 
     if !read_commit() {
         std::process::exit(1);

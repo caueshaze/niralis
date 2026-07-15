@@ -60,9 +60,11 @@ client or inherited from the worker environment.
 The real child receives a single deliberate terminal capability at fixed FD 3.
 All other inherited descriptors remain fail-closed. After `setsid()`, the
 child acquires the exact terminal with `TIOCSCTTY`, establishes its own
-foreground process group, verifies terminal SID/PGID and device identity, and
-closes FD 3 before the final strict FD audit. The worker validates logind Seat
-and VT properties against the same lease before emitting `Started`.
+foreground process group, and preserves FD 3 through the post-exec probe's
+terminal proof. The probe closes FD 3 immediately after emitting `Ready` and
+before `CommitExec`, so the final compositor does not inherit it. The worker
+validates logind Seat and VT properties against the same lease before emitting
+`Started`.
 
 Normal tests use fake seat/VT leases and never touch `/dev/console`, activate a
 VT, wait for an active VT, or disallocate a real console. Any physical VT smoke

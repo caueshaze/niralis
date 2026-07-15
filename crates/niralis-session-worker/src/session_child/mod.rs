@@ -1144,7 +1144,6 @@ pub(crate) fn run_child_process_with_dependencies(
             let _ = write_rejection(&mut writer, SessionChildErrorCode::TerminalProofFailed);
             return 1;
         }
-        unsafe { libc::close(terminal.fd) };
         Some(SessionChildTerminalProof {
             seat: terminal.seat.clone(),
             vtnr: terminal.vtnr,
