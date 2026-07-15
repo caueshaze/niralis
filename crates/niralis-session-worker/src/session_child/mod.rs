@@ -589,7 +589,70 @@ fn validate_ready_response(
             })
         }
         SessionChildResponse::Rejected { .. } => Err(SessionChildError::ProtocolFailed),
-        SessionChildResponse::Ready { .. } => Err(SessionChildError::ProtocolFailed),
+        SessionChildResponse::Ready {
+            canonical_username,
+            session_id,
+            child_pid,
+            applied_credentials,
+            credential_proof,
+            isolation_proof,
+            process_identity,
+            runtime_environment,
+            exec_probe_version,
+            terminal_proof,
+        } => {
+            let proof = PostDropIsolationProof::from(isolation_proof.clone());
+            let present_allowed_fds = allowed_inherited_fds
+                .iter()
+                .copied()
+                .filter(|fd| proof.open_fds.binary_search(fd).is_ok())
+                .collect::<Vec<_>>();
+            let credential_proof_matches = credential_proof.real_uid
+                == expectation.target_credentials.uid
+                && credential_proof.effective_uid == expectation.target_credentials.uid
+                && credential_proof.saved_uid == expectation.target_credentials.uid
+                && credential_proof.real_gid == expectation.target_credentials.gid
+                && credential_proof.effective_gid == expectation.target_credentials.gid
+                && credential_proof.saved_gid == expectation.target_credentials.gid
+                && normalized_groups(
+                    credential_proof.supplementary_gids,
+                    expectation.target_credentials.gid,
+                ) == expectation.target_credentials.supplementary_gids;
+            let terminal_proof_matches = match (&expectation.terminal, &terminal_proof) {
+                (None, None) => true,
+                (Some(expected), Some(actual)) => {
+                    actual.seat == expected.seat
+                        && actual.vtnr == expected.vtnr
+                        && actual.fd == expected.fd
+                        && actual.device_major == expected.device_major
+                        && actual.device_minor == expected.device_minor
+                        && actual.controlling_sid == pid
+                        && actual.foreground_pgid == pid
+                }
+                _ => false,
+            };
+            warn!(
+                canonical_username_matches = canonical_username == expectation.canonical_username,
+                session_id_matches = session_id == expectation.session_id,
+                child_pid_matches = child_pid == pid,
+                applied_credentials_match = applied_credentials
+                    == SessionChildUnixCredentials::from(&expectation.target_credentials),
+                credential_proof_matches,
+                isolation_proof_valid =
+                    validate_isolation_proof_with_allowed_fds(&proof, &present_allowed_fds).is_ok(),
+                process_identity_matches = process_identity.pid == pid
+                    && process_identity.sid == pid
+                    && process_identity.pgid == pid,
+                exec_probe_version_matches = exec_probe_version == SESSION_EXEC_PROBE_VERSION,
+                runtime_user_matches = runtime_environment.user == expectation.canonical_username
+                    && runtime_environment.logname == expectation.canonical_username,
+                runtime_path_matches = runtime_environment.path == DEFAULT_SESSION_PATH,
+                runtime_cwd_matches = runtime_environment.cwd == expectation.runtime.home,
+                terminal_proof_matches,
+                "session child Ready response failed strict validation"
+            );
+            Err(SessionChildError::ProtocolFailed)
+        }
     }
 }
 
