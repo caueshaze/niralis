@@ -1016,10 +1016,11 @@ pub(crate) fn run_child_process_with_dependencies(
     };
     if let Err(error) = validate_isolation_proof_with_allowed_fds(&proof, &allowed_inherited_fds) {
         eprintln!(
-            "session child isolation policy failed error={error} effective_capability_count={} permitted_capability_count={} inheritable_capability_count={} ambient_capability_count={} bounding_capability_count={} securebits={} no_new_privs={} open_fds={:?} allowed_inherited_fds={allowed_inherited_fds:?}",
+            "session child isolation policy failed error={error} effective_capability_count={} permitted_capability_count={} inheritable_capability_count={} inheritable_capabilities={:?} ambient_capability_count={} bounding_capability_count={} securebits={} no_new_privs={} open_fds={:?} allowed_inherited_fds={allowed_inherited_fds:?}",
             proof.capabilities.effective.len(),
             proof.capabilities.permitted.len(),
             proof.capabilities.inheritable.len(),
+            proof.capabilities.inheritable,
             proof.capabilities.ambient.len(),
             proof.capabilities.bounding.len(),
             proof.securebits,
