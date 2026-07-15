@@ -121,9 +121,10 @@ term_use_unallocated_ttys(niralis_t)
 # pam_selinux hands the allocated VT to the authenticated user domain.
 term_relabel_unallocated_ttys(niralis_t)
 userdom_relabel_user_ttys(niralis_t)
-# Between credential drop and final setexeccon, the child makes the
-# PAM-labelled user VT its controlling terminal.
-allow niralis_t user_tty_device_t:chr_file ioctl;
+# A later session attempt may receive the same VT while it still carries the
+# PAM user-tty label. Reopen only that user tty type; this does not grant PTY
+# or arbitrary device access.
+userdom_use_user_ttys(niralis_t)
 # The child enters the authenticated account's home before the final exec.
 userdom_search_user_home_dirs(niralis_t)
 # Before final setexeccon, the child proves connectivity to the existing
