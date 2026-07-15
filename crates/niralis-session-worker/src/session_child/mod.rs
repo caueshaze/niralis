@@ -3,13 +3,13 @@ pub use protocol::{
     FinalExecFailure, SessionChildCommit, SessionChildCredentialProof, SessionChildEnvelope,
     SessionChildErrorCode, SessionChildIsolationProof, SessionChildResponse,
     SessionChildTerminalContext, SessionChildTerminalProof, SessionChildUnixCredentials,
-    SessionProcessIdentityProof, SessionRuntimeEnvironmentProof, SESSION_CHILD_PROTOCOL_VERSION,
-    SESSION_EXEC_PROBE_VERSION,
+    SessionProbeHandoff, SessionProcessIdentityProof, SessionRuntimeEnvironmentProof,
+    SESSION_CHILD_PROTOCOL_VERSION, SESSION_EXEC_PROBE_VERSION,
 };
 pub use protocol::{SessionChildRuntimeContext, SessionChildUnixPath};
 
-use std::io::{Read, Write};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::io::{Read, Seek, Write};
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -29,7 +29,6 @@ use crate::privilege_drop::{
     AppliedCredentials, LibcPrivilegeDropper, PrivilegeDropError, PrivilegeDropTarget,
     PrivilegeDropper,
 };
-use crate::selinux::{LinuxSelinuxContextManager, SelinuxContextManager};
 use protocol::SessionChildRequest;
 
 pub const SESSION_CHILD_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -101,6 +100,12 @@ pub enum SessionChildError {
     ExitFailed,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionChildWaitEvent {
+    Exited(std::process::ExitStatus),
+    ControlReady,
+}
+
 pub trait SessionChildRunner: Send + Sync {
     fn run_child(
         &self,
@@ -109,6 +114,13 @@ pub trait SessionChildRunner: Send + Sync {
 
     fn wait_for_child(&self) -> Result<std::process::ExitStatus, SessionChildError> {
         Ok(std::process::ExitStatus::from_raw(0))
+    }
+
+    fn wait_for_child_or_control(
+        &self,
+        _control_fd: Option<RawFd>,
+    ) -> Result<SessionChildWaitEvent, SessionChildError> {
+        self.wait_for_child().map(SessionChildWaitEvent::Exited)
     }
 
     fn poll_child(&self) -> Result<Option<std::process::ExitStatus>, SessionChildError> {
@@ -165,6 +177,7 @@ pub struct ProcessSessionChildRunner {
 struct LiveSessionChild {
     child: Child,
     pgid: u32,
+    pidfd: OwnedFd,
 }
 
 impl ProcessSessionChildRunner {
@@ -306,22 +319,69 @@ impl SessionChildRunner for ProcessSessionChildRunner {
             attempt.kill_and_reap();
             return Err(SessionChildError::ExitFailed);
         }
-        let child = attempt.take_child();
+        let mut child = attempt.take_child();
         let pgid = report.process_identity.pgid;
+        let pidfd = match open_pidfd(child.id()) {
+            Some(pidfd) => pidfd,
+            None => {
+                kill_and_reap(&mut child);
+                return Err(SessionChildError::IoFailed);
+            }
+        };
         *self
             .live_child
             .lock()
-            .map_err(|_| SessionChildError::IoFailed)? = Some(LiveSessionChild { child, pgid });
+            .map_err(|_| SessionChildError::IoFailed)? =
+            Some(LiveSessionChild { child, pgid, pidfd });
         Ok(report)
     }
 
     fn wait_for_child(&self) -> Result<std::process::ExitStatus, SessionChildError> {
-        loop {
-            if let Some(status) = self.poll_child()? {
-                return Ok(status);
-            }
-            thread::sleep(Duration::from_millis(25));
+        let mut guard = self
+            .live_child
+            .lock()
+            .map_err(|_| SessionChildError::IoFailed)?;
+        let mut live = guard.take().ok_or(SessionChildError::IoFailed)?;
+        live.child.wait().map_err(|_| SessionChildError::IoFailed)
+    }
+
+    fn wait_for_child_or_control(
+        &self,
+        control_fd: Option<RawFd>,
+    ) -> Result<SessionChildWaitEvent, SessionChildError> {
+        let mut guard = self
+            .live_child
+            .lock()
+            .map_err(|_| SessionChildError::IoFailed)?;
+        let live = guard.as_mut().ok_or(SessionChildError::IoFailed)?;
+        let mut fds = [
+            libc::pollfd {
+                fd: live.pidfd.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: control_fd.unwrap_or(-1),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+        ];
+        let count = if control_fd.is_some() { 2 } else { 1 };
+        let result = unsafe { libc::poll(fds.as_mut_ptr(), count, -1) };
+        if result < 0 {
+            return Err(SessionChildError::IoFailed);
         }
+        if control_fd.is_some() && fds[1].revents & libc::POLLIN != 0 {
+            return Ok(SessionChildWaitEvent::ControlReady);
+        }
+        if fds[0].revents & (libc::POLLIN | libc::POLLHUP) == 0 {
+            return Err(SessionChildError::IoFailed);
+        }
+        let mut live = guard.take().ok_or(SessionChildError::IoFailed)?;
+        live.child
+            .wait()
+            .map(SessionChildWaitEvent::Exited)
+            .map_err(|_| SessionChildError::IoFailed)
     }
 
     fn poll_child(&self) -> Result<Option<std::process::ExitStatus>, SessionChildError> {
@@ -383,6 +443,18 @@ fn terminate_group(pgid: u32, signal: libc::c_int) -> Result<(), SessionChildErr
         Ok(())
     } else {
         Err(SessionChildError::IoFailed)
+    }
+}
+
+fn open_pidfd(pid: u32) -> Option<OwnedFd> {
+    if pid == 0 || pid > libc::pid_t::MAX as u32 {
+        return None;
+    }
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid as libc::pid_t, 0) };
+    if fd < 0 {
+        None
+    } else {
+        Some(unsafe { OwnedFd::from_raw_fd(fd as RawFd) })
     }
 }
 
@@ -1038,6 +1110,23 @@ pub(crate) fn run_child_process_with_dependencies(
             return 1;
         }
     }
+    // The real child must not claim readiness before the post-exec probe has
+    // re-audited the process. Unit-only callers pass a synthetic PID and keep
+    // the response construction below as a narrow seam for child-core tests.
+    if child_pid == std::process::id() {
+        if exec_probe(
+            &runtime,
+            &canonical_username,
+            &session_id,
+            terminal.as_ref(),
+        )
+        .is_err()
+        {
+            let _ = write_rejection(&mut writer, SessionChildErrorCode::ExecFailed);
+        }
+        return 1;
+    }
+
     let response = SessionChildEnvelope {
         version: SESSION_CHILD_PROTOCOL_VERSION,
         message: SessionChildResponse::Ready {
@@ -1100,69 +1189,6 @@ pub(crate) fn run_child_process_with_dependencies(
             "session child ready response failed stage=flush errno={:?} error={error}",
             error.raw_os_error()
         );
-        return 1;
-    }
-    if child_pid == std::process::id() {
-        let commit_bytes = match read_child_response(&mut reader) {
-            Ok(bytes) => bytes,
-            Err(_) => return 1,
-        };
-        let commit: SessionChildEnvelope<SessionChildCommit> =
-            match serde_json::from_slice::<SessionChildEnvelope<SessionChildCommit>>(
-                &commit_bytes[..commit_bytes.len().saturating_sub(1)],
-            ) {
-                Ok(commit) if commit.version == SESSION_CHILD_PROTOCOL_VERSION => commit,
-                _ => return 1,
-            };
-        if !matches!(commit.message, SessionChildCommit::Exec) {
-            return 1;
-        }
-        // Keep the status pipe open for the credential/handshake proof, then
-        // make it CLOEXEC only for the final user-session exec.
-        if unsafe { libc::fcntl(4, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
-            let failure = FinalExecFailure {
-                stage: "status_pipe_cloexec".to_owned(),
-                errno: std::io::Error::last_os_error()
-                    .raw_os_error()
-                    .unwrap_or(libc::EIO),
-            };
-            if let Ok(bytes) = serde_json::to_vec(&failure) {
-                unsafe {
-                    libc::write(4, bytes.as_ptr().cast(), bytes.len());
-                }
-            }
-            return 1;
-        }
-        if let Some(context) = runtime.selinux_exec_context.as_ref() {
-            if LinuxSelinuxContextManager.apply_pending(context).is_err() {
-                let failure = FinalExecFailure {
-                    stage: "selinux_setexeccon".to_owned(),
-                    errno: std::io::Error::last_os_error()
-                        .raw_os_error()
-                        .unwrap_or(libc::EIO),
-                };
-                if let Ok(bytes) = serde_json::to_vec(&failure) {
-                    unsafe {
-                        libc::write(4, bytes.as_ptr().cast(), bytes.len());
-                    }
-                }
-                return 1;
-            }
-        }
-        if exec_final(&runtime.exec_plan).is_err() {
-            let failure = FinalExecFailure {
-                stage: "execve".to_owned(),
-                errno: std::io::Error::last_os_error()
-                    .raw_os_error()
-                    .unwrap_or(libc::EIO),
-            };
-            if let Ok(bytes) = serde_json::to_vec(&failure) {
-                unsafe {
-                    libc::write(4, bytes.as_ptr().cast(), bytes.len());
-                }
-            }
-            return 1;
-        }
         return 1;
     }
     0
@@ -1239,40 +1265,74 @@ fn install_runtime_environment(
     Ok(())
 }
 
-fn exec_final(plan: &niralis_session::SessionExecPlan) -> Result<(), ()> {
-    plan.validate()?;
-    let executable_path =
-        std::path::PathBuf::from(std::ffi::OsString::from_vec(plan.executable.clone()));
-    use std::os::unix::ffi::OsStringExt;
-    use std::os::unix::fs::PermissionsExt;
-    let metadata = std::fs::metadata(&executable_path).map_err(|_| ())?;
-    if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
+const PROBE_HANDOFF_FD: libc::c_int = 5;
+
+fn exec_probe(
+    runtime: &SessionChildRuntimeContext,
+    username: &str,
+    session_id: &str,
+    terminal: Option<&SessionChildTerminalContext>,
+) -> Result<(), ()> {
+    let probe = runtime.probe_path.to_path_buf().map_err(|_| ())?;
+    if !probe.is_absolute() {
         return Err(());
     }
-    let executable = std::ffi::CString::new(plan.executable.clone()).map_err(|_| ())?;
-    let args = plan
-        .argv
-        .iter()
-        .map(|arg| std::ffi::CString::new(arg.clone()).map_err(|_| ()))
-        .collect::<Result<Vec<_>, _>>()?;
-    let mut argv = args.iter().map(|arg| arg.as_ptr()).collect::<Vec<_>>();
-    argv.push(std::ptr::null());
-    let mut env = Vec::new();
-    for (key, value) in std::env::vars_os() {
-        use std::os::unix::ffi::OsStrExt;
-        let mut bytes = key.as_os_str().as_bytes().to_vec();
-        bytes.push(b'=');
-        bytes.extend_from_slice(value.as_os_str().as_bytes());
-        env.push(std::ffi::CString::new(bytes).map_err(|_| ())?);
+    let handoff = SessionProbeHandoff {
+        exec_plan: runtime.exec_plan.clone(),
+        selinux_exec_context: runtime.selinux_exec_context.clone(),
+    };
+    let payload = serde_json::to_vec(&handoff).map_err(|_| ())?;
+    if payload.is_empty() || payload.len() > protocol::MAX_SESSION_CHILD_MESSAGE_BYTES {
+        return Err(());
     }
-    let mut envp = env.iter().map(|entry| entry.as_ptr()).collect::<Vec<_>>();
-    envp.push(std::ptr::null());
-    let result = unsafe { libc::execve(executable.as_ptr(), argv.as_ptr(), envp.as_ptr()) };
-    if result == -1 {
-        Err(())
-    } else {
+    let name = std::ffi::CString::new("niralis-probe-handoff").map_err(|_| ())?;
+    let handoff_fd =
+        unsafe { libc::memfd_create(name.as_ptr(), libc::MFD_ALLOW_SEALING | libc::MFD_CLOEXEC) };
+    if handoff_fd < 0 {
+        return Err(());
+    }
+    let result = (|| {
+        let mut file = unsafe { std::fs::File::from_raw_fd(handoff_fd) };
+        file.write_all(&payload).map_err(|_| ())?;
+        file.sync_all().map_err(|_| ())?;
+        if file.rewind().is_err() {
+            return Err(());
+        }
+        let seals =
+            libc::F_SEAL_SEAL | libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_WRITE;
+        if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_ADD_SEALS, seals) } < 0 {
+            return Err(());
+        }
+        let source = file.into_raw_fd();
+        if unsafe { libc::dup2(source, PROBE_HANDOFF_FD) } < 0 {
+            unsafe { libc::close(source) };
+            return Err(());
+        }
+        if source != PROBE_HANDOFF_FD {
+            unsafe { libc::close(source) };
+        }
+        if unsafe { libc::fcntl(PROBE_HANDOFF_FD, libc::F_SETFD, 0) } < 0 {
+            return Err(());
+        }
         Ok(())
+    })();
+    result?;
+
+    let mut command = Command::new(probe);
+    command.arg(username).arg(session_id);
+    if let Some(terminal) = terminal {
+        command
+            .arg("--terminal-seat")
+            .arg(&terminal.seat)
+            .arg("--terminal-vtnr")
+            .arg(terminal.vtnr.to_string())
+            .arg("--terminal-major")
+            .arg(terminal.device_major.to_string())
+            .arg("--terminal-minor")
+            .arg(terminal.device_minor.to_string());
     }
+    let _ = std::os::unix::process::CommandExt::exec(&mut command);
+    Err(())
 }
 
 #[cfg(test)]

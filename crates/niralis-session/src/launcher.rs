@@ -391,6 +391,7 @@ impl WorkerSessionLauncher {
                 worker_id: String::new(),
             },
             expected_started_session(&request),
+            true,
         )
         .map(|(session, _)| session)
     }
@@ -415,6 +416,7 @@ impl WorkerSessionLauncher {
                 worker_id: String::new(),
             },
             expected_started_session(&request),
+            true,
         )
     }
 
@@ -422,9 +424,12 @@ impl WorkerSessionLauncher {
         &self,
         mut request: WorkerRequest,
         expected: StartedSession,
+        install_control: bool,
     ) -> Result<(StartedSession, RuntimeSessionId), SessionError> {
         let (control_dir, control_path, worker_id) = create_control_endpoint()?;
-        install_control_request(&mut request, control_path.clone(), worker_id.clone());
+        if install_control {
+            install_control_request(&mut request, control_path.clone(), worker_id.clone());
+        }
         let deadline = Instant::now() + self.timeout;
         let mut attempt =
             WorkerAttempt::spawn(&self.worker_path, &self.worker_environment, request)?;
@@ -507,6 +512,7 @@ impl SessionLauncher for WorkerSessionLauncher {
                 request: request.clone(),
             },
             expected_started_session(&request),
+            true,
         )
         .map(|(session, _)| session)
     }

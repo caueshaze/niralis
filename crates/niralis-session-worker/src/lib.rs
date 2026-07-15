@@ -35,11 +35,12 @@ pub use selinux::{
     LinuxSelinuxContextManager, PamSelinuxExecContext, SelinuxContextManager, SelinuxError,
 };
 pub use session_child::{
-    ProcessSessionChildRunner, ProcessSessionChildRunnerFactory, SessionChildCredentialProof,
-    SessionChildEnvelope, SessionChildError, SessionChildErrorCode, SessionChildExpectation,
-    SessionChildIsolationProof, SessionChildReport, SessionChildResponse, SessionChildRunner,
-    SessionChildRunnerFactory, SessionChildRuntimeContext, SessionChildTerminalContext,
-    SessionChildTerminalProof, SessionChildUnixCredentials, SessionChildUnixPath,
+    FinalExecFailure, ProcessSessionChildRunner, ProcessSessionChildRunnerFactory,
+    SessionChildCommit, SessionChildCredentialProof, SessionChildEnvelope, SessionChildError,
+    SessionChildErrorCode, SessionChildExpectation, SessionChildIsolationProof, SessionChildReport,
+    SessionChildResponse, SessionChildRunner, SessionChildRunnerFactory,
+    SessionChildRuntimeContext, SessionChildTerminalContext, SessionChildTerminalProof,
+    SessionChildUnixCredentials, SessionChildUnixPath, SessionProbeHandoff,
     SessionProcessIdentityProof, SessionRuntimeEnvironmentProof, SESSION_CHILD_PROTOCOL_VERSION,
     SESSION_EXEC_PROBE_VERSION,
 };

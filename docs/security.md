@@ -314,14 +314,17 @@ does not execute a compositor or initialize a desktop session.
 
 The session configuration contains a separately trusted `probe_path`. The
 worker passes canonical home, shell, session type, and the probe path through a
-bounded byte-safe child protocol v5. After descriptor sanitization, credential
+bounded byte-safe child protocol v9. After descriptor sanitization, credential
 drop, isolation audit, and `setsid()`, the child changes to the canonical HOME,
-constructs only `HOME`, `USER`, `LOGNAME`, `SHELL`, `PATH`, and
-`XDG_SESSION_TYPE`, and replaces itself with `niralis-session-probe` using
-`exec`. The probe preserves the original PID, reaudits credentials and
-isolation, verifies SID/PGID, cwd, and the explicit environment, then emits
-`Ready`. The worker accepts it only when every proof is bound to the spawned
-PID and expected canonical identity.
+constructs the explicit graphical environment, and replaces itself with
+`niralis-session-probe` using `exec`. A sealed anonymous descriptor carries
+only the already validated final execution plan and pending SELinux exec
+context to the probe; it is closed before `Ready` is emitted. The probe
+preserves the original PID, reaudits credentials and isolation, verifies
+SID/PGID, cwd, terminal, and the explicit environment, then emits `Ready`.
+Only after the worker validates that post-exec proof and sends `CommitExec`
+does the probe apply the pending SELinux context and `exec` the compositor.
+The worker keeps ownership of that same PID for the full session lifetime.
 
 ## Worker Trust Policy
 

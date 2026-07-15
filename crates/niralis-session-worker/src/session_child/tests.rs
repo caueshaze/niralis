@@ -1,8 +1,8 @@
 use super::protocol::{
     SessionChildCommit, SessionChildEnvelope, SessionChildErrorCode, SessionChildRequest,
     SessionChildResponse, SessionChildRuntimeContext, SessionChildUnixCredentials,
-    SessionChildUnixPath, SessionProcessIdentityProof, SessionRuntimeEnvironmentProof,
-    SESSION_CHILD_PROTOCOL_VERSION, SESSION_EXEC_PROBE_VERSION,
+    SessionChildUnixPath, SessionProbeHandoff, SessionProcessIdentityProof,
+    SessionRuntimeEnvironmentProof, SESSION_CHILD_PROTOCOL_VERSION, SESSION_EXEC_PROBE_VERSION,
 };
 use crate::isolation::{CapabilityState, PostDropIsolationProof};
 use crate::privilege_drop::{
@@ -126,6 +126,20 @@ fn protocol_round_trip_preserves_probe_and_ready() {
     let decoded: SessionChildResponse =
         serde_json::from_str(&encoded).expect("response should deserialize");
     assert_eq!(decoded, rejected);
+}
+
+#[test]
+fn sealed_probe_handoff_round_trips_without_changing_child_protocol_version() {
+    let handoff = SessionProbeHandoff {
+        exec_plan: runtime().exec_plan,
+        selinux_exec_context: None,
+    };
+    let encoded = serde_json::to_vec(&handoff).expect("handoff should serialize");
+    let decoded: SessionProbeHandoff =
+        serde_json::from_slice(&encoded).expect("handoff should deserialize");
+    assert_eq!(decoded, handoff);
+    assert_eq!(SESSION_CHILD_PROTOCOL_VERSION, 9);
+    assert_eq!(SESSION_EXEC_PROBE_VERSION, 2);
 }
 
 #[test]

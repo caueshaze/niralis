@@ -5,7 +5,6 @@ use std::os::unix::io::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
-use std::thread;
 use std::time::{Duration, Instant};
 
 use niralis_auth::{AuthError, Authenticator, PamAuthenticator};
@@ -597,6 +596,10 @@ fn run_pam_session<
                     return Err(SessionError::AuthenticatedSessionFailed);
                 }
             };
+            // The explicit graphical watchdog protects the launch proof only.
+            // Once Started is emitted, the session may legitimately live for
+            // hours or days and is governed by process supervision instead.
+            let launch_watchdog_deadline = Instant::now() + watchdog;
             let child_report = match child_runner.run_child(SessionChildExpectation {
                 canonical_username: canonical_username.clone(),
                 session_id: session.session.id.clone(),
@@ -623,6 +626,17 @@ fn run_pam_session<
                     return Err(SessionError::AuthenticatedSessionFailed);
                 }
             };
+            if Instant::now() >= launch_watchdog_deadline {
+                let _ = child_runner.terminate(SESSION_TERMINATION_GRACE);
+                drop(transaction);
+                write_envelope(
+                    writer,
+                    WorkerResponse::SessionFailed {
+                        code: WorkerSessionFailureCode::SessionChildFailed,
+                    },
+                )?;
+                return Err(SessionError::AuthenticatedSessionFailed);
+            }
             if let Some(expected_context) = &selinux_exec_context {
                 match selinux_context_manager.context_for_pid(child_report.child_pid) {
                     Ok(observed_context) if expected_context.matches(&observed_context) => {}
@@ -763,7 +777,6 @@ fn run_pam_session<
                 worker_id,
                 child_report.child_pid,
                 child_report.process_identity.pgid,
-                Instant::now() + watchdog,
             ) {
                 Ok(status) => status,
                 Err(error) => {
@@ -861,60 +874,51 @@ fn wait_for_session(
     worker_id: String,
     session_pid: u32,
     session_pgid: u32,
-    watchdog_deadline: Instant,
 ) -> Result<std::process::ExitStatus, SessionError> {
     loop {
-        if Instant::now() >= watchdog_deadline {
-            info!("real graphical session watchdog expired");
-            return child_runner
-                .terminate(SESSION_TERMINATION_GRACE)
-                .map_err(|_| SessionError::AuthenticatedSessionFailed);
-        }
-        if let Some(status) = child_runner
-            .poll_child()
+        match child_runner
+            .wait_for_child_or_control(listener.as_ref().map(std::os::fd::AsRawFd::as_raw_fd))
             .map_err(|_| SessionError::AuthenticatedSessionFailed)?
         {
-            return Ok(status);
-        }
-        if let Some(listener) = listener.as_ref() {
-            match listener.accept() {
-                Ok((mut stream, _)) => {
-                    if !peer_is_root(&stream) {
-                        continue;
-                    }
-                    let request = read_control_request(&mut stream)
-                        .map_err(|_| SessionError::AuthenticatedSessionFailed)?;
-                    if request.version != WORKER_CONTROL_PROTOCOL_VERSION {
-                        return Err(SessionError::AuthenticatedSessionFailed);
-                    }
-                    match request.message {
-                        WorkerControlRequest::Terminate {
-                            worker_id: requested_worker_id,
-                            expected_worker_pid,
-                            expected_session_pid,
-                            expected_session_pgid,
-                        } if requested_worker_id == worker_id
-                            && expected_worker_pid == std::process::id()
-                            && expected_session_pid == session_pid
-                            && expected_session_pgid == session_pgid =>
-                        {
-                            info!("worker session termination requested");
-                            return child_runner
-                                .terminate(SESSION_TERMINATION_GRACE)
-                                .map_err(|_| SessionError::AuthenticatedSessionFailed);
+            crate::session_child::SessionChildWaitEvent::Exited(status) => return Ok(status),
+            crate::session_child::SessionChildWaitEvent::ControlReady => {
+                let Some(listener) = listener.as_ref() else {
+                    return Err(SessionError::AuthenticatedSessionFailed);
+                };
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        if !peer_is_root(&stream) {
+                            continue;
                         }
-                        _ => return Err(SessionError::AuthenticatedSessionFailed),
+                        let request = read_control_request(&mut stream)
+                            .map_err(|_| SessionError::AuthenticatedSessionFailed)?;
+                        if request.version != WORKER_CONTROL_PROTOCOL_VERSION {
+                            return Err(SessionError::AuthenticatedSessionFailed);
+                        }
+                        match request.message {
+                            WorkerControlRequest::Terminate {
+                                worker_id: requested_worker_id,
+                                expected_worker_pid,
+                                expected_session_pid,
+                                expected_session_pgid,
+                            } if requested_worker_id == worker_id
+                                && expected_worker_pid == std::process::id()
+                                && expected_session_pid == session_pid
+                                && expected_session_pgid == session_pgid =>
+                            {
+                                info!("worker session termination requested");
+                                return child_runner
+                                    .terminate(SESSION_TERMINATION_GRACE)
+                                    .map_err(|_| SessionError::AuthenticatedSessionFailed);
+                            }
+                            _ => return Err(SessionError::AuthenticatedSessionFailed),
+                        }
                     }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                    Err(_) => return Err(SessionError::AuthenticatedSessionFailed),
                 }
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
-                Err(_) => return Err(SessionError::AuthenticatedSessionFailed),
             }
-        } else {
-            return child_runner
-                .wait_for_child()
-                .map_err(|_| SessionError::AuthenticatedSessionFailed);
         }
-        thread::sleep(Duration::from_millis(10));
     }
 }
 

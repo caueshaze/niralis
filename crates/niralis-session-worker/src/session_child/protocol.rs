@@ -233,6 +233,15 @@ pub struct FinalExecFailure {
     pub errno: i32,
 }
 
+/// Private, post-drop handoff from the session child to the trusted exec probe.
+/// This never crosses the worker/child JSON protocol: it is serialized into a
+/// sealed anonymous file descriptor immediately before execing the probe.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionProbeHandoff {
+    pub exec_plan: SessionExecPlan,
+    pub selinux_exec_context: Option<PamSelinuxExecContext>,
+}
+
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SessionChildRequest {
     ApplyCredentials {
