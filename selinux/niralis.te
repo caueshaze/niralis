@@ -81,6 +81,9 @@ domain_role_change_exemption(niralis_t)
 # exposes this verification access for user domains as a single interface.
 userdom_read_all_users_state(niralis_t)
 userdom_getattr_all_users(niralis_t)
+# getpidcon() traverses procfs on kernels that expose process entries through
+# pidfs, and only needs filesystem metadata access for that verification.
+fs_getattr_pidfs(niralis_t)
 # Linux gates cross-UID reads of /proc/<pid>/attr/current through its ptrace
 # access check.  CAP_SYS_PTRACE satisfies that DAC check only; Niralis still
 # receives no SELinux process:ptrace permission.
@@ -118,7 +121,8 @@ dbus_stream_connect_session_bus(niralis_t)
 dbus_chat_session_bus(niralis_t)
 
 # niralisd sets the IPC socket ownership to root:<greeter primary gid>.
-allow niralis_t self:capability chown;
+# The kernel also checks FSETID while changing that socket's ownership.
+allow niralis_t self:capability { chown fsetid };
 # The dedicated session child clears supplementary groups, then drops to the
 # PAM-authenticated gid and uid before any user-controlled execution.
 allow niralis_t self:capability { setgid setuid };
