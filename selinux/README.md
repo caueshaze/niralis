@@ -3,6 +3,8 @@
 `niralis_t` is a dedicated display-manager domain. The privileged daemon,
 worker, session child, and post-exec session probe use `niralis_exec_t` before
 the probe applies PAM's pending final user context and execs the compositor.
+The systemd `setpriv` wrapper starts in `unconfined_service_t`, but its exec of
+the dedicated Niralis entrypoint transitions immediately into `niralis_t`.
 
 ## openSUSE prerequisites
 

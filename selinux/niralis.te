@@ -7,6 +7,15 @@ type niralis_t;
 type niralis_exec_t;
 init_daemon_domain(niralis_t, niralis_exec_t)
 
+# systemd starts the trusted setpriv wrapper in unconfined_service_t. When that
+# wrapper execs the daemon's dedicated entrypoint, transition immediately into
+# niralis_t; do not leave the daemon or its worker in the generic service
+# domain.
+gen_require(`
+    type unconfined_service_t;
+')
+domain_auto_trans(unconfined_service_t, niralis_exec_t, niralis_t)
+
 # niralisd, worker and session child currently share niralis_t. Helper
 # execution therefore occurs without a domain transition.
 can_exec(niralis_t, niralis_exec_t)
