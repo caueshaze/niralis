@@ -26,8 +26,8 @@ pub enum VirtualTerminalError {
     SeatNotGraphical,
     #[error("could not query whether seat is graphical: {0}")]
     SeatQueryFailed(libc::c_int),
-    #[error("could not open a virtual terminal device (errno {0})")]
-    DeviceOpenFailed(libc::c_int),
+    #[error("could not open virtual terminal device {path} (errno {errno})")]
+    DeviceOpenFailed { path: String, errno: libc::c_int },
     #[error("VT_OPENQRY failed (errno {0})")]
     OpenQueryFailed(libc::c_int),
     #[error("VT_OPENQRY returned invalid terminal number {0}")]
@@ -271,7 +271,10 @@ fn open_device(path: &CStr) -> Result<OwnedFd, VirtualTerminalError> {
         )
     };
     if fd < 0 {
-        return Err(VirtualTerminalError::DeviceOpenFailed(last_errno()));
+        return Err(VirtualTerminalError::DeviceOpenFailed {
+            path: path.to_string_lossy().into_owned(),
+            errno: last_errno(),
+        });
     }
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
