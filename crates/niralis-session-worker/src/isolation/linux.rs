@@ -1,6 +1,7 @@
 use super::{
     CapabilityState, FdSanitizationError, InheritedFdSanitizer, PostDropAuditError,
-    PostDropAuditor, PostDropIsolationProof, HARD_MAX_CAPABILITY_ID,
+    PostDropAuditor, PostDropCapabilitySanitizationError, PostDropIsolationProof,
+    HARD_MAX_CAPABILITY_ID,
 };
 use std::fs;
 use std::os::fd::RawFd;
@@ -10,6 +11,7 @@ const CAPABILITY_U32S_V3: usize = 2;
 const PR_CAPBSET_READ: libc::c_int = 23;
 const PR_CAP_AMBIENT: libc::c_int = 47;
 const PR_CAP_AMBIENT_IS_SET: libc::c_ulong = 1;
+const PR_CAP_AMBIENT_CLEAR_ALL: libc::c_ulong = 4;
 const PR_GET_SECUREBITS: libc::c_int = 27;
 const PR_GET_NO_NEW_PRIVS: libc::c_int = 39;
 
@@ -64,6 +66,40 @@ impl InheritedFdSanitizer for LinuxInheritedFdSanitizer {
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct LinuxPostDropAuditor;
+
+/// Removes every capability that could survive a UID/GID credential drop.
+///
+/// The bounding set remains evidence in the post-drop proof. Effective,
+/// permitted, inheritable, and ambient capabilities must all be empty before
+/// any user-controlled exec.
+pub fn clear_post_drop_capabilities() -> Result<(), PostDropCapabilitySanitizationError> {
+    let mut header = CapHeader {
+        version: CAPGET_VERSION,
+        pid: 0,
+    };
+    let data = [CapData {
+        effective: 0,
+        permitted: 0,
+        inheritable: 0,
+    }; CAPABILITY_U32S_V3];
+    if unsafe { libc::syscall(libc::SYS_capset, &mut header, data.as_ptr()) } != 0 {
+        return Err(PostDropCapabilitySanitizationError::Failed);
+    }
+    if unsafe {
+        libc::syscall(
+            libc::SYS_prctl,
+            PR_CAP_AMBIENT,
+            PR_CAP_AMBIENT_CLEAR_ALL,
+            0,
+            0,
+            0,
+        )
+    } != 0
+    {
+        return Err(PostDropCapabilitySanitizationError::Failed);
+    }
+    Ok(())
+}
 
 impl PostDropAuditor for LinuxPostDropAuditor {
     fn audit(&self) -> Result<PostDropIsolationProof, PostDropAuditError> {

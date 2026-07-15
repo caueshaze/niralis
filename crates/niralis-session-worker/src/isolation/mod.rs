@@ -1,6 +1,6 @@
 mod linux;
 
-pub use linux::{LinuxInheritedFdSanitizer, LinuxPostDropAuditor};
+pub use linux::{clear_post_drop_capabilities, LinuxInheritedFdSanitizer, LinuxPostDropAuditor};
 
 pub const HARD_MAX_CAPABILITY_ID: u32 = 63;
 pub const DANGEROUS_SECUREBITS_MASK: u32 = (1 << 0) | (1 << 2);
@@ -116,6 +116,12 @@ pub enum PostDropAuditError {
     Failed,
     #[error("unsupported capability range")]
     UnsupportedCapabilityRange,
+}
+
+#[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
+pub enum PostDropCapabilitySanitizationError {
+    #[error("failed to clear post-drop capabilities")]
+    Failed,
 }
 
 #[cfg(test)]

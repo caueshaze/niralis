@@ -18,7 +18,7 @@ pub use identity::{
 pub use isolation::{
     validate_isolation_proof, CapabilityState, FdSanitizationError, InheritedFdSanitizer,
     IsolationPolicyError, LinuxInheritedFdSanitizer, LinuxPostDropAuditor, PostDropAuditError,
-    PostDropAuditor, PostDropIsolationProof,
+    PostDropAuditor, PostDropCapabilitySanitizationError, PostDropIsolationProof,
 };
 pub use logind::{
     LogindError, LogindSessionId, LogindSessionIdentity, LogindSessionResolver, SdLoginResolver,

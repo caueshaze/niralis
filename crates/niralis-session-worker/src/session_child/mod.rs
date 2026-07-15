@@ -22,8 +22,8 @@ use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
 use crate::isolation::{
-    validate_isolation_proof_with_allowed_fds, InheritedFdSanitizer, LinuxInheritedFdSanitizer,
-    LinuxPostDropAuditor, PostDropAuditor, PostDropIsolationProof,
+    clear_post_drop_capabilities, validate_isolation_proof_with_allowed_fds, InheritedFdSanitizer,
+    LinuxInheritedFdSanitizer, LinuxPostDropAuditor, PostDropAuditor, PostDropIsolationProof,
 };
 use crate::privilege_drop::{
     AppliedCredentials, LibcPrivilegeDropper, PrivilegeDropError, PrivilegeDropTarget,
@@ -1005,6 +1005,11 @@ pub(crate) fn run_child_process_with_dependencies(
     let applied_credentials = SessionChildUnixCredentials::from(&applied);
     if applied_credentials != SessionChildUnixCredentials::from(&target) {
         let _ = write_rejection(&mut writer, SessionChildErrorCode::CredentialMismatch);
+        return 1;
+    }
+    if child_pid == std::process::id() && clear_post_drop_capabilities().is_err() {
+        eprintln!("session child post-drop capability sanitization failed");
+        let _ = write_rejection(&mut writer, SessionChildErrorCode::IsolationAuditFailed);
         return 1;
     }
     let proof = match auditor.audit() {

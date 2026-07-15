@@ -289,17 +289,18 @@ canonical username, session, PID, UID, primary GID, and group count.
 ## Post-Drop Isolation Proof
 
 Before writing `Ready`, the child closes inherited file descriptors at or above
-3, applies and verifies the Unix credentials, and audits capabilities,
+3, applies and verifies the Unix credentials, explicitly clears effective,
+permitted, inheritable, and ambient capability sets, and audits capabilities,
 `securebits`, `no_new_privs`, and surviving descriptors. The proof requires
-empty effective, permitted, inheritable, and ambient capability sets, no
-dangerous `securebits`, and exactly file descriptors 0, 1, and 2. The worker
-revalidates the complete proof before accepting the response.
+those active capability sets to be empty, no dangerous `securebits`, and
+exactly file descriptors 0, 1, and 2. The worker revalidates the complete proof
+before accepting the response.
 
 The capability bounding set is observed and reported but is not emptied. The
 `no_new_privs` value is observed but is not changed and may be either value.
 This phase does not prove seccomp, namespace isolation, LSM state, or
-capability policy beyond the audited sets. No user-controlled code or
-compositor is executed yet, so these remain separate requirements.
+capability policy beyond the cleared and audited sets. No user-controlled code
+or compositor is executed yet, so these remain separate requirements.
 
 The child rejects a non-empty inheritable capability set. Because this phase
 does not mutate capability state, the privileged daemon launch environment must
