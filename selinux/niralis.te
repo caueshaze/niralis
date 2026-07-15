@@ -6,6 +6,10 @@ policy_module(niralis, 1.0.0)
 type niralis_t;
 type niralis_exec_t;
 init_daemon_domain(niralis_t, niralis_exec_t)
+# The system manager runs services in system_r. Keep the dedicated Niralis
+# domain available only to that system role until pam_selinux selects the final
+# authenticated user role for the graphical exec.
+role system_r types niralis_t;
 
 # systemd starts the trusted setpriv wrapper in unconfined_service_t. When that
 # wrapper execs the daemon's dedicated entrypoint, transition immediately into
