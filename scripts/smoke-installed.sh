@@ -51,12 +51,15 @@ systemctl is-active --quiet niralisd || {
 
 [[ -S "$socket" ]] || { printf 'missing Niralis socket: %s\n' "$socket" >&2; exit 1; }
 
-sudo restorecon -nvv \
-    /usr/bin/niralisd \
-    /usr/sbin/niralisd \
-    /usr/libexec/niralis-session-worker \
-    /usr/libexec/niralis-session-child \
+relabel_paths=(
+    /usr/libexec/niralis-session-worker
+    /usr/libexec/niralis-session-child
     /usr/libexec/niralis-session-probe
+)
+for daemon_path in /usr/bin/niralisd /usr/sbin/niralisd; do
+    [[ -e "$daemon_path" ]] && relabel_paths+=("$daemon_path")
+done
+sudo restorecon -nvv "${relabel_paths[@]}"
 
 if "$ipc"; then
     sudo -u "$ipc_user" /usr/bin/niralisctl --socket "$socket" status

@@ -61,12 +61,15 @@ if "$install_selinux_policy"; then
     "${root[@]}" python3 selinux/manage_default_contexts.py install
 fi
 
-"${root[@]}" restorecon -Rv \
-    /usr/bin/niralisd \
-    /usr/sbin/niralisd \
-    /usr/libexec/niralis-session-worker \
-    /usr/libexec/niralis-session-child \
+relabel_paths=(
+    /usr/libexec/niralis-session-worker
+    /usr/libexec/niralis-session-child
     /usr/libexec/niralis-session-probe
+)
+for daemon_path in /usr/bin/niralisd /usr/sbin/niralisd; do
+    [[ -e "$daemon_path" ]] && relabel_paths+=("$daemon_path")
+done
+"${root[@]}" restorecon -Rv "${relabel_paths[@]}"
 
 "${root[@]}" systemctl daemon-reload
 
