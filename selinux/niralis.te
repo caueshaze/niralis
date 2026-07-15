@@ -149,6 +149,12 @@ allow niralis_t self:process setcap;
 # Required for TIOCSCTTY on the dedicated PAM-labelled virtual terminal.
 allow niralis_t self:capability sys_tty_config;
 
+# The child serializes the fixed, non-secret exec-plan handoff into a sealed
+# memfd, then the fixed probe reads that same inherited descriptor.  Permit
+# only those read/write operations on the anonymous tmpfs file; neither side
+# opens a path in tmpfs and the descriptor is sealed before final exec.
+allow niralis_t tmpfs_t:file { read write };
+
 ########################################
 # pam_selinux provides the final user context. niralis_t may request it only
 # for a user-domain exec after the Unix credential drop; it never runs the
