@@ -1,3 +1,6 @@
+# On usr-merged systems SELinux canonicalizes /usr/sbin to /usr/bin. Keep
+# both spellings so the same module labels the daemon on merged and split /usr.
+/usr/bin/niralisd -- gen_context(system_u:object_r:niralis_exec_t,s0)
 /usr/sbin/niralisd -- gen_context(system_u:object_r:niralis_exec_t,s0)
 /usr/libexec/niralis-session-worker -- gen_context(system_u:object_r:niralis_exec_t,s0)
 /usr/libexec/niralis-session-child -- gen_context(system_u:object_r:niralis_exec_t,s0)

@@ -62,6 +62,7 @@ if "$install_selinux_policy"; then
 fi
 
 "${root[@]}" restorecon -Rv \
+    /usr/bin/niralisd \
     /usr/sbin/niralisd \
     /usr/libexec/niralis-session-worker \
     /usr/libexec/niralis-session-child \

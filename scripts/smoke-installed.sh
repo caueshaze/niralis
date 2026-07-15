@@ -52,6 +52,7 @@ systemctl is-active --quiet niralisd || {
 [[ -S "$socket" ]] || { printf 'missing Niralis socket: %s\n' "$socket" >&2; exit 1; }
 
 sudo restorecon -nvv \
+    /usr/bin/niralisd \
     /usr/sbin/niralisd \
     /usr/libexec/niralis-session-worker \
     /usr/libexec/niralis-session-child \

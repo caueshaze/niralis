@@ -18,7 +18,7 @@ sudo zypper install selinux-policy-devel policycoreutils-devel checkpolicy
 make -C selinux
 sudo semodule -i selinux/niralis.pp
 sudo python3 selinux/manage_default_contexts.py install
-sudo restorecon -Rv /usr/sbin/niralisd /usr/libexec/niralis-session-worker /usr/libexec/niralis-session-child /usr/libexec/niralis-session-probe /etc/niralis /run/niralis
+sudo restorecon -Rv /usr/bin/niralisd /usr/sbin/niralisd /usr/libexec/niralis-session-worker /usr/libexec/niralis-session-child /usr/libexec/niralis-session-probe /etc/niralis /run/niralis
 sudo systemctl restart niralisd
 ```
 
@@ -31,5 +31,5 @@ only that exact row and refuses a conflicting manual row.
 ```sh
 sudo python3 selinux/manage_default_contexts.py uninstall
 sudo semodule -r niralis
-sudo restorecon -Rv /usr/sbin/niralisd /usr/libexec/niralis-session-worker /usr/libexec/niralis-session-child /usr/libexec/niralis-session-probe
+sudo restorecon -Rv /usr/bin/niralisd /usr/sbin/niralisd /usr/libexec/niralis-session-worker /usr/libexec/niralis-session-child /usr/libexec/niralis-session-probe
 ```
