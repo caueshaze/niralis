@@ -140,6 +140,12 @@ allow niralis_t self:capability { chown fsetid };
 # The dedicated session child clears supplementary groups, then drops to the
 # PAM-authenticated gid and uid before any user-controlled execution.
 allow niralis_t self:capability { setgid setuid };
+# The dedicated session child invokes capset only after the verified
+# setgroups -> setgid -> setuid drop, to clear every effective, permitted,
+# inheritable, and ambient capability before user execution.  This permission
+# authorizes that self-directed kernel operation; it grants no Linux
+# capability and the child rejects a non-empty post-drop proof.
+allow niralis_t self:process setcap;
 # Required for TIOCSCTTY on the dedicated PAM-labelled virtual terminal.
 allow niralis_t self:capability sys_tty_config;
 
