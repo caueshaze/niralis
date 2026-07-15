@@ -96,6 +96,12 @@ individual binaries by hand. It uses one canonical layout:
 /usr/libexec/niralis-session-probe
 ```
 
+The systemd unit starts the daemon through the trusted `/usr/bin/setpriv`
+binary with `--inh-caps=-all`. This empties only the inheritable capability
+set before the daemon starts; it is required because the privileged session
+child rejects inherited capabilities rather than carrying them across its
+credential-drop boundary.
+
 The first installation on an SELinux host also installs the local policy. This
 does not overwrite `/etc/niralis/niralis.toml` or the PAM service file:
 

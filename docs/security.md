@@ -303,8 +303,9 @@ compositor is executed yet, so these remain separate requirements.
 
 The child rejects a non-empty inheritable capability set. Because this phase
 does not mutate capability state, the privileged daemon launch environment must
-provide an empty inheritable set. For manual root/PAM smoke runs, start the
-daemon with `setpriv --inh-caps=-all`; the bounding set may remain non-empty.
+provide an empty inheritable set. The shipped systemd unit enforces this through
+the trusted `/usr/bin/setpriv --inh-caps=-all` wrapper. For manual root/PAM
+smoke runs, use the same wrapper; the bounding set may remain non-empty.
 
 The child path is absolute and follows the same root-owned, non-writable trust
 policy as the worker. The child performs the real numeric privilege drop but
