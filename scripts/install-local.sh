@@ -70,6 +70,14 @@ fi
 "${root[@]}" systemctl daemon-reload
 
 if "$restart"; then
+    configured_exec="$("${root[@]}" systemctl show niralisd.service -p ExecStart --value)"
+    if [[ "$configured_exec" != *"path=/usr/sbin/niralisd "* ]]; then
+        printf '%s\n' 'not restarting: a systemd drop-in overrides Niralis ExecStart.' >&2
+        printf '%s\n' 'expected: /usr/sbin/niralisd --config /etc/niralis/niralis.toml' >&2
+        printf '%s\n' 'inspect:  sudo systemctl cat niralisd.service' >&2
+        printf '%s\n' 'remove or update the obsolete ExecStart override, then rerun this command.' >&2
+        exit 1
+    fi
     if [[ ! -f /etc/niralis/niralis.toml ]]; then
         printf 'not restarting: /etc/niralis/niralis.toml does not exist\n' >&2
         exit 1

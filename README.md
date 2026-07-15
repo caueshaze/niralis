@@ -121,6 +121,12 @@ non-default test socket. The installer runs the full workspace tests by
 default; use `--skip-tests` only when they have already been run for the same
 build.
 
+The installer refuses `--restart` if a systemd drop-in overrides the canonical
+`ExecStart`. Remove obsolete local smoke overrides that point to an old daemon
+path, then run `sudo systemctl daemon-reload` and the installer again. The
+real-graphical gate and logging drop-ins may remain; only an `ExecStart=` reset
+or replacement is incompatible with this layout.
+
 ## PAM Setup
 
 An example PAM service file is provided at `config/pam/niralis`. Install it
