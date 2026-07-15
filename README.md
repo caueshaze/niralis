@@ -83,6 +83,44 @@ cargo run -p niralisctl -- --socket /tmp/niralis-test/niralisd.sock users
 printf '%s\n' test | cargo run -p niralisctl -- --socket /tmp/niralis-test/niralisd.sock login --user test --password-stdin --session niri
 ```
 
+## Rebuild, install, and installed smoke
+
+For local development, use the repository-owned installer rather than copying
+individual binaries by hand. It uses one canonical layout:
+
+```text
+/usr/sbin/niralisd
+/usr/bin/niralisctl
+/usr/libexec/niralis-session-worker
+/usr/libexec/niralis-session-child
+/usr/libexec/niralis-session-probe
+```
+
+The first installation on an SELinux host also installs the local policy. This
+does not overwrite `/etc/niralis/niralis.toml` or the PAM service file:
+
+```sh
+./scripts/install-local.sh --install-selinux-policy
+```
+
+For the normal edit/build/install/restart loop, when no Niralis graphical
+session is active:
+
+```sh
+./scripts/install-local.sh --restart
+./scripts/smoke-installed.sh --ipc
+sudo journalctl -u niralisd -f
+```
+
+`smoke-installed.sh` checks the installed paths, service, socket, and SELinux
+labels. With `--ipc`, it additionally sends only the read-only `status` IPC
+request as the `niralis` account by default; pass `--ipc-user USER` if the
+configured greeter has another identity. It never authenticates, opens PAM,
+allocates a VT, or launches a graphical session. Pass `--socket PATH` for a
+non-default test socket. The installer runs the full workspace tests by
+default; use `--skip-tests` only when they have already been run for the same
+build.
+
 ## PAM Setup
 
 An example PAM service file is provided at `config/pam/niralis`. Install it
