@@ -26,8 +26,20 @@ pub enum VirtualTerminalError {
     SeatNotGraphical,
     #[error("could not query whether seat is graphical: {0}")]
     SeatQueryFailed(libc::c_int),
-    #[error("virtual terminal allocation failed")]
-    AllocationFailed,
+    #[error("could not open a virtual terminal device (errno {0})")]
+    DeviceOpenFailed(libc::c_int),
+    #[error("VT_OPENQRY failed (errno {0})")]
+    OpenQueryFailed(libc::c_int),
+    #[error("VT_OPENQRY returned invalid terminal number {0}")]
+    InvalidAllocatedTerminal(libc::c_int),
+    #[error("virtual terminal device metadata query failed (errno {0})")]
+    DeviceMetadataFailed(libc::c_int),
+    #[error("allocated terminal device does not match tty{expected}: major={major} minor={minor}")]
+    DeviceMismatch {
+        expected: u32,
+        major: u32,
+        minor: u32,
+    },
     #[error("virtual terminal operation failed")]
     OperationFailed,
     #[error("virtual terminal cleanup failed")]
@@ -150,23 +162,32 @@ impl OwnedVirtualTerminal {
         let control = open_device(c"/dev/console")?;
         let mut number: libc::c_int = 0;
         if unsafe { libc::ioctl(control.as_raw_fd(), VT_OPENQRY, &mut number) } < 0 {
-            return Err(VirtualTerminalError::AllocationFailed);
+            return Err(VirtualTerminalError::OpenQueryFailed(last_errno()));
         }
-        let number = u32::try_from(number).map_err(|_| VirtualTerminalError::AllocationFailed)?;
+        let number = u32::try_from(number)
+            .map_err(|_| VirtualTerminalError::InvalidAllocatedTerminal(number))?;
         if !(VT_MIN..=VT_MAX).contains(&number) {
-            return Err(VirtualTerminalError::AllocationFailed);
+            return Err(VirtualTerminalError::InvalidAllocatedTerminal(
+                number as libc::c_int,
+            ));
         }
         let device = format!("/dev/tty{number}");
-        let device =
-            std::ffi::CString::new(device).map_err(|_| VirtualTerminalError::AllocationFailed)?;
+        let device = std::ffi::CString::new(device)
+            .map_err(|_| VirtualTerminalError::InvalidAllocatedTerminal(number as libc::c_int))?;
         let terminal = open_device(device.as_c_str())?;
         let stat = fstat(terminal.as_raw_fd())?;
         let major = libc::major(stat.st_rdev) as u32;
         let minor = libc::minor(stat.st_rdev) as u32;
         if major != 4 || minor != number {
-            return Err(VirtualTerminalError::AllocationFailed);
+            return Err(VirtualTerminalError::DeviceMismatch {
+                expected: number,
+                major,
+                minor,
+            });
         }
-        let vtnr = VirtualTerminalId::new(number).ok_or(VirtualTerminalError::AllocationFailed)?;
+        let vtnr = VirtualTerminalId::new(number).ok_or(
+            VirtualTerminalError::InvalidAllocatedTerminal(number as libc::c_int),
+        )?;
         Ok(Self {
             seat,
             vtnr,
@@ -250,7 +271,7 @@ fn open_device(path: &CStr) -> Result<OwnedFd, VirtualTerminalError> {
         )
     };
     if fd < 0 {
-        return Err(VirtualTerminalError::AllocationFailed);
+        return Err(VirtualTerminalError::DeviceOpenFailed(last_errno()));
     }
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
@@ -258,9 +279,15 @@ fn open_device(path: &CStr) -> Result<OwnedFd, VirtualTerminalError> {
 fn fstat(fd: RawFd) -> Result<libc::stat, VirtualTerminalError> {
     let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
     if unsafe { libc::fstat(fd, &mut stat) } < 0 {
-        return Err(VirtualTerminalError::AllocationFailed);
+        return Err(VirtualTerminalError::DeviceMetadataFailed(last_errno()));
     }
     Ok(stat)
+}
+
+fn last_errno() -> libc::c_int {
+    std::io::Error::last_os_error()
+        .raw_os_error()
+        .unwrap_or(libc::EIO)
 }
 
 #[cfg(test)]
