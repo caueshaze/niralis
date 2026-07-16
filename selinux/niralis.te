@@ -46,6 +46,10 @@ auth_use_nsswitch(niralis_t)
 auth_use_pam(niralis_t)
 auth_domtrans_pam_timestamp(niralis_t)
 systemd_dbus_chat_logind(niralis_t)
+# The worker asks the system manager to create and later stop only its
+# Niralis-owned transient payload scope. This interface limits D-Bus messaging
+# to init_t (PID 1); it does not grant generic access to other system services.
+init_dbus_chat(niralis_t)
 # pam_systemd registers the session through logind's private runtime socket.
 # This grants only the socket-file write and server connect permissions.
 systemd_logind_stream_connect(niralis_t)
