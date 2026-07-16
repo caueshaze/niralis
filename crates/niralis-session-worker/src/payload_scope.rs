@@ -212,7 +212,10 @@ async fn prepare_scope(
     let object_path: OwnedObjectPath = checked!(manager
         .call("GetUnit", &(unit_name.as_str(),))
         .await
-        .map_err(|_| PayloadScopeError::InvalidIdentity));
+        .map_err(|error| {
+            warn!(?error, unit = %unit_name, "resolving the transient payload scope failed");
+            PayloadScopeError::InvalidIdentity
+        }));
     let unit = checked!(zbus::Proxy::new(
         &connection,
         SYSTEMD_DESTINATION,
@@ -220,31 +223,24 @@ async fn prepare_scope(
         SYSTEMD_UNIT
     )
     .await
-    .map_err(|_| PayloadScopeError::InvalidIdentity));
-    let id: String = checked!(unit
-        .get_property("Id")
-        .await
-        .map_err(|_| PayloadScopeError::InvalidIdentity));
-    let active: String = checked!(unit
-        .get_property("ActiveState")
-        .await
-        .map_err(|_| PayloadScopeError::InvalidIdentity));
-    let sub: String = checked!(unit
-        .get_property("SubState")
-        .await
-        .map_err(|_| PayloadScopeError::InvalidIdentity));
-    let observed_slice: String = checked!(unit
-        .get_property("Slice")
-        .await
-        .map_err(|_| PayloadScopeError::InvalidIdentity));
-    let control_group: String = checked!(unit
-        .get_property("ControlGroup")
-        .await
-        .map_err(|_| PayloadScopeError::InvalidIdentity));
-    let invocation: Vec<u8> = checked!(unit
-        .get_property("InvocationID")
-        .await
-        .map_err(|_| PayloadScopeError::InvalidIdentity));
+    .map_err(|error| {
+        warn!(?error, unit = %unit_name, object_path = %object_path, "creating the transient payload scope proxy failed");
+        PayloadScopeError::InvalidIdentity
+    }));
+    macro_rules! unit_property {
+        ($name:literal) => {
+            checked!(unit.get_property($name).await.map_err(|error| {
+                warn!(?error, unit = %unit_name, property = $name, "reading transient payload scope property failed");
+                PayloadScopeError::InvalidIdentity
+            }))
+        };
+    }
+    let id: String = unit_property!("Id");
+    let active: String = unit_property!("ActiveState");
+    let sub: String = unit_property!("SubState");
+    let observed_slice: String = unit_property!("Slice");
+    let control_group: String = unit_property!("ControlGroup");
+    let invocation: Vec<u8> = unit_property!("InvocationID");
     let invocation_id = checked!(hex_id(&invocation).ok_or(PayloadScopeError::InvalidIdentity));
     if id != unit_name
         || active != "active"
@@ -252,6 +248,16 @@ async fn prepare_scope(
         || observed_slice != slice
         || !valid_payload_cgroup(&control_group, expected_uid, &unit_name)
     {
+        warn!(
+            unit = %unit_name,
+            observed_id = %id,
+            active_state = %active,
+            sub_state = %sub,
+            expected_slice = %slice,
+            observed_slice = %observed_slice,
+            control_group = %control_group,
+            "transient payload scope properties did not match the authoritative launch identity"
+        );
         checked!(Err::<(), _>(PayloadScopeError::InvalidIdentity));
     }
 
