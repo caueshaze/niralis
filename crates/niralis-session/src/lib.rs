@@ -2,6 +2,7 @@ mod error;
 mod launcher;
 mod mock;
 mod protocol;
+mod scope_release;
 mod secret;
 #[cfg(test)]
 mod tests;
@@ -13,9 +14,13 @@ pub use error::SessionError;
 pub use launcher::WorkerSessionLauncher;
 pub use mock::MockSessionLauncher;
 pub use protocol::{
-    PayloadScopeIdentity, SessionExecPlan, WorkerControlRequest, WorkerEnvelope, WorkerErrorCode,
-    WorkerRequest, WorkerResponse, WorkerSessionFailureCode, MAX_WORKER_CONTROL_MESSAGE_BYTES,
-    MAX_WORKER_MESSAGE_BYTES, WORKER_CONTROL_PROTOCOL_VERSION, WORKER_PROTOCOL_VERSION,
+    PayloadScopeIdentity, PayloadScopeRecoveryReason, SessionExecPlan, WorkerControlRequest,
+    WorkerEnvelope, WorkerErrorCode, WorkerRequest, WorkerResponse, WorkerSessionFailureCode,
+    MAX_WORKER_CONTROL_MESSAGE_BYTES, MAX_WORKER_MESSAGE_BYTES, WORKER_CONTROL_PROTOCOL_VERSION,
+    WORKER_PROTOCOL_VERSION,
+};
+pub use scope_release::{
+    PayloadScopeReleaseVerifier, ScopeReleaseVerification, SystemdPayloadScopeReleaseVerifier,
 };
 pub use secret::WorkerSecret;
 #[cfg(any(test, feature = "integration-test-control"))]

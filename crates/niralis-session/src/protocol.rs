@@ -5,11 +5,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::{LogindSessionId, SessionRequest, StartedSession, WorkerSecret};
 
-/// Worker/launcher launch stream. Version 11 changes the response side from a
-/// single terminal frame to a bounded sequence ending in Started/Failed.
-pub const WORKER_PROTOCOL_VERSION: u32 = 11;
+/// Version 12 adds the post-ack payload-scope release rendezvous event.
+pub const WORKER_PROTOCOL_VERSION: u32 = 12;
 pub const MAX_WORKER_MESSAGE_BYTES: usize = 64 * 1024;
-pub const WORKER_CONTROL_PROTOCOL_VERSION: u32 = 2;
+/// Version 3 adds the authenticated bidirectional payload-scope release round-trip.
+pub const WORKER_CONTROL_PROTOCOL_VERSION: u32 = 3;
 pub const MAX_WORKER_CONTROL_MESSAGE_BYTES: usize = 4096;
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,6 +80,27 @@ pub enum WorkerControlRequest {
         expected_worker_pid: u32,
         registration_nonce: String,
     },
+    PayloadScopeReleaseRequested {
+        worker_id: String,
+        expected_worker_pid: u32,
+        registration_nonce: String,
+        release_nonce: String,
+        scope_identity: PayloadScopeIdentity,
+        local_cleanup_succeeded: bool,
+    },
+    PayloadScopeReleased {
+        worker_id: String,
+        expected_worker_pid: u32,
+        registration_nonce: String,
+        release_nonce: String,
+    },
+    PayloadScopeRecoveryRequired {
+        worker_id: String,
+        expected_worker_pid: u32,
+        registration_nonce: String,
+        release_nonce: String,
+        reason: PayloadScopeRecoveryReason,
+    },
     Terminate {
         worker_id: String,
         expected_worker_pid: u32,
@@ -104,6 +125,11 @@ pub enum WorkerResponse {
         registration_nonce: String,
         scope_identity: PayloadScopeIdentity,
     },
+    /// Non-authoritative wakeup. The correlated release request is exchanged
+    /// over the SO_PEERCRED-authenticated internal control socket.
+    PayloadScopeReleaseReady {
+        worker_id: String,
+    },
     Started {
         session: StartedSession,
         session_pid: u32,
@@ -122,6 +148,16 @@ pub enum WorkerResponse {
     Rejected {
         code: WorkerErrorCode,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PayloadScopeRecoveryReason {
+    VerificationUnavailable,
+    UnitStillActive,
+    MembershipNotEmpty,
+    InvocationIdMismatch,
+    IdentityMismatch,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

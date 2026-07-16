@@ -804,8 +804,8 @@ fn run_pam_session<
                     return Err(SessionError::AuthenticatedSessionFailed);
                 }
             };
+            let registration_nonce = authoritative_scope.identity().invocation_id.clone();
             if requires_registration {
-                let registration_nonce = authoritative_scope.identity().invocation_id.clone();
                 if let Err(error) = write_envelope(
                     writer,
                     WorkerResponse::PayloadScopePrepared {
@@ -841,12 +841,26 @@ fn run_pam_session<
                     launch_watchdog_deadline,
                 ) {
                     warn!(?error, "payload scope registration acknowledgement failed");
+                    let scope_identity = authoritative_scope.identity().clone();
                     let _ = pending_handoff.abort();
-                    if let Err(cleanup_error) =
-                        authoritative_scope.cleanup(launch_watchdog_deadline)
-                    {
-                        warn!(?cleanup_error, "payload scope pre-commit cleanup failed");
+                    let local_cleanup_succeeded = authoritative_scope
+                        .cleanup(launch_watchdog_deadline)
+                        .is_ok();
+                    if !local_cleanup_succeeded {
+                        warn!("payload scope pre-commit cleanup failed");
                     }
+                    let _ = request_payload_scope_release(
+                        writer,
+                        control_listener
+                            .as_ref()
+                            .expect("registration requires listener"),
+                        &worker_id,
+                        launcher_pid,
+                        &registration_nonce,
+                        &scope_identity,
+                        local_cleanup_succeeded,
+                        launch_watchdog_deadline,
+                    );
                     drop(transaction);
                     write_envelope(
                         writer,
@@ -864,12 +878,25 @@ fn run_pam_session<
                 Ok(report) => report,
                 Err(error) => {
                     warn!(username = %canonical_username, session = %session.session.id, ?error, "worker failed to commit the post-exec session handoff");
-                    if let Err(cleanup_error) =
-                        authoritative_scope.cleanup(launch_watchdog_deadline)
-                    {
-                        warn!(
-                            ?cleanup_error,
-                            "payload scope cleanup after CommitExec failure failed"
+                    let scope_identity = authoritative_scope.identity().clone();
+                    let local_cleanup_succeeded = authoritative_scope
+                        .cleanup(launch_watchdog_deadline)
+                        .is_ok();
+                    if !local_cleanup_succeeded {
+                        warn!("payload scope cleanup after CommitExec failure failed");
+                    }
+                    if requires_registration {
+                        let _ = request_payload_scope_release(
+                            writer,
+                            control_listener
+                                .as_ref()
+                                .expect("registration requires listener"),
+                            &worker_id,
+                            launcher_pid,
+                            &registration_nonce,
+                            &scope_identity,
+                            local_cleanup_succeeded,
+                            launch_watchdog_deadline,
                         );
                     }
                     drop(transaction);
@@ -1155,6 +1182,108 @@ fn await_payload_scope_ack(
         }
         _ => Err(SessionError::WorkerProtocolFailed),
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn request_payload_scope_release<W: Write>(
+    writer: &mut W,
+    listener: &UnixListener,
+    worker_id: &str,
+    launcher_pid: u32,
+    registration_nonce: &str,
+    identity: &niralis_session::PayloadScopeIdentity,
+    local_cleanup_succeeded: bool,
+    deadline: Instant,
+) -> Result<(), SessionError> {
+    write_envelope(
+        writer,
+        WorkerResponse::PayloadScopeReleaseReady {
+            worker_id: worker_id.to_owned(),
+        },
+    )?;
+    info!(unit = %identity.unit_name, local_cleanup_succeeded, "payload scope release requested after post-ack launch failure");
+    let timeout = deadline
+        .checked_duration_since(Instant::now())
+        .ok_or(SessionError::WorkerTimedOut)?;
+    let mut pollfd = libc::pollfd {
+        fd: listener.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let result = unsafe {
+        libc::poll(
+            &mut pollfd,
+            1,
+            timeout.as_millis().min(i32::MAX as u128) as i32,
+        )
+    };
+    if result == 0 {
+        return Err(SessionError::WorkerTimedOut);
+    }
+    if result < 0 || pollfd.revents & libc::POLLIN == 0 {
+        return Err(SessionError::WorkerIoFailed);
+    }
+    let (mut stream, _) = listener
+        .accept()
+        .map_err(|_| SessionError::WorkerIoFailed)?;
+    let credentials = peer_credentials(&stream).ok_or(SessionError::WorkerProtocolFailed)?;
+    if credentials.uid != 0 || credentials.pid as u32 != launcher_pid {
+        return Err(SessionError::WorkerProtocolFailed);
+    }
+    let release_nonce = random_release_nonce()?;
+    niralis_session::write_control_request(
+        &mut stream,
+        WorkerControlRequest::PayloadScopeReleaseRequested {
+            worker_id: worker_id.to_owned(),
+            expected_worker_pid: std::process::id(),
+            registration_nonce: registration_nonce.to_owned(),
+            release_nonce: release_nonce.clone(),
+            scope_identity: identity.clone(),
+            local_cleanup_succeeded,
+        },
+    )?;
+    let response = read_control_request(&mut stream)?;
+    if response.version != WORKER_CONTROL_PROTOCOL_VERSION {
+        return Err(SessionError::WorkerProtocolFailed);
+    }
+    match response.message {
+        WorkerControlRequest::PayloadScopeReleased {
+            worker_id: response_worker_id,
+            expected_worker_pid,
+            registration_nonce: response_registration_nonce,
+            release_nonce: response_release_nonce,
+        } if response_worker_id == worker_id
+            && expected_worker_pid == std::process::id()
+            && response_registration_nonce == registration_nonce
+            && response_release_nonce == release_nonce =>
+        {
+            info!(unit = %identity.unit_name, "payload scope release independently verified and acknowledged");
+            Ok(())
+        }
+        WorkerControlRequest::PayloadScopeRecoveryRequired {
+            worker_id: response_worker_id,
+            expected_worker_pid,
+            registration_nonce: response_registration_nonce,
+            release_nonce: response_release_nonce,
+            reason,
+        } if response_worker_id == worker_id
+            && expected_worker_pid == std::process::id()
+            && response_registration_nonce == registration_nonce
+            && response_release_nonce == release_nonce =>
+        {
+            warn!(?reason, unit = %identity.unit_name, "supervisor could not prove payload scope cleanup; recovery required");
+            Err(SessionError::AuthenticatedSessionFailed)
+        }
+        _ => Err(SessionError::WorkerProtocolFailed),
+    }
+}
+
+fn random_release_nonce() -> Result<String, SessionError> {
+    let mut bytes = [0u8; 16];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut file| file.read_exact(&mut bytes))
+        .map_err(|_| SessionError::WorkerIoFailed)?;
+    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
 #[cfg(test)]

@@ -25,6 +25,7 @@ pub struct WorkerSessionLauncher {
     timeout: Duration,
     worker_environment: Vec<(String, String)>,
     supervisor: Arc<WorkerSupervisor>,
+    release_verifier: Arc<dyn crate::PayloadScopeReleaseVerifier>,
 }
 
 #[derive(Debug)]
@@ -38,6 +39,16 @@ enum WorkerSupervisorMessage {
         worker_id: String,
         worker_pid: u32,
         identity: crate::PayloadScopeIdentity,
+        registration_nonce: String,
+        result: mpsc::Sender<Result<(), SessionError>>,
+    },
+    BeginRelease {
+        request: ReleaseRequest,
+        result: mpsc::Sender<Result<ReleaseToken, SessionError>>,
+    },
+    CompleteRelease {
+        token: ReleaseToken,
+        verification: crate::ScopeReleaseVerification,
         result: mpsc::Sender<Result<(), SessionError>>,
     },
     AbortPending {
@@ -54,6 +65,7 @@ enum WorkerSupervisorMessage {
         payload_scope: crate::PayloadScopeIdentity,
         control_path: PathBuf,
         control_dir: TempDir,
+        result: mpsc::Sender<Result<(), SessionError>>,
     },
     Terminate {
         session: StartedSession,
@@ -91,7 +103,30 @@ struct PendingWorkerLifecycle {
     worker_id: String,
     worker_pid: u32,
     payload_scope: Option<crate::PayloadScopeIdentity>,
+    registration_nonce: Option<String>,
+    release_nonce: Option<String>,
+    generation: u64,
+    recovery_required: Option<crate::PayloadScopeRecoveryReason>,
     terminal_before_started: bool,
+}
+
+#[derive(Debug, Clone)]
+struct ReleaseRequest {
+    worker_id: String,
+    worker_pid: u32,
+    registration_nonce: String,
+    release_nonce: String,
+    identity: crate::PayloadScopeIdentity,
+}
+
+#[derive(Debug, Clone)]
+struct ReleaseToken {
+    worker_id: String,
+    worker_pid: u32,
+    registration_nonce: String,
+    release_nonce: String,
+    identity: crate::PayloadScopeIdentity,
+    generation: u64,
 }
 
 #[derive(Debug)]
@@ -137,6 +172,10 @@ impl WorkerSupervisor {
                                 worker_id,
                                 worker_pid,
                                 payload_scope: None,
+                                registration_nonce: None,
+                                release_nonce: None,
+                                generation: 0,
+                                recovery_required: None,
                                 terminal_before_started: false,
                             });
                             Ok(())
@@ -147,6 +186,7 @@ impl WorkerSupervisor {
                         worker_id,
                         worker_pid,
                         identity,
+                        registration_nonce,
                         result,
                     }) => {
                         let outcome = match pending.iter_mut().find(|entry| {
@@ -154,12 +194,78 @@ impl WorkerSupervisor {
                         }) {
                             Some(entry)
                                 if !entry.terminal_before_started
+                                    && entry.recovery_required.is_none()
+                                    && entry.release_nonce.is_none()
                                     && entry
                                         .payload_scope
                                         .as_ref()
                                         .is_none_or(|existing| existing == &identity) =>
                             {
                                 entry.payload_scope = Some(identity);
+                                entry.registration_nonce = Some(registration_nonce);
+                                entry.generation = entry.generation.wrapping_add(1);
+                                Ok(())
+                            }
+                            _ => Err(SessionError::WorkerProtocolFailed),
+                        };
+                        let _ = result.send(outcome);
+                    }
+                    Ok(WorkerSupervisorMessage::BeginRelease { request, result }) => {
+                        let outcome = match pending.iter_mut().find(|entry| {
+                            entry.worker_id == request.worker_id
+                                && entry.worker_pid == request.worker_pid
+                        }) {
+                            Some(entry)
+                                if !entry.terminal_before_started
+                                    && entry.recovery_required.is_none()
+                                    && entry.payload_scope.as_ref() == Some(&request.identity)
+                                    && entry.registration_nonce.as_deref()
+                                        == Some(&request.registration_nonce)
+                                    && entry
+                                        .release_nonce
+                                        .as_ref()
+                                        .is_none_or(|nonce| nonce == &request.release_nonce) =>
+                            {
+                                entry.release_nonce = Some(request.release_nonce.clone());
+                                entry.generation = entry.generation.wrapping_add(1);
+                                Ok(ReleaseToken {
+                                    worker_id: request.worker_id,
+                                    worker_pid: request.worker_pid,
+                                    registration_nonce: request.registration_nonce,
+                                    release_nonce: request.release_nonce,
+                                    identity: request.identity,
+                                    generation: entry.generation,
+                                })
+                            }
+                            _ => Err(SessionError::WorkerProtocolFailed),
+                        };
+                        let _ = result.send(outcome);
+                    }
+                    Ok(WorkerSupervisorMessage::CompleteRelease {
+                        token,
+                        verification,
+                        result,
+                    }) => {
+                        let index = pending.iter().position(|entry| {
+                            entry.worker_id == token.worker_id
+                                && entry.worker_pid == token.worker_pid
+                                && entry.generation == token.generation
+                                && entry.payload_scope.as_ref() == Some(&token.identity)
+                                && entry.registration_nonce.as_deref()
+                                    == Some(&token.registration_nonce)
+                                && entry.release_nonce.as_deref() == Some(&token.release_nonce)
+                        });
+                        let outcome = match (index, verification) {
+                            (Some(index), crate::ScopeReleaseVerification::Released) => {
+                                pending.swap_remove(index);
+                                Ok(())
+                            }
+                            (
+                                Some(index),
+                                crate::ScopeReleaseVerification::RecoveryRequired(reason),
+                            ) => {
+                                pending[index].recovery_required = Some(reason);
+                                pending[index].terminal_before_started = true;
                                 Ok(())
                             }
                             _ => Err(SessionError::WorkerProtocolFailed),
@@ -173,7 +279,10 @@ impl WorkerSupervisor {
                         {
                             if pending[index].payload_scope.is_some() {
                                 pending[index].terminal_before_started = true;
-                                debug!(worker_id, "worker exited before Started with prepared payload identity retained for future emergency recovery");
+                                let reason = pending[index].recovery_required.get_or_insert(
+                                    crate::PayloadScopeRecoveryReason::VerificationUnavailable,
+                                );
+                                tracing::warn!(?reason, worker_id, "worker died with acknowledged payload scope still registered; recovery required");
                             } else {
                                 pending.swap_remove(index);
                             }
@@ -190,26 +299,39 @@ impl WorkerSupervisor {
                         payload_scope,
                         control_path,
                         control_dir,
+                        result,
                     }) => {
-                        if let Some(index) = pending.iter().position(|entry| {
-                            entry.worker_id == worker_id && entry.worker_pid == child.id()
-                        }) {
+                        let index = pending.iter().position(|entry| {
+                            entry.worker_id == worker_id
+                                && entry.worker_pid == child.id()
+                                && entry.payload_scope.as_ref() == Some(&payload_scope)
+                                && entry.release_nonce.is_none()
+                                && entry.recovery_required.is_none()
+                                && !entry.terminal_before_started
+                        });
+                        if let Some(index) = index {
                             pending.swap_remove(index);
+                            children.push(SupervisedWorker {
+                                ownership: RuntimeOwnership {
+                                    runtime_id,
+                                    logind_session_id,
+                                    payload_scope,
+                                },
+                                child,
+                                session,
+                                session_pid,
+                                session_pgid,
+                                worker_id,
+                                control_path,
+                                _control_dir: control_dir,
+                            });
+                            let _ = result.send(Ok(()));
+                        } else {
+                            let mut child = child;
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            let _ = result.send(Err(SessionError::WorkerProtocolFailed));
                         }
-                        children.push(SupervisedWorker {
-                            ownership: RuntimeOwnership {
-                                runtime_id,
-                                logind_session_id,
-                                payload_scope,
-                            },
-                            child,
-                            session,
-                            session_pid,
-                            session_pgid,
-                            worker_id,
-                            control_path,
-                            _control_dir: control_dir,
-                        })
                     }
                     Ok(WorkerSupervisorMessage::Terminate {
                         session,
@@ -308,6 +430,7 @@ impl WorkerSupervisor {
         worker_id: &str,
         worker_pid: u32,
         identity: crate::PayloadScopeIdentity,
+        registration_nonce: String,
     ) -> Result<(), SessionError> {
         let (result, receiver) = mpsc::channel();
         self.sender
@@ -315,6 +438,35 @@ impl WorkerSupervisor {
                 worker_id: worker_id.to_owned(),
                 worker_pid,
                 identity,
+                registration_nonce,
+                result,
+            })
+            .map_err(|_| SessionError::WorkerIoFailed)?;
+        receiver
+            .recv_timeout(Duration::from_secs(1))
+            .map_err(|_| SessionError::WorkerIoFailed)?
+    }
+
+    fn begin_release(&self, request: ReleaseRequest) -> Result<ReleaseToken, SessionError> {
+        let (result, receiver) = mpsc::channel();
+        self.sender
+            .send(WorkerSupervisorMessage::BeginRelease { request, result })
+            .map_err(|_| SessionError::WorkerIoFailed)?;
+        receiver
+            .recv_timeout(Duration::from_secs(1))
+            .map_err(|_| SessionError::WorkerIoFailed)?
+    }
+
+    fn complete_release(
+        &self,
+        token: ReleaseToken,
+        verification: crate::ScopeReleaseVerification,
+    ) -> Result<(), SessionError> {
+        let (result, receiver) = mpsc::channel();
+        self.sender
+            .send(WorkerSupervisorMessage::CompleteRelease {
+                token,
+                verification,
                 result,
             })
             .map_err(|_| SessionError::WorkerIoFailed)?;
@@ -329,6 +481,7 @@ impl WorkerSupervisor {
         });
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn register(
         &self,
         child: Child,
@@ -350,6 +503,7 @@ impl WorkerSupervisor {
             return Err(SessionError::WorkerExitedAfterStart);
         }
         let runtime_id = RuntimeSessionId::new(worker_id.clone());
+        let (result, receiver) = mpsc::channel();
         match self.sender.send(WorkerSupervisorMessage::Register {
             runtime_id: runtime_id.clone(),
             child,
@@ -361,8 +515,14 @@ impl WorkerSupervisor {
             payload_scope,
             control_path,
             control_dir,
+            result,
         }) {
-            Ok(()) => Ok(runtime_id),
+            Ok(()) => {
+                receiver
+                    .recv_timeout(Duration::from_secs(1))
+                    .map_err(|_| SessionError::WorkerIoFailed)??;
+                Ok(runtime_id)
+            }
             Err(error) => {
                 if let WorkerSupervisorMessage::Register { mut child, .. } = error.0 {
                     let _ = child.kill();
@@ -466,6 +626,25 @@ fn request_worker_termination(worker: &mut SupervisedWorker) -> Result<(), Sessi
     }
 }
 
+fn peer_matches(stream: &UnixStream, expected_uid: u32, expected_pid: u32) -> bool {
+    let mut credentials = libc::ucred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
+    let mut length = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    let result = unsafe {
+        libc::getsockopt(
+            std::os::fd::AsRawFd::as_raw_fd(stream),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            &mut credentials as *mut _ as *mut libc::c_void,
+            &mut length,
+        )
+    };
+    result == 0 && credentials.uid == expected_uid && credentials.pid as u32 == expected_pid
+}
+
 impl Drop for WorkerSupervisor {
     fn drop(&mut self) {
         let _ = self.sender.send(WorkerSupervisorMessage::Shutdown);
@@ -498,7 +677,16 @@ impl WorkerSessionLauncher {
             timeout,
             worker_environment,
             supervisor: Arc::new(WorkerSupervisor::new()),
+            release_verifier: Arc::new(crate::SystemdPayloadScopeReleaseVerifier),
         })
+    }
+
+    #[cfg(any(test, feature = "integration-test-control"))]
+    pub fn set_payload_scope_release_verifier_for_test(
+        &mut self,
+        verifier: Arc<dyn crate::PayloadScopeReleaseVerifier>,
+    ) {
+        self.release_verifier = verifier;
     }
 
     pub fn worker_path(&self) -> &Path {
@@ -643,6 +831,7 @@ impl WorkerSessionLauncher {
                         &worker_id,
                         worker_pid,
                         scope_identity.clone(),
+                        registration_nonce.clone(),
                     )?;
                     // Persisted before acknowledging it. No registry lock is
                     // held while performing socket I/O.
@@ -664,6 +853,95 @@ impl WorkerSessionLauncher {
                     )
                     .is_err()
                     {
+                        break Err(SessionError::WorkerIoFailed);
+                    }
+                }
+                Ok(WorkerEnvelope {
+                    message:
+                        WorkerResponse::PayloadScopeReleaseReady {
+                            worker_id: event_worker_id,
+                        },
+                    ..
+                }) => {
+                    let (identity, registration_nonce) = match &phase {
+                        PendingLaunchPhase::ScopeRegistered {
+                            identity,
+                            registration_nonce,
+                        } if event_worker_id == worker_id => {
+                            (identity.clone(), registration_nonce.clone())
+                        }
+                        _ => break Err(SessionError::WorkerProtocolFailed),
+                    };
+                    let mut control = match UnixStream::connect(&control_path) {
+                        Ok(control) => control,
+                        Err(_) => break Err(SessionError::WorkerIoFailed),
+                    };
+                    if !peer_matches(&control, 0, worker_pid) {
+                        break Err(SessionError::WorkerProtocolFailed);
+                    }
+                    let request = match crate::read_control_request(&mut control) {
+                        Ok(request)
+                            if request.version == crate::WORKER_CONTROL_PROTOCOL_VERSION =>
+                        {
+                            request.message
+                        }
+                        _ => break Err(SessionError::WorkerProtocolFailed),
+                    };
+                    let (release_nonce, local_cleanup_succeeded) = match request {
+                        WorkerControlRequest::PayloadScopeReleaseRequested {
+                            worker_id: requested_worker_id,
+                            expected_worker_pid,
+                            registration_nonce: requested_registration_nonce,
+                            release_nonce,
+                            scope_identity,
+                            local_cleanup_succeeded,
+                        } if requested_worker_id == worker_id
+                            && expected_worker_pid == worker_pid
+                            && requested_registration_nonce == registration_nonce
+                            && scope_identity == identity
+                            && !release_nonce.is_empty()
+                            && release_nonce.len() <= 128 =>
+                        {
+                            (release_nonce, local_cleanup_succeeded)
+                        }
+                        _ => break Err(SessionError::WorkerProtocolFailed),
+                    };
+                    debug!(
+                        local_cleanup_succeeded,
+                        "payload scope release requested; supervisor verifying registered scope"
+                    );
+                    let token = self.supervisor.begin_release(ReleaseRequest {
+                        worker_id: worker_id.clone(),
+                        worker_pid,
+                        registration_nonce: registration_nonce.clone(),
+                        release_nonce: release_nonce.clone(),
+                        identity: identity.clone(),
+                    })?;
+                    let verification = self.release_verifier.verify(&identity, deadline);
+                    self.supervisor
+                        .complete_release(token, verification.clone())?;
+                    let response = match verification {
+                        crate::ScopeReleaseVerification::Released => {
+                            debug!(unit = %identity.unit_name, "payload scope release acknowledged");
+                            WorkerControlRequest::PayloadScopeReleased {
+                                worker_id: worker_id.clone(),
+                                expected_worker_pid: worker_pid,
+                                registration_nonce,
+                                release_nonce,
+                            }
+                        }
+                        crate::ScopeReleaseVerification::RecoveryRequired(reason) => {
+                            debug!(?reason, unit = %identity.unit_name, "payload scope cleanup could not be proven; lifecycle marked recovery required");
+                            WorkerControlRequest::PayloadScopeRecoveryRequired {
+                                worker_id: worker_id.clone(),
+                                expected_worker_pid: worker_pid,
+                                registration_nonce,
+                                release_nonce,
+                                reason,
+                            }
+                        }
+                    };
+                    if write_control_request(&mut control, response).is_err() {
                         break Err(SessionError::WorkerIoFailed);
                     }
                 }
@@ -811,6 +1089,98 @@ mod ownership_tests {
         let future = ownership("runtime-b", "c2");
         assert_ne!(expired.runtime_id, future.runtime_id);
         assert_ne!(expired.logind_session_id, future.logind_session_id);
+    }
+
+    fn identity() -> crate::PayloadScopeIdentity {
+        crate::PayloadScopeIdentity {
+            unit_name: "niralis-payload-release-test.scope".into(),
+            invocation_id: "0123456789abcdef0123456789abcdef".into(),
+            expected_uid: 1000,
+            logind_session_id: crate::LogindSessionId::new("c1".into()).unwrap(),
+        }
+    }
+
+    fn registered_supervisor() -> (WorkerSupervisor, crate::PayloadScopeIdentity) {
+        let supervisor = WorkerSupervisor::new();
+        supervisor.begin_pending("worker-release", 4242).unwrap();
+        let scope = identity();
+        supervisor
+            .record_prepared_scope("worker-release", 4242, scope.clone(), "reg-1".into())
+            .unwrap();
+        (supervisor, scope)
+    }
+
+    #[test]
+    fn release_verification_removes_only_matching_registered_lifecycle() {
+        let (supervisor, scope) = registered_supervisor();
+        let token = supervisor
+            .begin_release(ReleaseRequest {
+                worker_id: "worker-release".into(),
+                worker_pid: 4242,
+                registration_nonce: "reg-1".into(),
+                release_nonce: "release-1".into(),
+                identity: scope,
+            })
+            .unwrap();
+        supervisor
+            .complete_release(token, crate::ScopeReleaseVerification::Released)
+            .unwrap();
+        assert!(supervisor
+            .begin_release(ReleaseRequest {
+                worker_id: "worker-release".into(),
+                worker_pid: 4242,
+                registration_nonce: "reg-1".into(),
+                release_nonce: "release-1".into(),
+                identity: identity(),
+            })
+            .is_err());
+    }
+
+    #[test]
+    fn failed_release_verification_retains_recovery_state() {
+        let (supervisor, scope) = registered_supervisor();
+        let token = supervisor
+            .begin_release(ReleaseRequest {
+                worker_id: "worker-release".into(),
+                worker_pid: 4242,
+                registration_nonce: "reg-1".into(),
+                release_nonce: "release-1".into(),
+                identity: scope,
+            })
+            .unwrap();
+        supervisor
+            .complete_release(
+                token,
+                crate::ScopeReleaseVerification::RecoveryRequired(
+                    crate::PayloadScopeRecoveryReason::MembershipNotEmpty,
+                ),
+            )
+            .unwrap();
+        assert!(supervisor
+            .begin_release(ReleaseRequest {
+                worker_id: "worker-release".into(),
+                worker_pid: 4242,
+                registration_nonce: "reg-1".into(),
+                release_nonce: "release-1".into(),
+                identity: identity(),
+            })
+            .is_err());
+    }
+
+    #[test]
+    fn divergent_release_identity_is_rejected() {
+        let (supervisor, _) = registered_supervisor();
+        let mut other = identity();
+        other.invocation_id = "fedcba9876543210fedcba9876543210".into();
+        assert!(supervisor
+            .begin_release(ReleaseRequest {
+                worker_id: "worker-release".into(),
+                worker_pid: 4242,
+                registration_nonce: "reg-1".into(),
+                release_nonce: "release-1".into(),
+                identity: other,
+            })
+            .is_err());
     }
 }
 

@@ -147,6 +147,47 @@ fn worker_control_request_round_trip_is_bound_to_lifecycle() {
 }
 
 #[test]
+fn payload_scope_release_messages_round_trip_with_identity_and_nonce() {
+    let identity = crate::PayloadScopeIdentity {
+        unit_name: "niralis-payload-release.scope".into(),
+        invocation_id: "0123456789abcdef0123456789abcdef".into(),
+        expected_uid: 1000,
+        logind_session_id: crate::LogindSessionId::new("c1".into()).unwrap(),
+    };
+    let request = crate::WorkerControlRequest::PayloadScopeReleaseRequested {
+        worker_id: "worker-opaque-1".into(),
+        expected_worker_pid: 100,
+        registration_nonce: "reg-1".into(),
+        release_nonce: "release-1".into(),
+        scope_identity: identity.clone(),
+        local_cleanup_succeeded: true,
+    };
+    let encoded = serde_json::to_string(&crate::WorkerEnvelope {
+        version: crate::WORKER_CONTROL_PROTOCOL_VERSION,
+        message: request.clone(),
+    })
+    .unwrap();
+    let decoded: crate::WorkerEnvelope<crate::WorkerControlRequest> =
+        serde_json::from_str(&encoded).unwrap();
+    assert_eq!(decoded.message, request);
+    let recovery = crate::WorkerControlRequest::PayloadScopeRecoveryRequired {
+        worker_id: "worker-opaque-1".into(),
+        expected_worker_pid: 100,
+        registration_nonce: "reg-1".into(),
+        release_nonce: "release-1".into(),
+        reason: crate::PayloadScopeRecoveryReason::InvocationIdMismatch,
+    };
+    let encoded = serde_json::to_string(&crate::WorkerEnvelope {
+        version: crate::WORKER_CONTROL_PROTOCOL_VERSION,
+        message: recovery.clone(),
+    })
+    .unwrap();
+    let decoded: crate::WorkerEnvelope<crate::WorkerControlRequest> =
+        serde_json::from_str(&encoded).unwrap();
+    assert_eq!(decoded.message, recovery);
+}
+
+#[test]
 fn worker_secret_debug_redacts_plaintext() {
     let secret = WorkerSecret::new("secret".to_owned());
     let debug = format!("{secret:?}");
