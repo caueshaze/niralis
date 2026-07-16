@@ -55,6 +55,9 @@ init_dbus_chat(niralis_t)
 # enablement, reboot, reload, or generic service permissions are included.
 init_start(niralis_t)
 init_stop(niralis_t)
+# After the job completes, the worker re-resolves that exact transient unit
+# and reads its manager-reported identity before accepting the boundary.
+init_status(niralis_t)
 # pam_systemd registers the session through logind's private runtime socket.
 # This grants only the socket-file write and server connect permissions.
 systemd_logind_stream_connect(niralis_t)
