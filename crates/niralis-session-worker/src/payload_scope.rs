@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use futures_lite::{future, StreamExt};
 use niralis_session::{LogindSessionId, PayloadScopeIdentity};
-use tracing::info;
+use tracing::{info, warn};
 use zbus::zvariant::{ObjectPath, OwnedObjectPath, Value};
 
 use crate::session_child::SessionChildReport;
@@ -166,7 +166,10 @@ async fn prepare_scope(
     let mut jobs = manager
         .receive_signal_with_args("JobRemoved", &[(2, unit_name.as_str())])
         .await
-        .map_err(|_| PayloadScopeError::StartFailed)?;
+        .map_err(|error| {
+            warn!(?error, unit = %unit_name, "subscribing to the systemd payload-scope job failed");
+            PayloadScopeError::StartFailed
+        })?;
     info!(unit = %unit_name, pid, "transient payload scope requested");
     let job_path: OwnedObjectPath = manager
         .call(
@@ -174,7 +177,10 @@ async fn prepare_scope(
             &(unit_name.as_str(), "fail", properties, auxiliary),
         )
         .await
-        .map_err(|_| PayloadScopeError::StartFailed)?;
+        .map_err(|error| {
+            warn!(?error, unit = %unit_name, pid, "StartTransientUnit rejected the payload scope");
+            PayloadScopeError::StartFailed
+        })?;
     if let Err(error) = wait_job(&mut jobs, &job_path, deadline).await {
         if stop_created_unit(&manager, &unit_name, deadline)
             .await
