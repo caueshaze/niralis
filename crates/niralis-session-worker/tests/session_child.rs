@@ -1,12 +1,52 @@
 use std::path::PathBuf;
 
 use niralis_session_worker::{
-    PrivilegeDropTarget, ProcessSessionChildRunner, SessionChildError, SessionChildExpectation,
-    SessionChildRunner, SessionChildRuntimeContext, SessionChildUnixPath,
+    PrivilegeDropTarget, ProcessSessionChildRunner, SessionChildError,
+    SessionChildExpectation, SessionChildRunner, SessionChildRuntimeContext, SessionChildUnixPath,
 };
 
 fn runner(binary: &str) -> ProcessSessionChildRunner {
     ProcessSessionChildRunner::new(PathBuf::from(binary)).expect("fixture path should be absolute")
+}
+
+#[test]
+fn ready_does_not_commit_exec_automatically() {
+    let runner = runner(env!("CARGO_BIN_EXE_fixture-child-ready-hang"));
+    let pending = runner
+        .run_child_until_ready(expectation())
+        .expect("post-exec Ready should produce a pending handoff");
+    let pid = pending.report().child_pid;
+    assert_eq!(unsafe { libc::kill(pid as libc::pid_t, 0) }, 0);
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    assert_eq!(unsafe { libc::kill(pid as libc::pid_t, 0) }, 0);
+    pending.abort().expect("abort should reap the blocked probe");
+}
+
+#[test]
+fn explicit_commit_transfers_the_same_authoritative_pid() {
+    let runner = runner(env!("CARGO_BIN_EXE_fixture-child-ready-hang"));
+    let pending = runner
+        .run_child_until_ready(expectation())
+        .expect("post-exec Ready should produce a pending handoff");
+    let pid = pending.report().child_pid;
+    let report = pending.commit_exec().expect("CommitExec should succeed");
+    assert_eq!(report.child_pid, pid);
+    assert_eq!(unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) }, 0);
+    let status = runner.wait_for_child().expect("committed child should be owned by runner");
+    assert!(!status.success());
+}
+
+#[test]
+fn dropping_pending_handoff_aborts_and_reaps_the_probe() {
+    let runner = runner(env!("CARGO_BIN_EXE_fixture-child-ready-hang"));
+    let pending = runner
+        .run_child_until_ready(expectation())
+        .expect("post-exec Ready should produce a pending handoff");
+    let pid = pending.report().child_pid;
+    drop(pending);
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    assert_eq!(unsafe { libc::kill(pid as libc::pid_t, 0) }, -1);
+    assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
 }
 
 fn expectation() -> SessionChildExpectation {

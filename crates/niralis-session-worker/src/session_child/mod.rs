@@ -107,10 +107,17 @@ pub enum SessionChildWaitEvent {
 }
 
 pub trait SessionChildRunner: Send + Sync {
+    fn run_child_until_ready(
+        &self,
+        expectation: SessionChildExpectation,
+    ) -> Result<Box<dyn PendingExecHandoff>, SessionChildError>;
+
     fn run_child(
         &self,
         expectation: SessionChildExpectation,
-    ) -> Result<SessionChildReport, SessionChildError>;
+    ) -> Result<SessionChildReport, SessionChildError> {
+        self.run_child_until_ready(expectation)?.commit_exec()
+    }
 
     fn wait_for_child(&self) -> Result<std::process::ExitStatus, SessionChildError> {
         Ok(std::process::ExitStatus::from_raw(0))
@@ -130,6 +137,15 @@ pub trait SessionChildRunner: Send + Sync {
     fn terminate(&self, _grace: Duration) -> Result<std::process::ExitStatus, SessionChildError> {
         Err(SessionChildError::IoFailed)
     }
+}
+
+/// A validated post-exec probe that is still blocked waiting for CommitExec.
+/// Consuming it makes duplicate commit impossible. Dropping it aborts and
+/// reaps the probe instead of leaving it blocked indefinitely.
+pub trait PendingExecHandoff: Send {
+    fn report(&self) -> &SessionChildReport;
+    fn commit_exec(self: Box<Self>) -> Result<SessionChildReport, SessionChildError>;
+    fn abort(self: Box<Self>) -> Result<(), SessionChildError>;
 }
 
 pub trait SessionChildRunnerFactory: Send + Sync {
@@ -180,6 +196,67 @@ struct LiveSessionChild {
     pidfd: OwnedFd,
 }
 
+struct ProcessPendingExecHandoff {
+    attempt: SessionChildAttempt,
+    report: SessionChildReport,
+    pidfd: Option<OwnedFd>,
+    live_child: Arc<Mutex<Option<LiveSessionChild>>>,
+    completed: bool,
+}
+
+impl PendingExecHandoff for ProcessPendingExecHandoff {
+    fn report(&self) -> &SessionChildReport {
+        &self.report
+    }
+
+    fn commit_exec(mut self: Box<Self>) -> Result<SessionChildReport, SessionChildError> {
+        let deadline = Instant::now() + SESSION_CHILD_HANDSHAKE_TIMEOUT;
+        self.attempt.send_commit(deadline)?;
+        match self.attempt.wait_exec_status(deadline)? {
+            ExecStatus::Success => {}
+            ExecStatus::Failure(failure) => {
+                warn!(stage = %failure.stage, errno = failure.errno, "final execve failed");
+                return Err(SessionChildError::ExitFailed);
+            }
+        }
+        if self
+            .attempt
+            .child
+            .as_mut()
+            .expect("child exists")
+            .try_wait()
+            .map_err(|_| SessionChildError::IoFailed)?
+            .is_some()
+        {
+            return Err(SessionChildError::ExitFailed);
+        }
+        let pgid = self.report.process_identity.pgid;
+        let pidfd = self.pidfd.take().ok_or(SessionChildError::IoFailed)?;
+        let mut live_child = self.live_child.lock().map_err(|_| SessionChildError::IoFailed)?;
+        let child = self.attempt.take_child();
+        *live_child = Some(LiveSessionChild { child, pgid, pidfd });
+        self.completed = true;
+        Ok(self.report.clone())
+    }
+
+    fn abort(mut self: Box<Self>) -> Result<(), SessionChildError> {
+        self.attempt.kill_and_reap();
+        self.attempt.finish();
+        self.completed = true;
+        Ok(())
+    }
+}
+
+impl Drop for ProcessPendingExecHandoff {
+    fn drop(&mut self) {
+        if !self.completed {
+            warn!(pid = self.report.child_pid, "pending session exec handoff dropped without CommitExec; aborting probe");
+        }
+        self.attempt.kill_and_reap();
+        self.attempt.finish();
+    }
+}
+
 impl ProcessSessionChildRunner {
     pub fn new(path: PathBuf) -> Result<Self, SessionChildError> {
         if !path.is_absolute() {
@@ -217,10 +294,10 @@ impl Drop for ProcessSessionChildRunner {
 }
 
 impl SessionChildRunner for ProcessSessionChildRunner {
-    fn run_child(
+    fn run_child_until_ready(
         &self,
         expectation: SessionChildExpectation,
-    ) -> Result<SessionChildReport, SessionChildError> {
+    ) -> Result<Box<dyn PendingExecHandoff>, SessionChildError> {
         let deadline = Instant::now() + SESSION_CHILD_HANDSHAKE_TIMEOUT;
         let request = SessionChildEnvelope {
             version: SESSION_CHILD_PROTOCOL_VERSION,
@@ -265,7 +342,6 @@ impl SessionChildRunner for ProcessSessionChildRunner {
             }
             attempt.kill_and_reap();
         }
-        attempt.finish();
         let bytes = reader_result?;
         let response: SessionChildEnvelope<SessionChildResponse> = parse_response(&bytes)?;
         if response.version != SESSION_CHILD_PROTOCOL_VERSION {
@@ -291,49 +367,17 @@ impl SessionChildRunner for ProcessSessionChildRunner {
             return Err(SessionChildError::ExitFailed);
         }
         let report = validate_ready_response(response.message, &expectation, pid, true)?;
-        attempt.send_commit(deadline).map_err(|error| {
-            warn!(?error, "sending CommitExec to the session child failed");
-            error
-        })?;
-        match attempt.wait_exec_status(deadline).map_err(|error| {
-            warn!(?error, "waiting for the session child exec handoff failed");
-            error
-        })? {
-            ExecStatus::Success => {}
-            ExecStatus::Failure(failure) => {
-                warn!(stage = %failure.stage, errno = failure.errno, "final execve failed");
-                attempt.kill_and_reap();
-                return Err(SessionChildError::ExitFailed);
-            }
-        }
-        let exec_status = attempt
-            .child
-            .as_mut()
-            .expect("child exists")
-            .try_wait()
-            .map_err(|error| {
-                warn!(errno = ?error.raw_os_error(), error = %error, "checking session child state after exec handoff failed");
-                SessionChildError::IoFailed
-            })?;
-        if exec_status.is_some() {
-            attempt.kill_and_reap();
-            return Err(SessionChildError::ExitFailed);
-        }
-        let mut child = attempt.take_child();
+        let child = attempt.child.as_ref().expect("child exists");
         let pgid = report.process_identity.pgid;
         let pidfd = match open_pidfd(child.id()) {
             Some(pidfd) => pidfd,
             None => {
-                kill_and_reap(&mut child);
+                attempt.kill_and_reap();
                 return Err(SessionChildError::IoFailed);
             }
         };
-        *self
-            .live_child
-            .lock()
-            .map_err(|_| SessionChildError::IoFailed)? =
-            Some(LiveSessionChild { child, pgid, pidfd });
-        Ok(report)
+        debug_assert_eq!(pgid, report.process_identity.pgid);
+        Ok(Box::new(ProcessPendingExecHandoff { attempt, report, pidfd: Some(pidfd), live_child: self.live_child.clone(), completed: false }))
     }
 
     fn wait_for_child(&self) -> Result<std::process::ExitStatus, SessionChildError> {

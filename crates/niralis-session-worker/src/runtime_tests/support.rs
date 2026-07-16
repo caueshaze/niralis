@@ -263,16 +263,16 @@ struct StubChildRunner {
 }
 
 impl SessionChildRunner for StubChildRunner {
-    fn run_child(
+    fn run_child_until_ready(
         &self,
         expectation: SessionChildExpectation,
-    ) -> Result<SessionChildReport, SessionChildError> {
+    ) -> Result<Box<dyn crate::session_child::PendingExecHandoff>, SessionChildError> {
         self.state.child_calls.fetch_add(1, Ordering::SeqCst);
         self.state
             .child_drop_observations
             .fetch_add(self.state.drops.load(Ordering::SeqCst), Ordering::SeqCst);
         self.result.clone()?;
-        Ok(SessionChildReport {
+        Ok(Box::new(StubPendingExecHandoff { report: SessionChildReport {
             canonical_username: expectation.canonical_username.clone(),
             session_id: expectation.session_id,
             child_pid: 1,
@@ -340,8 +340,18 @@ impl SessionChildRunner for StubChildRunner {
                     foreground_pgid: 1,
                 }
             }),
-        })
+        }}))
     }
+}
+
+struct StubPendingExecHandoff {
+    report: SessionChildReport,
+}
+
+impl crate::session_child::PendingExecHandoff for StubPendingExecHandoff {
+    fn report(&self) -> &SessionChildReport { &self.report }
+    fn commit_exec(self: Box<Self>) -> Result<SessionChildReport, SessionChildError> { Ok(self.report.clone()) }
+    fn abort(self: Box<Self>) -> Result<(), SessionChildError> { Ok(()) }
 }
 
 impl SupplementaryGroupsResolver for StubGroupsResolver {

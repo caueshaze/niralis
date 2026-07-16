@@ -600,7 +600,7 @@ fn run_pam_session<
             // Once Started is emitted, the session may legitimately live for
             // hours or days and is governed by process supervision instead.
             let launch_watchdog_deadline = Instant::now() + watchdog;
-            let child_report = match child_runner.run_child(SessionChildExpectation {
+            let pending_handoff = match child_runner.run_child_until_ready(SessionChildExpectation {
                 canonical_username: canonical_username.clone(),
                 session_id: session.session.id.clone(),
                 target_credentials: PrivilegeDropTarget::from(&credentials),
@@ -626,8 +626,9 @@ fn run_pam_session<
                     return Err(SessionError::AuthenticatedSessionFailed);
                 }
             };
+            let child_report = pending_handoff.report().clone();
             if Instant::now() >= launch_watchdog_deadline {
-                let _ = child_runner.terminate(SESSION_TERMINATION_GRACE);
+                let _ = pending_handoff.abort();
                 drop(transaction);
                 write_envelope(
                     writer,
@@ -648,7 +649,7 @@ fn run_pam_session<
                             observed_context = %observed_context.as_str(),
                             "final session process SELinux context did not match the PAM context"
                         );
-                        let _ = child_runner.terminate(SESSION_TERMINATION_GRACE);
+                        let _ = pending_handoff.abort();
                         drop(transaction);
                         write_envelope(
                             writer,
@@ -665,7 +666,7 @@ fn run_pam_session<
                             ?error,
                             "could not read the final session process SELinux context"
                         );
-                        let _ = child_runner.terminate(SESSION_TERMINATION_GRACE);
+                        let _ = pending_handoff.abort();
                         drop(transaction);
                         write_envelope(
                             writer,
@@ -682,7 +683,7 @@ fn run_pam_session<
                 terminal.lease().seat().as_str(),
                 terminal.lease().vtnr().number(),
             ) {
-                let _ = child_runner.terminate(SESSION_TERMINATION_GRACE);
+                let _ = pending_handoff.abort();
                 drop(transaction);
                 write_envelope(
                     writer,
@@ -704,7 +705,7 @@ fn run_pam_session<
                             terminal.lease().vtnr().number(),
                         ) => {}
                 _ => {
-                    let _ = child_runner.terminate(SESSION_TERMINATION_GRACE);
+                    let _ = pending_handoff.abort();
                     drop(transaction);
                     write_envelope(
                         writer,
@@ -720,7 +721,7 @@ fn run_pam_session<
                 .activate(Duration::from_millis(1000))
                 .is_err()
             {
-                let _ = child_runner.terminate(SESSION_TERMINATION_GRACE);
+                let _ = pending_handoff.abort();
                 drop(transaction);
                 write_envelope(
                     writer,
@@ -730,6 +731,24 @@ fn run_pam_session<
                 )?;
                 return Err(SessionError::AuthenticatedSessionFailed);
             }
+            // A3.0 authorization boundary: the probe is still blocked here.
+            // A3 will create and validate the authoritative payload scope at
+            // this exact point, before CommitExec can run user payload code.
+            if Instant::now() >= launch_watchdog_deadline {
+                let _ = pending_handoff.abort();
+                drop(transaction);
+                write_envelope(writer, WorkerResponse::SessionFailed { code: WorkerSessionFailureCode::SessionChildFailed })?;
+                return Err(SessionError::AuthenticatedSessionFailed);
+            }
+            let child_report = match pending_handoff.commit_exec() {
+                Ok(report) => report,
+                Err(error) => {
+                    warn!(username = %canonical_username, session = %session.session.id, ?error, "worker failed to commit the post-exec session handoff");
+                    drop(transaction);
+                    write_envelope(writer, WorkerResponse::SessionFailed { code: WorkerSessionFailureCode::CommitFailed })?;
+                    return Err(SessionError::AuthenticatedSessionFailed);
+                }
+            };
             info!(
                 username = %canonical_username,
                 session = %session.session.id,

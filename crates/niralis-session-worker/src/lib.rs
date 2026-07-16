@@ -39,6 +39,7 @@ pub use session_child::{
     SessionChildCommit, SessionChildCredentialProof, SessionChildEnvelope, SessionChildError,
     SessionChildErrorCode, SessionChildExpectation, SessionChildIsolationProof, SessionChildReport,
     SessionChildResponse, SessionChildRunner, SessionChildRunnerFactory,
+    PendingExecHandoff,
     SessionChildRuntimeContext, SessionChildTerminalContext, SessionChildTerminalProof,
     SessionChildUnixCredentials, SessionChildUnixPath, SessionProbeHandoff,
     SessionProcessIdentityProof, SessionRuntimeEnvironmentProof, SESSION_CHILD_PROTOCOL_VERSION,
