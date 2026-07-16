@@ -50,6 +50,11 @@ systemd_dbus_chat_logind(niralis_t)
 # Niralis-owned transient payload scope. This interface limits D-Bus messaging
 # to init_t (PID 1); it does not grant generic access to other system services.
 init_dbus_chat(niralis_t)
+# systemd applies separate SELinux method checks to StartTransientUnit and
+# StopUnit. Grant only those manager operations; no unit-file management,
+# enablement, reboot, reload, or generic service permissions are included.
+init_start(niralis_t)
+init_stop(niralis_t)
 # pam_systemd registers the session through logind's private runtime socket.
 # This grants only the socket-file write and server connect permissions.
 systemd_logind_stream_connect(niralis_t)
