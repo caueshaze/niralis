@@ -8,6 +8,7 @@ const DESTINATION: &str = "org.freedesktop.systemd1";
 const MANAGER_PATH: &str = "/org/freedesktop/systemd1";
 const MANAGER_INTERFACE: &str = "org.freedesktop.systemd1.Manager";
 const UNIT_INTERFACE: &str = "org.freedesktop.systemd1.Unit";
+const SCOPE_INTERFACE: &str = "org.freedesktop.systemd1.Scope";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScopeReleaseVerification {
@@ -75,6 +76,13 @@ fn verify_systemd(
         UNIT_INTERFACE,
     )
     .map_err(|_| PayloadScopeRecoveryReason::VerificationUnavailable)?;
+    let scope = zbus::blocking::Proxy::new(
+        &connection,
+        DESTINATION,
+        object_path.as_str(),
+        SCOPE_INTERFACE,
+    )
+    .map_err(|_| PayloadScopeRecoveryReason::VerificationUnavailable)?;
     let id: String = unit
         .get_property("Id")
         .map_err(|_| PayloadScopeRecoveryReason::VerificationUnavailable)?;
@@ -87,10 +95,10 @@ fn verify_systemd(
     let sub: String = unit
         .get_property("SubState")
         .map_err(|_| PayloadScopeRecoveryReason::VerificationUnavailable)?;
-    let slice: String = unit
+    let slice: String = scope
         .get_property("Slice")
         .map_err(|_| PayloadScopeRecoveryReason::VerificationUnavailable)?;
-    let control_group: String = unit
+    let control_group: String = scope
         .get_property("ControlGroup")
         .map_err(|_| PayloadScopeRecoveryReason::VerificationUnavailable)?;
     if id != identity.unit_name

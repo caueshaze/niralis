@@ -15,6 +15,7 @@ const SYSTEMD_DESTINATION: &str = "org.freedesktop.systemd1";
 const SYSTEMD_PATH: &str = "/org/freedesktop/systemd1";
 const SYSTEMD_MANAGER: &str = "org.freedesktop.systemd1.Manager";
 const SYSTEMD_UNIT: &str = "org.freedesktop.systemd1.Unit";
+const SYSTEMD_SCOPE: &str = "org.freedesktop.systemd1.Scope";
 const CGROUP_ROOT: &str = "/sys/fs/cgroup";
 
 #[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
@@ -227,6 +228,17 @@ async fn prepare_scope(
         warn!(?error, unit = %unit_name, object_path = %object_path, "creating the transient payload scope proxy failed");
         PayloadScopeError::InvalidIdentity
     }));
+    let scope = checked!(zbus::Proxy::new(
+        &connection,
+        SYSTEMD_DESTINATION,
+        object_path.as_str(),
+        SYSTEMD_SCOPE
+    )
+    .await
+    .map_err(|error| {
+        warn!(?error, unit = %unit_name, object_path = %object_path, "creating the transient payload scope-specific proxy failed");
+        PayloadScopeError::InvalidIdentity
+    }));
     macro_rules! unit_property {
         ($name:literal) => {
             checked!(unit.get_property($name).await.map_err(|error| {
@@ -238,9 +250,17 @@ async fn prepare_scope(
     let id: String = unit_property!("Id");
     let active: String = unit_property!("ActiveState");
     let sub: String = unit_property!("SubState");
-    let observed_slice: String = unit_property!("Slice");
-    let control_group: String = unit_property!("ControlGroup");
     let invocation: Vec<u8> = unit_property!("InvocationID");
+    macro_rules! scope_property {
+        ($name:literal) => {
+            checked!(scope.get_property($name).await.map_err(|error| {
+                warn!(?error, unit = %unit_name, property = $name, "reading transient payload scope-specific property failed");
+                PayloadScopeError::InvalidIdentity
+            }))
+        };
+    }
+    let observed_slice: String = scope_property!("Slice");
+    let control_group: String = scope_property!("ControlGroup");
     let invocation_id = checked!(hex_id(&invocation).ok_or(PayloadScopeError::InvalidIdentity));
     if id != unit_name
         || active != "active"
