@@ -144,6 +144,7 @@ pub trait SessionChildRunner: Send + Sync {
 /// reaps the probe instead of leaving it blocked indefinitely.
 pub trait PendingExecHandoff: Send {
     fn report(&self) -> &SessionChildReport;
+    fn authoritative_pidfd(&self) -> RawFd;
     fn commit_exec(self: Box<Self>) -> Result<SessionChildReport, SessionChildError>;
     fn abort(self: Box<Self>) -> Result<(), SessionChildError>;
 }
@@ -209,6 +210,10 @@ impl PendingExecHandoff for ProcessPendingExecHandoff {
         &self.report
     }
 
+    fn authoritative_pidfd(&self) -> RawFd {
+        self.pidfd.as_ref().map_or(-1, AsRawFd::as_raw_fd)
+    }
+
     fn commit_exec(mut self: Box<Self>) -> Result<SessionChildReport, SessionChildError> {
         let deadline = Instant::now() + SESSION_CHILD_HANDSHAKE_TIMEOUT;
         self.attempt.send_commit(deadline)?;
@@ -232,7 +237,10 @@ impl PendingExecHandoff for ProcessPendingExecHandoff {
         }
         let pgid = self.report.process_identity.pgid;
         let pidfd = self.pidfd.take().ok_or(SessionChildError::IoFailed)?;
-        let mut live_child = self.live_child.lock().map_err(|_| SessionChildError::IoFailed)?;
+        let mut live_child = self
+            .live_child
+            .lock()
+            .map_err(|_| SessionChildError::IoFailed)?;
         let child = self.attempt.take_child();
         *live_child = Some(LiveSessionChild { child, pgid, pidfd });
         self.completed = true;
@@ -250,7 +258,10 @@ impl PendingExecHandoff for ProcessPendingExecHandoff {
 impl Drop for ProcessPendingExecHandoff {
     fn drop(&mut self) {
         if !self.completed {
-            warn!(pid = self.report.child_pid, "pending session exec handoff dropped without CommitExec; aborting probe");
+            warn!(
+                pid = self.report.child_pid,
+                "pending session exec handoff dropped without CommitExec; aborting probe"
+            );
         }
         self.attempt.kill_and_reap();
         self.attempt.finish();
@@ -377,7 +388,13 @@ impl SessionChildRunner for ProcessSessionChildRunner {
             }
         };
         debug_assert_eq!(pgid, report.process_identity.pgid);
-        Ok(Box::new(ProcessPendingExecHandoff { attempt, report, pidfd: Some(pidfd), live_child: self.live_child.clone(), completed: false }))
+        Ok(Box::new(ProcessPendingExecHandoff {
+            attempt,
+            report,
+            pidfd: Some(pidfd),
+            live_child: self.live_child.clone(),
+            completed: false,
+        }))
     }
 
     fn wait_for_child(&self) -> Result<std::process::ExitStatus, SessionChildError> {

@@ -1,6 +1,7 @@
 mod identity;
 mod isolation;
 mod logind;
+mod payload_scope;
 mod privilege_drop;
 mod runtime;
 #[cfg(test)]
@@ -23,6 +24,9 @@ pub use isolation::{
 pub use logind::{
     LogindError, LogindSessionId, LogindSessionIdentity, LogindSessionResolver, SdLoginResolver,
 };
+pub use payload_scope::{
+    AuthoritativePayloadScope, PayloadScopeError, PayloadScopeManager, SystemdPayloadScopeManager,
+};
 pub use privilege_drop::{
     AppliedCredentials, LibcPrivilegeDropper, PrivilegeDropError, PrivilegeDropTarget,
     PrivilegeDropper,
@@ -35,15 +39,14 @@ pub use selinux::{
     LinuxSelinuxContextManager, PamSelinuxExecContext, SelinuxContextManager, SelinuxError,
 };
 pub use session_child::{
-    FinalExecFailure, ProcessSessionChildRunner, ProcessSessionChildRunnerFactory,
-    SessionChildCommit, SessionChildCredentialProof, SessionChildEnvelope, SessionChildError,
-    SessionChildErrorCode, SessionChildExpectation, SessionChildIsolationProof, SessionChildReport,
-    SessionChildResponse, SessionChildRunner, SessionChildRunnerFactory,
-    PendingExecHandoff,
-    SessionChildRuntimeContext, SessionChildTerminalContext, SessionChildTerminalProof,
-    SessionChildUnixCredentials, SessionChildUnixPath, SessionProbeHandoff,
-    SessionProcessIdentityProof, SessionRuntimeEnvironmentProof, SESSION_CHILD_PROTOCOL_VERSION,
-    SESSION_EXEC_PROBE_VERSION,
+    FinalExecFailure, PendingExecHandoff, ProcessSessionChildRunner,
+    ProcessSessionChildRunnerFactory, SessionChildCommit, SessionChildCredentialProof,
+    SessionChildEnvelope, SessionChildError, SessionChildErrorCode, SessionChildExpectation,
+    SessionChildIsolationProof, SessionChildReport, SessionChildResponse, SessionChildRunner,
+    SessionChildRunnerFactory, SessionChildRuntimeContext, SessionChildTerminalContext,
+    SessionChildTerminalProof, SessionChildUnixCredentials, SessionChildUnixPath,
+    SessionProbeHandoff, SessionProcessIdentityProof, SessionRuntimeEnvironmentProof,
+    SESSION_CHILD_PROTOCOL_VERSION, SESSION_EXEC_PROBE_VERSION,
 };
 pub use smoke::{authorize_real_graphical_smoke, RealGraphicalSmokeGuardError};
 pub use user_bus::{prove_user_bus, UserBusError};

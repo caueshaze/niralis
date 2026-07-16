@@ -42,6 +42,7 @@ pub struct WorkerDependencies<'a, F, I, G, C, L> {
     pub virtual_terminal_allocator: &'a dyn VirtualTerminalAllocator,
     pub runtime_dir_validator: &'a dyn RuntimeDirValidator,
     pub selinux_context_manager: &'a dyn SelinuxContextManager,
+    pub payload_scope_manager: &'a dyn crate::payload_scope::PayloadScopeManager,
 }
 
 pub trait RuntimeDirValidator: Send + Sync {
@@ -117,6 +118,7 @@ pub fn run_worker_process<R: Read, W: Write>(
             virtual_terminal_allocator: &LinuxVirtualTerminalAllocator,
             runtime_dir_validator: &LinuxRuntimeDirValidator,
             selinux_context_manager: &LinuxSelinuxContextManager,
+            payload_scope_manager: &crate::payload_scope::SystemdPayloadScopeManager,
         },
     )
 }
@@ -198,11 +200,12 @@ pub fn run_worker_process_with_dependencies<
                 session_child_path,
                 session_probe_path,
                 control_path,
-            worker_id,
-            launcher_pid,
+                worker_id,
+                launcher_pid,
                 dependencies.virtual_terminal_allocator,
                 dependencies.runtime_dir_validator,
                 dependencies.selinux_context_manager,
+                dependencies.payload_scope_manager,
                 launch_plan,
             )
         }
@@ -230,10 +233,11 @@ fn run_pam_session<
     session_probe_path: std::path::PathBuf,
     control_path: std::path::PathBuf,
     worker_id: String,
-    _launcher_pid: u32,
+    launcher_pid: u32,
     virtual_terminal_allocator: &dyn VirtualTerminalAllocator,
     runtime_dir_validator: &dyn RuntimeDirValidator,
     selinux_context_manager: &dyn SelinuxContextManager,
+    payload_scope_manager: &dyn crate::payload_scope::PayloadScopeManager,
     launch_plan: niralis_session::SessionExecPlan,
 ) -> Result<(), SessionError> {
     if launch_plan.validate().is_err() {
@@ -746,9 +750,8 @@ fn run_pam_session<
                 )?;
                 return Err(SessionError::AuthenticatedSessionFailed);
             }
-            // A3.0 authorization boundary: the probe is still blocked here.
-            // A3 will create and validate the authoritative payload scope at
-            // this exact point, before CommitExec can run user payload code.
+            // The post-exec probe remains blocked until its dedicated systemd
+            // scope is created, independently re-resolved, and registered.
             if Instant::now() >= launch_watchdog_deadline {
                 let _ = pending_handoff.abort();
                 drop(transaction);
@@ -760,10 +763,115 @@ fn run_pam_session<
                 )?;
                 return Err(SessionError::AuthenticatedSessionFailed);
             }
+            let requires_registration = payload_scope_manager.requires_supervisor_registration();
+            if requires_registration && control_listener.is_none() {
+                let _ = pending_handoff.abort();
+                drop(transaction);
+                write_envelope(
+                    writer,
+                    WorkerResponse::SessionFailed {
+                        code: WorkerSessionFailureCode::SessionChildFailed,
+                    },
+                )?;
+                return Err(SessionError::AuthenticatedSessionFailed);
+            }
+            let logind_session_id =
+                niralis_session::LogindSessionId::new(logind.id.as_str().to_owned())
+                    .ok_or(SessionError::AuthenticatedSessionFailed)?;
+            let authoritative_scope = match payload_scope_manager.prepare(
+                pending_handoff.report(),
+                pending_handoff.authoritative_pidfd(),
+                credentials.identity.uid,
+                &logind_session_id,
+                std::process::id(),
+                launcher_pid,
+                launch_watchdog_deadline,
+            ) {
+                Ok(scope) => scope,
+                Err(error) => {
+                    warn!(
+                        ?error,
+                        "authoritative payload scope preparation failed before CommitExec"
+                    );
+                    let _ = pending_handoff.abort();
+                    drop(transaction);
+                    write_envelope(
+                        writer,
+                        WorkerResponse::SessionFailed {
+                            code: WorkerSessionFailureCode::SessionChildFailed,
+                        },
+                    )?;
+                    return Err(SessionError::AuthenticatedSessionFailed);
+                }
+            };
+            if requires_registration {
+                let registration_nonce = authoritative_scope.identity().invocation_id.clone();
+                if let Err(error) = write_envelope(
+                    writer,
+                    WorkerResponse::PayloadScopePrepared {
+                        worker_id: worker_id.clone(),
+                        expected_worker_pid: std::process::id(),
+                        session_pid: pending_handoff.report().child_pid,
+                        registration_nonce: registration_nonce.clone(),
+                        scope_identity: authoritative_scope.identity().clone(),
+                    },
+                ) {
+                    let _ = pending_handoff.abort();
+                    if let Err(cleanup_error) =
+                        authoritative_scope.cleanup(launch_watchdog_deadline)
+                    {
+                        warn!(
+                            ?cleanup_error,
+                            "payload scope cleanup after registration transport failure failed"
+                        );
+                    }
+                    drop(transaction);
+                    return Err(error);
+                }
+                info!(unit = %authoritative_scope.identity().unit_name, "payload scope prepared for supervisor registration");
+                if let Err(error) = await_payload_scope_ack(
+                    control_listener
+                        .as_ref()
+                        .expect("registration requires listener"),
+                    &worker_id,
+                    std::process::id(),
+                    &registration_nonce,
+                    0,
+                    launcher_pid,
+                    launch_watchdog_deadline,
+                ) {
+                    warn!(?error, "payload scope registration acknowledgement failed");
+                    let _ = pending_handoff.abort();
+                    if let Err(cleanup_error) =
+                        authoritative_scope.cleanup(launch_watchdog_deadline)
+                    {
+                        warn!(?cleanup_error, "payload scope pre-commit cleanup failed");
+                    }
+                    drop(transaction);
+                    write_envelope(
+                        writer,
+                        WorkerResponse::SessionFailed {
+                            code: WorkerSessionFailureCode::SessionChildFailed,
+                        },
+                    )?;
+                    return Err(SessionError::AuthenticatedSessionFailed);
+                }
+                info!(
+                    "authenticated payload scope registration acknowledged; CommitExec authorized"
+                );
+            }
             let child_report = match pending_handoff.commit_exec() {
                 Ok(report) => report,
                 Err(error) => {
                     warn!(username = %canonical_username, session = %session.session.id, ?error, "worker failed to commit the post-exec session handoff");
+                    if let Err(cleanup_error) =
+                        authoritative_scope.cleanup(launch_watchdog_deadline)
+                    {
+                        warn!(
+                            ?cleanup_error,
+                            "payload scope cleanup after CommitExec failure failed"
+                        );
+                    }
                     drop(transaction);
                     write_envelope(
                         writer,
@@ -774,6 +882,9 @@ fn run_pam_session<
                     return Err(SessionError::AuthenticatedSessionFailed);
                 }
             };
+            // Ownership of the validated boundary remains live for the entire
+            // Running state. A3.2 will use it for bounded scope termination.
+            let _authoritative_scope = authoritative_scope;
             info!(
                 username = %canonical_username,
                 session = %session.session.id,

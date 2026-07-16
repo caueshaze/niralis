@@ -51,6 +51,7 @@ enum WorkerSupervisorMessage {
         session_pgid: u32,
         worker_id: String,
         logind_session_id: crate::LogindSessionId,
+        payload_scope: crate::PayloadScopeIdentity,
         control_path: PathBuf,
         control_dir: TempDir,
     },
@@ -83,6 +84,7 @@ struct SupervisedWorker {
 struct RuntimeOwnership {
     runtime_id: RuntimeSessionId,
     logind_session_id: crate::LogindSessionId,
+    payload_scope: crate::PayloadScopeIdentity,
 }
 
 struct PendingWorkerLifecycle {
@@ -185,6 +187,7 @@ impl WorkerSupervisor {
                         session_pgid,
                         worker_id,
                         logind_session_id,
+                        payload_scope,
                         control_path,
                         control_dir,
                     }) => {
@@ -197,6 +200,7 @@ impl WorkerSupervisor {
                             ownership: RuntimeOwnership {
                                 runtime_id,
                                 logind_session_id,
+                                payload_scope,
                             },
                             child,
                             session,
@@ -333,6 +337,7 @@ impl WorkerSupervisor {
         session_pgid: u32,
         worker_id: String,
         logind_session_id: crate::LogindSessionId,
+        payload_scope: crate::PayloadScopeIdentity,
         control_path: PathBuf,
         control_dir: TempDir,
     ) -> Result<RuntimeSessionId, SessionError> {
@@ -353,6 +358,7 @@ impl WorkerSupervisor {
             session_pgid,
             worker_id,
             logind_session_id,
+            payload_scope,
             control_path,
             control_dir,
         }) {
@@ -688,13 +694,19 @@ impl WorkerSessionLauncher {
                     && (started_worker_id == worker_id || started_worker_id.is_empty())
                     && session_pgid == session_pid =>
                 {
-                    if let PendingLaunchPhase::ScopeRegistered {
+                    let payload_scope = if let PendingLaunchPhase::ScopeRegistered {
                         identity,
                         registration_nonce,
                     } = &phase
                     {
                         debug!(unit = %identity.unit_name, nonce_len = registration_nonce.len(), "promoting pre-Started payload scope registration");
-                    }
+                        if identity.logind_session_id != logind_session_id {
+                            return Err(SessionError::WorkerProtocolFailed);
+                        }
+                        identity.clone()
+                    } else {
+                        return Err(SessionError::WorkerProtocolFailed);
+                    };
                     if !attempt.is_alive()? {
                         return Err(SessionError::WorkerExitedAfterStart);
                     }
@@ -707,6 +719,7 @@ impl WorkerSessionLauncher {
                         session_pgid,
                         worker_id,
                         logind_session_id,
+                        payload_scope,
                         control_path,
                         control_dir,
                     )?;
@@ -769,6 +782,12 @@ mod ownership_tests {
         RuntimeOwnership {
             runtime_id: RuntimeSessionId::new(runtime.to_owned()),
             logind_session_id: crate::LogindSessionId::new(logind.to_owned()).unwrap(),
+            payload_scope: crate::PayloadScopeIdentity {
+                unit_name: format!("niralis-payload-{runtime}.scope"),
+                invocation_id: "0123456789abcdef0123456789abcdef".into(),
+                expected_uid: 1000,
+                logind_session_id: crate::LogindSessionId::new(logind.to_owned()).unwrap(),
+            },
         }
     }
 

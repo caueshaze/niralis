@@ -33,3 +33,6 @@ tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 which = "8.0.0"
 zeroize = "1.8.1"
+zbus = { version = "5.12.0", default-features = false, features = ["blocking-api", "async-io"] }
+async-io = "2.6.0"
+futures-lite = "2.6.1"

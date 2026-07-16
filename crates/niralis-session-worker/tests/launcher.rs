@@ -59,20 +59,12 @@ fn worker_launcher_returns_started_session() {
 }
 
 #[test]
-fn started_worker_returns_before_worker_exit() {
+fn started_without_registered_payload_scope_is_rejected() {
     let launcher = launcher_for(env!("CARGO_BIN_EXE_fixture-started-then-hang"));
-    let started_at = std::time::Instant::now();
-    let started = launcher
-        .start_session(request())
-        .expect("started response should succeed");
     assert_eq!(
-        started,
-        StartedSession {
-            username: "test".into(),
-            session: request().session
-        }
+        launcher.start_session(request()),
+        Err(SessionError::WorkerProtocolFailed)
     );
-    assert!(started_at.elapsed() < Duration::from_secs(1));
 }
 
 fn controlled_launcher(bin: &str) -> WorkerSessionLauncher {

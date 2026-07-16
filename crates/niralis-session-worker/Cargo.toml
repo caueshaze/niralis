@@ -19,6 +19,9 @@ thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 zeroize.workspace = true
+zbus.workspace = true
+async-io.workspace = true
+futures-lite.workspace = true
 
 [dev-dependencies]
 niralis-session = { workspace = true, features = ["integration-test-control"] }
