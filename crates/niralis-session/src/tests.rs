@@ -40,6 +40,7 @@ fn worker_request_round_trip_preserves_wayland_x11_and_secret() {
                 session_probe_path: PathBuf::from("/usr/libexec/niralis-session-probe"),
                 control_path: PathBuf::from("/run/niralis/worker-control/control.sock"),
                 worker_id: "worker-1".to_owned(),
+                launcher_pid: 123,
                 launch_plan: SessionExecPlan {
                     source_path: b"/usr/share/wayland-sessions/niri.desktop".to_vec(),
                     executable: b"/usr/bin/niri".to_vec(),
@@ -61,6 +62,7 @@ fn worker_request_round_trip_preserves_wayland_x11_and_secret() {
                 session_probe_path,
                 control_path,
                 worker_id,
+                launcher_pid,
                 launch_plan,
             } => {
                 assert_eq!(request.username, "test");
@@ -80,6 +82,7 @@ fn worker_request_round_trip_preserves_wayland_x11_and_secret() {
                     PathBuf::from("/run/niralis/worker-control/control.sock")
                 );
                 assert_eq!(worker_id, "worker-1");
+                assert_eq!(launcher_pid, 123);
                 assert_eq!(
                     launch_plan.argv,
                     vec![b"niri".to_vec(), b"--session".to_vec()]

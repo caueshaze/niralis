@@ -5,9 +5,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::{LogindSessionId, SessionRequest, StartedSession, WorkerSecret};
 
-pub const WORKER_PROTOCOL_VERSION: u32 = 10;
+/// Worker/launcher launch stream. Version 11 changes the response side from a
+/// single terminal frame to a bounded sequence ending in Started/Failed.
+pub const WORKER_PROTOCOL_VERSION: u32 = 11;
 pub const MAX_WORKER_MESSAGE_BYTES: usize = 64 * 1024;
-pub const WORKER_CONTROL_PROTOCOL_VERSION: u32 = 1;
+pub const WORKER_CONTROL_PROTOCOL_VERSION: u32 = 2;
 pub const MAX_WORKER_CONTROL_MESSAGE_BYTES: usize = 4096;
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,11 +69,17 @@ pub enum WorkerRequest {
         session_probe_path: PathBuf,
         control_path: PathBuf,
         worker_id: String,
+        launcher_pid: u32,
     },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WorkerControlRequest {
+    PayloadScopeRegistered {
+        worker_id: String,
+        expected_worker_pid: u32,
+        registration_nonce: String,
+    },
     Terminate {
         worker_id: String,
         expected_worker_pid: u32,
@@ -82,6 +90,20 @@ pub enum WorkerControlRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WorkerResponse {
+    /// Non-terminal event proving that the worker entered the authenticated
+    /// launch lifecycle. A3.1 will use the same stream for scope registration.
+    Preparing {
+        worker_id: String,
+    },
+    /// Reserved pre-Started lifecycle event. Production does not emit this
+    /// until a real transient scope identity exists.
+    PayloadScopePrepared {
+        worker_id: String,
+        expected_worker_pid: u32,
+        session_pid: u32,
+        registration_nonce: String,
+        scope_identity: PayloadScopeIdentity,
+    },
     Started {
         session: StartedSession,
         session_pid: u32,
@@ -100,6 +122,32 @@ pub enum WorkerResponse {
     Rejected {
         code: WorkerErrorCode,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PayloadScopeIdentity {
+    pub unit_name: String,
+    pub invocation_id: String,
+    pub expected_uid: u32,
+    pub logind_session_id: LogindSessionId,
+}
+
+impl PayloadScopeIdentity {
+    pub fn validate(&self) -> bool {
+        self.unit_name.starts_with("niralis-payload-")
+            && self.unit_name.ends_with(".scope")
+            && self.unit_name.len() <= 255
+            && self
+                .unit_name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_'))
+            && self.invocation_id.len() == 32
+            && self
+                .invocation_id
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+            && self.expected_uid != 0
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

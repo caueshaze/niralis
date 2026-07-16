@@ -22,3 +22,4 @@ zeroize.workspace = true
 
 [dev-dependencies]
 niralis-session = { workspace = true, features = ["integration-test-control"] }
+tempfile.workspace = true

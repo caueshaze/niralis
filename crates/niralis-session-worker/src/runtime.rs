@@ -175,25 +175,37 @@ pub fn run_worker_process_with_dependencies<
             session_probe_path,
             control_path,
             worker_id,
-        } => run_pam_session(
-            writer,
-            dependencies.authenticator_factory,
-            dependencies.identity_resolver,
-            dependencies.supplementary_groups_resolver,
-            dependencies.session_child_runner_factory,
-            dependencies.logind_resolver,
-            request,
-            pam_service,
-            password,
-            session_child_path,
-            session_probe_path,
-            control_path,
+            launcher_pid,
+        } => {
+            if !control_path.as_os_str().is_empty() {
+                write_envelope(
+                    writer,
+                    WorkerResponse::Preparing {
+                        worker_id: worker_id.clone(),
+                    },
+                )?;
+            }
+            run_pam_session(
+                writer,
+                dependencies.authenticator_factory,
+                dependencies.identity_resolver,
+                dependencies.supplementary_groups_resolver,
+                dependencies.session_child_runner_factory,
+                dependencies.logind_resolver,
+                request,
+                pam_service,
+                password,
+                session_child_path,
+                session_probe_path,
+                control_path,
             worker_id,
-            dependencies.virtual_terminal_allocator,
-            dependencies.runtime_dir_validator,
-            dependencies.selinux_context_manager,
-            launch_plan,
-        ),
+            launcher_pid,
+                dependencies.virtual_terminal_allocator,
+                dependencies.runtime_dir_validator,
+                dependencies.selinux_context_manager,
+                launch_plan,
+            )
+        }
     }
 }
 
@@ -218,6 +230,7 @@ fn run_pam_session<
     session_probe_path: std::path::PathBuf,
     control_path: std::path::PathBuf,
     worker_id: String,
+    _launcher_pid: u32,
     virtual_terminal_allocator: &dyn VirtualTerminalAllocator,
     runtime_dir_validator: &dyn RuntimeDirValidator,
     selinux_context_manager: &dyn SelinuxContextManager,
@@ -600,19 +613,21 @@ fn run_pam_session<
             // Once Started is emitted, the session may legitimately live for
             // hours or days and is governed by process supervision instead.
             let launch_watchdog_deadline = Instant::now() + watchdog;
-            let pending_handoff = match child_runner.run_child_until_ready(SessionChildExpectation {
-                canonical_username: canonical_username.clone(),
-                session_id: session.session.id.clone(),
-                target_credentials: PrivilegeDropTarget::from(&credentials),
-                runtime,
-                terminal: Some(SessionChildTerminalContext {
-                    seat: terminal.lease().seat().as_str().to_owned(),
-                    vtnr: terminal.lease().vtnr().number(),
-                    fd: 3,
-                    device_major: 4,
-                    device_minor: terminal.lease().vtnr().number(),
-                }),
-            }) {
+            let pending_handoff = match child_runner.run_child_until_ready(
+                SessionChildExpectation {
+                    canonical_username: canonical_username.clone(),
+                    session_id: session.session.id.clone(),
+                    target_credentials: PrivilegeDropTarget::from(&credentials),
+                    runtime,
+                    terminal: Some(SessionChildTerminalContext {
+                        seat: terminal.lease().seat().as_str().to_owned(),
+                        vtnr: terminal.lease().vtnr().number(),
+                        fd: 3,
+                        device_major: 4,
+                        device_minor: terminal.lease().vtnr().number(),
+                    }),
+                },
+            ) {
                 Ok(report) => report,
                 Err(error) => {
                     warn!(username = %canonical_username, session = %session.session.id, ?error, "worker session child failed");
@@ -737,7 +752,12 @@ fn run_pam_session<
             if Instant::now() >= launch_watchdog_deadline {
                 let _ = pending_handoff.abort();
                 drop(transaction);
-                write_envelope(writer, WorkerResponse::SessionFailed { code: WorkerSessionFailureCode::SessionChildFailed })?;
+                write_envelope(
+                    writer,
+                    WorkerResponse::SessionFailed {
+                        code: WorkerSessionFailureCode::SessionChildFailed,
+                    },
+                )?;
                 return Err(SessionError::AuthenticatedSessionFailed);
             }
             let child_report = match pending_handoff.commit_exec() {
@@ -745,7 +765,12 @@ fn run_pam_session<
                 Err(error) => {
                     warn!(username = %canonical_username, session = %session.session.id, ?error, "worker failed to commit the post-exec session handoff");
                     drop(transaction);
-                    write_envelope(writer, WorkerResponse::SessionFailed { code: WorkerSessionFailureCode::CommitFailed })?;
+                    write_envelope(
+                        writer,
+                        WorkerResponse::SessionFailed {
+                            code: WorkerSessionFailureCode::CommitFailed,
+                        },
+                    )?;
                     return Err(SessionError::AuthenticatedSessionFailed);
                 }
             };
@@ -915,6 +940,9 @@ fn wait_for_session(
                             return Err(SessionError::AuthenticatedSessionFailed);
                         }
                         match request.message {
+                            WorkerControlRequest::PayloadScopeRegistered { .. } => {
+                                return Err(SessionError::AuthenticatedSessionFailed);
+                            }
                             WorkerControlRequest::Terminate {
                                 worker_id: requested_worker_id,
                                 expected_worker_pid,
@@ -942,6 +970,10 @@ fn wait_for_session(
 }
 
 fn peer_is_root(stream: &UnixStream) -> bool {
+    peer_credentials(stream).is_some_and(|credentials| credentials.uid == 0)
+}
+
+fn peer_credentials(stream: &UnixStream) -> Option<libc::ucred> {
     let mut credentials = libc::ucred {
         pid: 0,
         uid: 0,
@@ -957,7 +989,137 @@ fn peer_is_root(stream: &UnixStream) -> bool {
             &mut length,
         )
     };
-    result == 0 && credentials.uid == 0
+    (result == 0).then_some(credentials)
+}
+
+/// Waits for the launcher to acknowledge a scope identity it has already
+/// persisted. A3.1 calls this between PayloadScopePrepared and CommitExec.
+#[cfg_attr(not(test), allow(dead_code))]
+fn await_payload_scope_ack(
+    listener: &UnixListener,
+    worker_id: &str,
+    expected_worker_pid: u32,
+    registration_nonce: &str,
+    expected_peer_uid: u32,
+    expected_peer_pid: u32,
+    deadline: Instant,
+) -> Result<(), SessionError> {
+    let timeout = deadline
+        .checked_duration_since(Instant::now())
+        .ok_or(SessionError::WorkerTimedOut)?;
+    let mut pollfd = libc::pollfd {
+        fd: listener.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let milliseconds = timeout.as_millis().min(i32::MAX as u128) as i32;
+    let result = unsafe { libc::poll(&mut pollfd, 1, milliseconds) };
+    if result == 0 {
+        return Err(SessionError::WorkerTimedOut);
+    }
+    if result < 0 || pollfd.revents & libc::POLLIN == 0 {
+        return Err(SessionError::WorkerIoFailed);
+    }
+    let (mut stream, _) = listener
+        .accept()
+        .map_err(|_| SessionError::WorkerIoFailed)?;
+    let credentials = peer_credentials(&stream).ok_or(SessionError::WorkerProtocolFailed)?;
+    if credentials.uid != expected_peer_uid || credentials.pid as u32 != expected_peer_pid {
+        return Err(SessionError::WorkerProtocolFailed);
+    }
+    let envelope = read_control_request(&mut stream)?;
+    if envelope.version != WORKER_CONTROL_PROTOCOL_VERSION {
+        return Err(SessionError::WorkerProtocolFailed);
+    }
+    match envelope.message {
+        WorkerControlRequest::PayloadScopeRegistered {
+            worker_id: ack_worker_id,
+            expected_worker_pid: ack_pid,
+            registration_nonce: ack_nonce,
+        } if ack_worker_id == worker_id
+            && ack_pid == expected_worker_pid
+            && ack_nonce == registration_nonce =>
+        {
+            Ok(())
+        }
+        _ => Err(SessionError::WorkerProtocolFailed),
+    }
+}
+
+#[cfg(test)]
+mod pre_started_ack_tests {
+    use super::*;
+
+    #[test]
+    fn correlated_ack_round_trips_before_started() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("control.sock");
+        let listener = bind_control_listener(&path).unwrap();
+        let writer = std::thread::spawn(move || {
+            let mut stream = loop {
+                match UnixStream::connect(&path) {
+                    Ok(stream) => break stream,
+                    Err(_) => std::thread::yield_now(),
+                }
+            };
+            niralis_session::write_control_request(
+                &mut stream,
+                WorkerControlRequest::PayloadScopeRegistered {
+                    worker_id: "worker-test".into(),
+                    expected_worker_pid: 42,
+                    registration_nonce: "nonce-test".into(),
+                },
+            )
+            .unwrap();
+        });
+        await_payload_scope_ack(
+            &listener,
+            "worker-test",
+            42,
+            "nonce-test",
+            unsafe { libc::getuid() },
+            std::process::id(),
+            Instant::now() + Duration::from_secs(1),
+        )
+        .unwrap();
+        writer.join().unwrap();
+    }
+
+    #[test]
+    fn divergent_ack_is_rejected() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("control.sock");
+        let listener = bind_control_listener(&path).unwrap();
+        let writer = std::thread::spawn(move || {
+            let mut stream = loop {
+                if let Ok(stream) = UnixStream::connect(&path) {
+                    break stream;
+                }
+            };
+            niralis_session::write_control_request(
+                &mut stream,
+                WorkerControlRequest::PayloadScopeRegistered {
+                    worker_id: "other-worker".into(),
+                    expected_worker_pid: 42,
+                    registration_nonce: "nonce-test".into(),
+                },
+            )
+            .unwrap();
+        });
+        assert_eq!(
+            await_payload_scope_ack(
+                &listener,
+                "worker-test",
+                42,
+                "nonce-test",
+                unsafe { libc::getuid() },
+                std::process::id(),
+                Instant::now() + Duration::from_secs(1)
+            ),
+            Err(SessionError::WorkerProtocolFailed)
+        );
+        writer.join().unwrap();
+    }
 }
 
 #[cfg(test)]

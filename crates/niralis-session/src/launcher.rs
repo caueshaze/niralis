@@ -29,6 +29,20 @@ pub struct WorkerSessionLauncher {
 
 #[derive(Debug)]
 enum WorkerSupervisorMessage {
+    BeginPending {
+        worker_id: String,
+        worker_pid: u32,
+        result: mpsc::Sender<Result<(), SessionError>>,
+    },
+    RecordPreparedScope {
+        worker_id: String,
+        worker_pid: u32,
+        identity: crate::PayloadScopeIdentity,
+        result: mpsc::Sender<Result<(), SessionError>>,
+    },
+    AbortPending {
+        worker_id: String,
+    },
     Register {
         runtime_id: RuntimeSessionId,
         child: Child,
@@ -71,13 +85,98 @@ struct RuntimeOwnership {
     logind_session_id: crate::LogindSessionId,
 }
 
+struct PendingWorkerLifecycle {
+    worker_id: String,
+    worker_pid: u32,
+    payload_scope: Option<crate::PayloadScopeIdentity>,
+    terminal_before_started: bool,
+}
+
+#[derive(Debug)]
+enum PendingLaunchPhase {
+    Spawned,
+    Preparing,
+    ScopeRegistered {
+        identity: crate::PayloadScopeIdentity,
+        registration_nonce: String,
+    },
+}
+
+struct PendingSupervisorGuard {
+    supervisor: Arc<WorkerSupervisor>,
+    worker_id: String,
+}
+
+impl Drop for PendingSupervisorGuard {
+    fn drop(&mut self) {
+        self.supervisor.abort_pending(&self.worker_id);
+    }
+}
+
 impl WorkerSupervisor {
     fn new() -> Self {
         let (sender, receiver) = mpsc::channel();
         let join = thread::spawn(move || {
             let mut children: Vec<SupervisedWorker> = Vec::new();
+            let mut pending: Vec<PendingWorkerLifecycle> = Vec::new();
             loop {
                 match receiver.recv_timeout(Duration::from_millis(25)) {
+                    Ok(WorkerSupervisorMessage::BeginPending {
+                        worker_id,
+                        worker_pid,
+                        result,
+                    }) => {
+                        let outcome = if worker_id.is_empty()
+                            || pending.iter().any(|entry| entry.worker_id == worker_id)
+                        {
+                            Err(SessionError::WorkerProtocolFailed)
+                        } else {
+                            pending.push(PendingWorkerLifecycle {
+                                worker_id,
+                                worker_pid,
+                                payload_scope: None,
+                                terminal_before_started: false,
+                            });
+                            Ok(())
+                        };
+                        let _ = result.send(outcome);
+                    }
+                    Ok(WorkerSupervisorMessage::RecordPreparedScope {
+                        worker_id,
+                        worker_pid,
+                        identity,
+                        result,
+                    }) => {
+                        let outcome = match pending.iter_mut().find(|entry| {
+                            entry.worker_id == worker_id && entry.worker_pid == worker_pid
+                        }) {
+                            Some(entry)
+                                if !entry.terminal_before_started
+                                    && entry
+                                        .payload_scope
+                                        .as_ref()
+                                        .is_none_or(|existing| existing == &identity) =>
+                            {
+                                entry.payload_scope = Some(identity);
+                                Ok(())
+                            }
+                            _ => Err(SessionError::WorkerProtocolFailed),
+                        };
+                        let _ = result.send(outcome);
+                    }
+                    Ok(WorkerSupervisorMessage::AbortPending { worker_id }) => {
+                        if let Some(index) = pending
+                            .iter()
+                            .position(|entry| entry.worker_id == worker_id)
+                        {
+                            if pending[index].payload_scope.is_some() {
+                                pending[index].terminal_before_started = true;
+                                debug!(worker_id, "worker exited before Started with prepared payload identity retained for future emergency recovery");
+                            } else {
+                                pending.swap_remove(index);
+                            }
+                        }
+                    }
                     Ok(WorkerSupervisorMessage::Register {
                         runtime_id,
                         child,
@@ -88,19 +187,26 @@ impl WorkerSupervisor {
                         logind_session_id,
                         control_path,
                         control_dir,
-                    }) => children.push(SupervisedWorker {
-                        ownership: RuntimeOwnership {
-                            runtime_id,
-                            logind_session_id,
-                        },
-                        child,
-                        session,
-                        session_pid,
-                        session_pgid,
-                        worker_id,
-                        control_path,
-                        _control_dir: control_dir,
-                    }),
+                    }) => {
+                        if let Some(index) = pending.iter().position(|entry| {
+                            entry.worker_id == worker_id && entry.worker_pid == child.id()
+                        }) {
+                            pending.swap_remove(index);
+                        }
+                        children.push(SupervisedWorker {
+                            ownership: RuntimeOwnership {
+                                runtime_id,
+                                logind_session_id,
+                            },
+                            child,
+                            session,
+                            session_pid,
+                            session_pgid,
+                            worker_id,
+                            control_path,
+                            _control_dir: control_dir,
+                        })
+                    }
                     Ok(WorkerSupervisorMessage::Terminate {
                         session,
                         runtime_id,
@@ -177,6 +283,46 @@ impl WorkerSupervisor {
             sender,
             join: Mutex::new(Some(join)),
         }
+    }
+
+    fn begin_pending(&self, worker_id: &str, worker_pid: u32) -> Result<(), SessionError> {
+        let (result, receiver) = mpsc::channel();
+        self.sender
+            .send(WorkerSupervisorMessage::BeginPending {
+                worker_id: worker_id.to_owned(),
+                worker_pid,
+                result,
+            })
+            .map_err(|_| SessionError::WorkerIoFailed)?;
+        receiver
+            .recv_timeout(Duration::from_secs(1))
+            .map_err(|_| SessionError::WorkerIoFailed)?
+    }
+
+    fn record_prepared_scope(
+        &self,
+        worker_id: &str,
+        worker_pid: u32,
+        identity: crate::PayloadScopeIdentity,
+    ) -> Result<(), SessionError> {
+        let (result, receiver) = mpsc::channel();
+        self.sender
+            .send(WorkerSupervisorMessage::RecordPreparedScope {
+                worker_id: worker_id.to_owned(),
+                worker_pid,
+                identity,
+                result,
+            })
+            .map_err(|_| SessionError::WorkerIoFailed)?;
+        receiver
+            .recv_timeout(Duration::from_secs(1))
+            .map_err(|_| SessionError::WorkerIoFailed)?
+    }
+
+    fn abort_pending(&self, worker_id: &str) {
+        let _ = self.sender.send(WorkerSupervisorMessage::AbortPending {
+            worker_id: worker_id.to_owned(),
+        });
     }
 
     fn register(
@@ -389,6 +535,7 @@ impl WorkerSessionLauncher {
                 session_probe_path: self.session_probe_path.clone(),
                 control_path: PathBuf::new(),
                 worker_id: String::new(),
+                launcher_pid: 0,
             },
             expected_started_session(&request),
             true,
@@ -414,6 +561,7 @@ impl WorkerSessionLauncher {
                 session_probe_path: self.session_probe_path.clone(),
                 control_path: PathBuf::new(),
                 worker_id: String::new(),
+                launcher_pid: 0,
             },
             expected_started_session(&request),
             true,
@@ -427,14 +575,95 @@ impl WorkerSessionLauncher {
         install_control: bool,
     ) -> Result<(StartedSession, RuntimeSessionId), SessionError> {
         let (control_dir, control_path, worker_id) = create_control_endpoint()?;
+        let requires_pending_lifecycle = matches!(&request, WorkerRequest::PamSession { .. });
         if install_control {
             install_control_request(&mut request, control_path.clone(), worker_id.clone());
         }
         let deadline = Instant::now() + self.timeout;
         let mut attempt =
             WorkerAttempt::spawn(&self.worker_path, &self.worker_environment, request)?;
+        let worker_pid = attempt.child_id();
+        let _pending_guard = if requires_pending_lifecycle {
+            self.supervisor.begin_pending(&worker_id, worker_pid)?;
+            Some(PendingSupervisorGuard {
+                supervisor: self.supervisor.clone(),
+                worker_id: worker_id.clone(),
+            })
+        } else {
+            None
+        };
+        let mut phase = PendingLaunchPhase::Spawned;
         let writer_result = attempt.wait_writer(deadline);
-        let response_result = attempt.wait_reader(deadline);
+        let response_result = loop {
+            let event = attempt.wait_reader(deadline);
+            match event {
+                Ok(response) if response.version != crate::WORKER_PROTOCOL_VERSION => {
+                    break Err(SessionError::WorkerProtocolFailed);
+                }
+                Ok(WorkerEnvelope {
+                    message:
+                        WorkerResponse::Preparing {
+                            worker_id: event_worker_id,
+                        },
+                    ..
+                }) => {
+                    if !matches!(phase, PendingLaunchPhase::Spawned) || event_worker_id != worker_id
+                    {
+                        break Err(SessionError::WorkerProtocolFailed);
+                    }
+                    phase = PendingLaunchPhase::Preparing;
+                }
+                Ok(WorkerEnvelope {
+                    message:
+                        WorkerResponse::PayloadScopePrepared {
+                            worker_id: event_worker_id,
+                            expected_worker_pid,
+                            session_pid: _,
+                            registration_nonce,
+                            scope_identity,
+                        },
+                    ..
+                }) => {
+                    if !matches!(phase, PendingLaunchPhase::Preparing)
+                        || event_worker_id != worker_id
+                        || expected_worker_pid != worker_pid
+                        || registration_nonce.is_empty()
+                        || registration_nonce.len() > 128
+                        || !scope_identity.validate()
+                    {
+                        break Err(SessionError::WorkerProtocolFailed);
+                    }
+                    self.supervisor.record_prepared_scope(
+                        &worker_id,
+                        worker_pid,
+                        scope_identity.clone(),
+                    )?;
+                    // Persisted before acknowledging it. No registry lock is
+                    // held while performing socket I/O.
+                    phase = PendingLaunchPhase::ScopeRegistered {
+                        identity: scope_identity,
+                        registration_nonce: registration_nonce.clone(),
+                    };
+                    let mut control = match UnixStream::connect(&control_path) {
+                        Ok(control) => control,
+                        Err(_) => break Err(SessionError::WorkerIoFailed),
+                    };
+                    if write_control_request(
+                        &mut control,
+                        WorkerControlRequest::PayloadScopeRegistered {
+                            worker_id: worker_id.clone(),
+                            expected_worker_pid: worker_pid,
+                            registration_nonce,
+                        },
+                    )
+                    .is_err()
+                    {
+                        break Err(SessionError::WorkerIoFailed);
+                    }
+                }
+                terminal => break terminal,
+            }
+        };
         let started_response = response_result
             .as_ref()
             .ok()
@@ -459,6 +688,13 @@ impl WorkerSessionLauncher {
                     && (started_worker_id == worker_id || started_worker_id.is_empty())
                     && session_pgid == session_pid =>
                 {
+                    if let PendingLaunchPhase::ScopeRegistered {
+                        identity,
+                        registration_nonce,
+                    } = &phase
+                    {
+                        debug!(unit = %identity.unit_name, nonce_len = registration_nonce.len(), "promoting pre-Started payload scope registration");
+                    }
                     if !attempt.is_alive()? {
                         return Err(SessionError::WorkerExitedAfterStart);
                     }
@@ -596,11 +832,13 @@ fn install_control_request(request: &mut WorkerRequest, path: PathBuf, worker_id
     if let WorkerRequest::PamSession {
         control_path: control,
         worker_id: id,
+        launcher_pid,
         ..
     } = request
     {
         *control = path;
         *id = worker_id;
+        *launcher_pid = std::process::id();
     }
 }
 

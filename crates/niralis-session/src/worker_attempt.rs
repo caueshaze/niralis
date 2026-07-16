@@ -20,6 +20,9 @@ pub(crate) struct WorkerAttempt {
 }
 
 impl WorkerAttempt {
+    pub(crate) fn child_id(&self) -> u32 {
+        self.child.as_ref().expect("worker child exists").id()
+    }
     pub(crate) fn is_alive(&mut self) -> Result<bool, SessionError> {
         Ok(self
             .child
@@ -155,7 +158,21 @@ fn spawn_reader(
     let (sender, receiver) = mpsc::channel();
     let handle = thread::spawn(move || {
         let mut stdout = stdout;
-        let _ = sender.send(read_envelope::<WorkerResponse, _>(&mut stdout));
+        loop {
+            let event = read_envelope::<WorkerResponse, _>(&mut stdout);
+            let terminal = event.is_err()
+                || matches!(
+                    event.as_ref().map(|value| &value.message),
+                    Ok(WorkerResponse::Started { .. })
+                        | Ok(WorkerResponse::Ready { .. })
+                        | Ok(WorkerResponse::AuthenticationFailed)
+                        | Ok(WorkerResponse::SessionFailed { .. })
+                        | Ok(WorkerResponse::Rejected { .. })
+                );
+            if sender.send(event).is_err() || terminal {
+                break;
+            }
+        }
     });
     (handle, receiver)
 }

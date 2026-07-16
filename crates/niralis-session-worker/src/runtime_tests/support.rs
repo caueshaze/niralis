@@ -394,6 +394,7 @@ pub(super) fn request() -> WorkerEnvelope<WorkerRequest> {
             session_probe_path: "/usr/libexec/niralis-session-probe".into(),
             control_path: std::path::PathBuf::new(),
             worker_id: String::new(),
+            launcher_pid: 0,
             launch_plan: niralis_session::SessionExecPlan {
                 source_path: b"/source.desktop".to_vec(),
                 executable: b"/bin/true".to_vec(),

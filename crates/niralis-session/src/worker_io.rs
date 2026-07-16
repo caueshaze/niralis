@@ -123,3 +123,63 @@ fn parse_envelope_bytes<T: DeserializeOwned>(
     }
     serde_json::from_slice(line).map_err(|_| SessionError::WorkerProtocolFailed)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::WorkerResponse;
+
+    #[test]
+    fn sequential_frames_remain_separate_without_eof() {
+        let first = serde_json::to_vec(&WorkerEnvelope {
+            version: WORKER_PROTOCOL_VERSION,
+            message: WorkerResponse::Preparing {
+                worker_id: "w".into(),
+            },
+        })
+        .unwrap();
+        let second = serde_json::to_vec(&WorkerEnvelope {
+            version: WORKER_PROTOCOL_VERSION,
+            message: WorkerResponse::AuthenticationFailed,
+        })
+        .unwrap();
+        let mut stream = Vec::new();
+        stream.extend_from_slice(&first);
+        stream.push(b'\n');
+        stream.extend_from_slice(&second);
+        stream.push(b'\n');
+        let mut reader = std::io::Cursor::new(stream);
+        assert!(matches!(
+            read_envelope::<WorkerResponse, _>(&mut reader)
+                .unwrap()
+                .message,
+            WorkerResponse::Preparing { .. }
+        ));
+        assert!(matches!(
+            read_envelope::<WorkerResponse, _>(&mut reader)
+                .unwrap()
+                .message,
+            WorkerResponse::AuthenticationFailed
+        ));
+    }
+
+    #[test]
+    fn truncated_frame_is_fail_closed() {
+        let mut reader = std::io::Cursor::new(b"{\"version\":11".to_vec());
+        assert_eq!(
+            read_envelope::<WorkerResponse, _>(&mut reader),
+            Err(SessionError::WorkerProtocolFailed)
+        );
+    }
+
+    #[test]
+    fn oversized_frame_is_fail_closed() {
+        let mut bytes = vec![b'x'; MAX_WORKER_MESSAGE_BYTES];
+        bytes.push(b'\n');
+        let mut reader = std::io::Cursor::new(bytes);
+        assert_eq!(
+            read_envelope::<WorkerResponse, _>(&mut reader),
+            Err(SessionError::WorkerProtocolFailed)
+        );
+    }
+}
