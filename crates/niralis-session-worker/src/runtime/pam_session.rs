@@ -1,0 +1,31 @@
+fn run_pam_session<
+    W: Write,
+    F: WorkerAuthenticatorFactory,
+    I: UnixIdentityResolver,
+    G: SupplementaryGroupsResolver,
+    C: SessionChildRunnerFactory,
+    L: LogindSessionResolver,
+>(
+    writer: &mut W,
+    factory: &F,
+    identity_resolver: &I,
+    supplementary_groups_resolver: &G,
+    session_child_runner_factory: &C,
+    logind_resolver: &L,
+    request: niralis_session::SessionRequest,
+    pam_service: String,
+    password: niralis_session::WorkerSecret,
+    session_child_path: std::path::PathBuf,
+    session_probe_path: std::path::PathBuf,
+    control_path: std::path::PathBuf,
+    worker_id: String,
+    launcher_pid: u32,
+    virtual_terminal_allocator: &dyn VirtualTerminalAllocator,
+    runtime_dir_validator: &dyn RuntimeDirValidator,
+    selinux_context_manager: &dyn SelinuxContextManager,
+    payload_scope_manager: &dyn crate::payload_scope::PayloadScopeManager,
+    launch_phase_gate: &dyn LaunchPhaseGate,
+    launch_plan: niralis_session::SessionExecPlan,
+) -> Result<(), SessionError> {
+    include!("pam_session/pre_open.rs")
+}
