@@ -11,6 +11,7 @@ const VT_GETSTATE: libc::c_ulong = 0x5603;
 const VT_DISALLOCATE: libc::c_ulong = 0x5608;
 const VT_MIN: u32 = 1;
 const VT_MAX: u32 = 63;
+const VT_RELEASE_WAIT: Duration = Duration::from_secs(1);
 
 #[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
 pub enum VirtualTerminalError {
@@ -44,6 +45,13 @@ pub enum VirtualTerminalError {
     OperationFailed,
     #[error("virtual terminal cleanup failed")]
     CleanupFailed,
+    #[error("virtual terminal cleanup failed during {stage} (errno {errno})")]
+    CleanupOperationFailed {
+        stage: &'static str,
+        errno: libc::c_int,
+    },
+    #[error("virtual terminal cleanup timed out while restoring the previous terminal")]
+    CleanupTimedOut,
 }
 
 pub trait VirtualTerminalLease: Send {
@@ -142,6 +150,7 @@ where
 pub struct OwnedVirtualTerminal {
     seat: SeatId,
     vtnr: VirtualTerminalId,
+    previous_vtnr: VirtualTerminalId,
     control: OwnedFd,
     terminal: OwnedFd,
     released: bool,
@@ -160,6 +169,11 @@ impl std::fmt::Debug for OwnedVirtualTerminal {
 impl OwnedVirtualTerminal {
     fn allocate(seat: SeatId) -> Result<Self, VirtualTerminalError> {
         let control = open_device(c"/dev/console")?;
+        let previous_number = KernelVtControl::new(control.as_raw_fd())
+            .active()
+            .map_err(|_| VirtualTerminalError::OperationFailed)?;
+        let previous_vtnr =
+            VirtualTerminalId::new(previous_number).ok_or(VirtualTerminalError::OperationFailed)?;
         let mut number: libc::c_int = 0;
         if unsafe { libc::ioctl(control.as_raw_fd(), VT_OPENQRY, &mut number) } < 0 {
             return Err(VirtualTerminalError::OpenQueryFailed(last_errno()));
@@ -188,9 +202,13 @@ impl OwnedVirtualTerminal {
         let vtnr = VirtualTerminalId::new(number).ok_or(
             VirtualTerminalError::InvalidAllocatedTerminal(number as libc::c_int),
         )?;
+        if vtnr == previous_vtnr {
+            return Err(VirtualTerminalError::OperationFailed);
+        }
         Ok(Self {
             seat,
             vtnr,
+            previous_vtnr,
             control,
             terminal,
             released: false,
@@ -248,12 +266,105 @@ impl VirtualTerminalLease for OwnedVirtualTerminal {
             return Ok(());
         }
         self.released = true;
-        let number = self.vtnr.number() as libc::c_int;
-        if unsafe { libc::ioctl(self.control.as_raw_fd(), VT_DISALLOCATE, number) } < 0 {
-            return Err(VirtualTerminalError::CleanupFailed);
-        }
-        Ok(())
+        release_allocated_terminal(
+            &mut KernelVtControl::new(self.control.as_raw_fd()),
+            self.vtnr.number(),
+            self.previous_vtnr.number(),
+            VT_RELEASE_WAIT,
+        )
     }
+}
+
+trait VtControlOperations {
+    fn active(&mut self) -> Result<u32, libc::c_int>;
+    fn activate(&mut self, number: u32) -> Result<(), libc::c_int>;
+    fn disallocate(&mut self, number: u32) -> Result<(), libc::c_int>;
+}
+
+struct KernelVtControl {
+    fd: RawFd,
+}
+
+impl KernelVtControl {
+    fn new(fd: RawFd) -> Self {
+        Self { fd }
+    }
+}
+
+impl VtControlOperations for KernelVtControl {
+    fn active(&mut self) -> Result<u32, libc::c_int> {
+        let mut state = VtState {
+            active: 0,
+            signal: 0,
+            state: 0,
+        };
+        if unsafe { libc::ioctl(self.fd, VT_GETSTATE, &mut state) } < 0 {
+            Err(last_errno())
+        } else {
+            Ok(u32::from(state.active))
+        }
+    }
+
+    fn activate(&mut self, number: u32) -> Result<(), libc::c_int> {
+        if unsafe { libc::ioctl(self.fd, VT_ACTIVATE, number as libc::c_int) } < 0 {
+            Err(last_errno())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn disallocate(&mut self, number: u32) -> Result<(), libc::c_int> {
+        if unsafe { libc::ioctl(self.fd, VT_DISALLOCATE, number as libc::c_int) } < 0 {
+            Err(last_errno())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+fn release_allocated_terminal(
+    operations: &mut dyn VtControlOperations,
+    allocated: u32,
+    previous: u32,
+    wait: Duration,
+) -> Result<(), VirtualTerminalError> {
+    let active =
+        operations
+            .active()
+            .map_err(|errno| VirtualTerminalError::CleanupOperationFailed {
+                stage: "query_active",
+                errno,
+            })?;
+    if active == allocated {
+        operations.activate(previous).map_err(|errno| {
+            VirtualTerminalError::CleanupOperationFailed {
+                stage: "restore_previous",
+                errno,
+            }
+        })?;
+        let deadline = Instant::now() + wait;
+        loop {
+            let active = operations.active().map_err(|errno| {
+                VirtualTerminalError::CleanupOperationFailed {
+                    stage: "confirm_previous",
+                    errno,
+                }
+            })?;
+            if active == previous {
+                break;
+            }
+            if Instant::now() >= deadline {
+                return Err(VirtualTerminalError::CleanupTimedOut);
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    operations.disallocate(allocated).map_err(|errno| {
+        VirtualTerminalError::CleanupOperationFailed {
+            stage: "disallocate",
+            errno,
+        }
+    })
 }
 
 #[repr(C)]
@@ -296,6 +407,7 @@ fn last_errno() -> libc::c_int {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -305,6 +417,48 @@ mod tests {
         seat: SeatId,
         vtnr: VirtualTerminalId,
         releases: Arc<AtomicUsize>,
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum VtOperation {
+        Active,
+        Activate(u32),
+        Disallocate(u32),
+    }
+
+    struct FakeVtControl {
+        active: VecDeque<Result<u32, libc::c_int>>,
+        activate: Result<(), libc::c_int>,
+        disallocate: Result<(), libc::c_int>,
+        operations: Vec<VtOperation>,
+    }
+
+    impl FakeVtControl {
+        fn with_active(active: impl IntoIterator<Item = u32>) -> Self {
+            Self {
+                active: active.into_iter().map(Ok).collect(),
+                activate: Ok(()),
+                disallocate: Ok(()),
+                operations: Vec::new(),
+            }
+        }
+    }
+
+    impl VtControlOperations for FakeVtControl {
+        fn active(&mut self) -> Result<u32, libc::c_int> {
+            self.operations.push(VtOperation::Active);
+            self.active.pop_front().expect("scripted active VT state")
+        }
+
+        fn activate(&mut self, number: u32) -> Result<(), libc::c_int> {
+            self.operations.push(VtOperation::Activate(number));
+            self.activate
+        }
+
+        fn disallocate(&mut self, number: u32) -> Result<(), libc::c_int> {
+            self.operations.push(VtOperation::Disallocate(number));
+            self.disallocate
+        }
     }
 
     impl VirtualTerminalLease for FakeLease {
@@ -339,6 +493,61 @@ mod tests {
         guard.release().unwrap();
         guard.release().unwrap();
         assert_eq!(releases.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn active_owned_vt_restores_previous_before_disallocate() {
+        let mut control = FakeVtControl::with_active([2, 1]);
+        release_allocated_terminal(&mut control, 2, 1, Duration::ZERO).unwrap();
+        assert_eq!(
+            control.operations,
+            [
+                VtOperation::Active,
+                VtOperation::Activate(1),
+                VtOperation::Active,
+                VtOperation::Disallocate(2),
+            ]
+        );
+    }
+
+    #[test]
+    fn already_inactive_owned_vt_does_not_override_current_terminal() {
+        let mut control = FakeVtControl::with_active([3]);
+        release_allocated_terminal(&mut control, 2, 1, Duration::ZERO).unwrap();
+        assert_eq!(
+            control.operations,
+            [VtOperation::Active, VtOperation::Disallocate(2)]
+        );
+    }
+
+    #[test]
+    fn previous_vt_restore_timeout_never_disallocates_active_vt() {
+        let mut control = FakeVtControl::with_active([2, 2]);
+        assert_eq!(
+            release_allocated_terminal(&mut control, 2, 1, Duration::ZERO),
+            Err(VirtualTerminalError::CleanupTimedOut)
+        );
+        assert_eq!(
+            control.operations,
+            [
+                VtOperation::Active,
+                VtOperation::Activate(1),
+                VtOperation::Active,
+            ]
+        );
+    }
+
+    #[test]
+    fn disallocate_failure_preserves_stage_and_errno() {
+        let mut control = FakeVtControl::with_active([1]);
+        control.disallocate = Err(libc::EBUSY);
+        assert_eq!(
+            release_allocated_terminal(&mut control, 2, 1, Duration::ZERO),
+            Err(VirtualTerminalError::CleanupOperationFailed {
+                stage: "disallocate",
+                errno: libc::EBUSY,
+            })
+        );
     }
 
     #[test]
