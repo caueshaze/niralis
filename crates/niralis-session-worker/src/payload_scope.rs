@@ -494,10 +494,49 @@ fn validate_pinned_properties(
     control_group: &str,
     properties: &InvocationUnitProperties,
 ) -> Result<(), PayloadScopeError> {
+    validate_pinned_properties_with_control_group(
+        identity,
+        pinned,
+        control_group,
+        properties,
+        ControlGroupPropertyMode::Exact,
+    )
+}
+
+fn validate_terminal_transition_properties(
+    identity: &PayloadScopeIdentity,
+    pinned: &PinnedInvocationUnit,
+    control_group: &str,
+    properties: &InvocationUnitProperties,
+) -> Result<(), PayloadScopeError> {
+    validate_pinned_properties_with_control_group(
+        identity,
+        pinned,
+        control_group,
+        properties,
+        ControlGroupPropertyMode::AllowClearedWhenTerminal,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum ControlGroupPropertyMode {
+    Exact,
+    AllowClearedWhenTerminal,
+}
+
+fn validate_pinned_properties_with_control_group(
+    identity: &PayloadScopeIdentity,
+    pinned: &PinnedInvocationUnit,
+    control_group: &str,
+    properties: &InvocationUnitProperties,
+    control_group_mode: ControlGroupPropertyMode,
+) -> Result<(), PayloadScopeError> {
     if !pinned.reference_held || properties.object_path != pinned.object_path {
         warn!(
             expected_invocation_id = %identity.invocation_id,
             observed_invocation_id = %properties.invocation_id,
+            expected_object_path = %pinned.object_path,
+            observed_object_path = %properties.object_path,
             "pinned unit identity changed"
         );
         return Err(PayloadScopeError::UnitReplaced);
@@ -510,8 +549,18 @@ fn validate_pinned_properties(
         );
         return Err(PayloadScopeError::UnitReplaced);
     }
+    // systemd can clear Scope.ControlGroup after removing the cgroup while a
+    // Ref-held, terminal Unit object remains addressable by InvocationID. This
+    // representation is accepted only after the unit is terminal; empty proof
+    // still reads the original cgroup path and revalidates the invocation.
+    let control_group_matches = properties.control_group == control_group
+        || (matches!(
+            control_group_mode,
+            ControlGroupPropertyMode::AllowClearedWhenTerminal
+        ) && properties.control_group.is_empty()
+            && terminal_unit_state(&properties.active_state, &properties.sub_state));
     if properties.id != identity.unit_name
-        || properties.control_group != control_group
+        || !control_group_matches
         || properties.slice != format!("user-{}.slice", identity.expected_uid)
         || !properties.transient
         || !valid_payload_cgroup(control_group, identity.expected_uid, &identity.unit_name)
@@ -519,6 +568,15 @@ fn validate_pinned_properties(
         warn!(
             expected_invocation_id = %identity.invocation_id,
             observed_invocation_id = %properties.invocation_id,
+            expected_unit_name = %identity.unit_name,
+            observed_unit_name = %properties.id,
+            expected_control_group = %control_group,
+            observed_control_group = %properties.control_group,
+            expected_slice = %format!("user-{}.slice", identity.expected_uid),
+            observed_slice = %properties.slice,
+            observed_transient = properties.transient,
+            observed_active_state = %properties.active_state,
+            observed_sub_state = %properties.sub_state,
             "pinned unit identity changed"
         );
         return Err(PayloadScopeError::UnitReplaced);
@@ -690,7 +748,7 @@ async fn boundary_appears_terminal(
         .map_err(|error| {
             map_invocation_error(InvocationOperation::ReadPropertiesAfterObserver, error)
         })?;
-    validate_pinned_properties(identity, pinned, control_group, &properties)?;
+    validate_terminal_transition_properties(identity, pinned, control_group, &properties)?;
     Ok(terminal_unit_state(
         &properties.active_state,
         &properties.sub_state,
@@ -768,7 +826,12 @@ async fn request_graceful_termination_invocation(
         .map_err(|error| {
             map_invocation_error(InvocationOperation::ReadPropertiesAfterKill, error)
         })?;
-    validate_pinned_properties(identity, pinned_unit, control_group, &properties_after)?;
+    validate_terminal_transition_properties(
+        identity,
+        pinned_unit,
+        control_group,
+        &properties_after,
+    )?;
     Ok(())
 }
 
@@ -816,7 +879,7 @@ async fn validate_terminal_unit(
         .map_err(|error| {
             map_invocation_error(InvocationOperation::ReadPropertiesDuringEmptyProof, error)
         })?;
-    validate_pinned_properties(identity, pinned, control_group, &properties)?;
+    validate_terminal_transition_properties(identity, pinned, control_group, &properties)?;
     if !terminal_unit_state(&properties.active_state, &properties.sub_state) {
         return Err(PayloadScopeError::UnitNotTerminal);
     }
@@ -849,8 +912,7 @@ async fn prove_empty_boundary(
         .read_boundary_state(&identity.invocation_id, &pinned.object_path, control_group)
         .map_err(|error| map_invocation_error(InvocationOperation::ReadBoundaryState, error))?
     {
-        CgroupEmptyState::Absent if matches!(first, ResolvedInvocationState::Missing) => {}
-        CgroupEmptyState::Absent => return Err(PayloadScopeError::InvalidIdentity),
+        CgroupEmptyState::Absent => {}
         CgroupEmptyState::PresentEmpty => {}
     }
     for outside_pid in [worker_pid, launcher_pid] {
@@ -1615,6 +1677,13 @@ mod tests {
         }
     }
 
+    fn terminal_properties_with_cleared_control_group() -> InvocationUnitProperties {
+        InvocationUnitProperties {
+            control_group: String::new(),
+            ..terminal_properties_a()
+        }
+    }
+
     #[derive(Debug)]
     enum ScriptedInvocationResponse {
         Success,
@@ -2303,6 +2372,53 @@ mod tests {
     }
 
     #[test]
+    fn post_kill_terminal_scope_with_cleared_control_group_is_not_replacement() {
+        let mut steps = kill_steps(ScriptedInvocationResponse::Success);
+        steps.push(ScriptedInvocationStep::new(
+            InvocationOperation::ReadPropertiesAfterKill,
+            ScriptedInvocationResponse::Properties(
+                terminal_properties_with_cleared_control_group(),
+            ),
+        ));
+        let backend = ScriptedInvocationBackend::new(steps);
+        async_io::block_on(request_graceful_termination_invocation(
+            &backend,
+            &identity_a(),
+            &pinned_a(),
+            CONTROL_GROUP,
+        ))
+        .unwrap();
+        backend.assert_consumed();
+    }
+
+    #[test]
+    fn cleared_control_group_before_terminal_state_is_identity_change() {
+        let backend = ScriptedInvocationBackend::new(vec![
+            ScriptedInvocationStep::new(
+                InvocationOperation::ResolveByInvocation,
+                ScriptedInvocationResponse::Resolved(path_a()),
+            ),
+            ScriptedInvocationStep::new(
+                InvocationOperation::ReadPropertiesAfterObserver,
+                ScriptedInvocationResponse::Properties(InvocationUnitProperties {
+                    control_group: String::new(),
+                    ..properties_a()
+                }),
+            ),
+        ]);
+        assert_eq!(
+            async_io::block_on(boundary_appears_terminal(
+                &backend,
+                &identity_a(),
+                &pinned_a(),
+                CONTROL_GROUP,
+            )),
+            Err(PayloadScopeError::UnitReplaced)
+        );
+        backend.assert_consumed();
+    }
+
+    #[test]
     fn observer_wakeup_during_bus_loss_does_not_produce_candidate() {
         let backend = ScriptedInvocationBackend::new(vec![
             ScriptedInvocationStep::new(
@@ -2362,11 +2478,13 @@ mod tests {
             ),
             ScriptedInvocationStep::new(
                 InvocationOperation::ReadPropertiesDuringEmptyProof,
-                ScriptedInvocationResponse::Properties(terminal_properties_a()),
+                ScriptedInvocationResponse::Properties(
+                    terminal_properties_with_cleared_control_group(),
+                ),
             ),
             ScriptedInvocationStep::new(
                 InvocationOperation::ReadBoundaryState,
-                ScriptedInvocationResponse::BoundaryState(CgroupEmptyState::PresentEmpty),
+                ScriptedInvocationResponse::BoundaryState(CgroupEmptyState::Absent),
             ),
             ScriptedInvocationStep::new(
                 InvocationOperation::ResolveByInvocation,
@@ -2386,6 +2504,67 @@ mod tests {
             .unwrap_err(),
             PayloadScopeError::UnitReplaced
         );
+        backend.assert_consumed();
+    }
+
+    #[test]
+    fn terminal_pinned_scope_with_cleared_control_group_and_absent_cgroup_proves_empty() {
+        let terminal = terminal_properties_with_cleared_control_group();
+        let backend = ScriptedInvocationBackend::new(vec![
+            ScriptedInvocationStep::new(
+                InvocationOperation::ResolveByInvocation,
+                ScriptedInvocationResponse::Resolved(path_a()),
+            ),
+            ScriptedInvocationStep::new(
+                InvocationOperation::ReadPropertiesAfterObserver,
+                ScriptedInvocationResponse::Properties(terminal.clone()),
+            ),
+            ScriptedInvocationStep::new(
+                InvocationOperation::ResolveByInvocation,
+                ScriptedInvocationResponse::Resolved(path_a()),
+            ),
+            ScriptedInvocationStep::new(
+                InvocationOperation::ReadPropertiesDuringEmptyProof,
+                ScriptedInvocationResponse::Properties(terminal.clone()),
+            ),
+            ScriptedInvocationStep::new(
+                InvocationOperation::ReadBoundaryState,
+                ScriptedInvocationResponse::BoundaryState(CgroupEmptyState::Absent),
+            ),
+            ScriptedInvocationStep::new(
+                InvocationOperation::ResolveByInvocation,
+                ScriptedInvocationResponse::Resolved(path_a()),
+            ),
+            ScriptedInvocationStep::new(
+                InvocationOperation::ReadPropertiesDuringEmptyProof,
+                ScriptedInvocationResponse::Properties(terminal),
+            ),
+            ScriptedInvocationStep::new(
+                InvocationOperation::UnrefPinnedUnit,
+                ScriptedInvocationResponse::Success,
+            ),
+        ]);
+        let identity = identity_a();
+        let mut pinned = pinned_a();
+        assert!(async_io::block_on(boundary_appears_terminal(
+            &backend,
+            &identity,
+            &pinned,
+            CONTROL_GROUP,
+        ))
+        .unwrap());
+        async_io::block_on(prove_empty_boundary(
+            &backend,
+            &identity,
+            &pinned,
+            CONTROL_GROUP,
+            u32::MAX,
+            u32::MAX,
+            &crate::termination::LeaderExit::ExitedZero,
+        ))
+        .unwrap();
+        async_io::block_on(release_pin(&backend, &identity, &mut pinned)).unwrap();
+        assert!(!pinned.reference_held);
         backend.assert_consumed();
     }
 
