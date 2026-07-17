@@ -6,6 +6,17 @@ version.workspace = true
 
 [features]
 dangerous-real-vt-smoke = []
+worker-test-fixtures = []
+
+[[bin]]
+name = "fixture-full-worker"
+path = "src/bin/fixture-full-worker.rs"
+required-features = ["worker-test-fixtures"]
+
+[[test]]
+name = "full_worker"
+path = "tests/full_worker.rs"
+required-features = ["worker-test-fixtures"]
 
 [dependencies]
 libc.workspace = true

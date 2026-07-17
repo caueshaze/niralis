@@ -126,9 +126,13 @@ fn ready_child_remains_alive_after_startup_proof() {
 #[test]
 fn nonzero_child_exit_is_reported_after_handshake() {
     let runner = runner(env!("CARGO_BIN_EXE_fixture-child-exit1"));
-    runner
+    let report = runner
         .run_child(expectation())
         .expect("exec acceptance should complete before natural exit");
+    assert_eq!(
+        unsafe { libc::kill(report.child_pid as libc::pid_t, libc::SIGUSR1) },
+        0
+    );
     let status = runner
         .wait_for_child()
         .expect("natural exit should be reaped");

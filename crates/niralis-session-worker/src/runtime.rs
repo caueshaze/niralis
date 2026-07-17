@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::io::{Read, Write};
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -6,6 +7,9 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+
+#[cfg(feature = "worker-test-fixtures")]
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use niralis_auth::{AuthError, Authenticator, PamAuthenticator};
 use niralis_session::{
@@ -33,6 +37,26 @@ pub trait WorkerAuthenticatorFactory: Send + Sync {
     fn build(&self, pam_service: &str) -> Box<dyn Authenticator>;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WorkerLaunchPhase {
+    PendingHandoffBeforeScope,
+    ScopePinnedBeforeAck,
+    AckReceivedBeforeCommitExec,
+}
+
+pub(crate) trait LaunchPhaseGate: Send + Sync {
+    fn reached(&self, phase: WorkerLaunchPhase) -> Result<(), SessionError>;
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct NoopLaunchPhaseGate;
+
+impl LaunchPhaseGate for NoopLaunchPhaseGate {
+    fn reached(&self, _phase: WorkerLaunchPhase) -> Result<(), SessionError> {
+        Ok(())
+    }
+}
+
 pub struct WorkerDependencies<'a, F, I, G, C, L> {
     pub authenticator_factory: &'a F,
     pub identity_resolver: &'a I,
@@ -43,6 +67,7 @@ pub struct WorkerDependencies<'a, F, I, G, C, L> {
     pub runtime_dir_validator: &'a dyn RuntimeDirValidator,
     pub selinux_context_manager: &'a dyn SelinuxContextManager,
     pub payload_scope_manager: &'a dyn crate::payload_scope::PayloadScopeManager,
+    pub launch_phase_gate: &'a dyn LaunchPhaseGate,
 }
 
 pub trait RuntimeDirValidator: Send + Sync {
@@ -119,8 +144,161 @@ pub fn run_worker_process<R: Read, W: Write>(
             runtime_dir_validator: &LinuxRuntimeDirValidator,
             selinux_context_manager: &LinuxSelinuxContextManager,
             payload_scope_manager: &crate::payload_scope::SystemdPayloadScopeManager,
+            launch_phase_gate: &NoopLaunchPhaseGate,
         },
     )
+}
+
+thread_local! {
+    static WORKER_SIGNAL_FD: Cell<i32> = const { Cell::new(-1) };
+    static SUPERVISOR_CHANNEL_FD: Cell<i32> = const { Cell::new(-1) };
+}
+
+#[cfg(feature = "worker-test-fixtures")]
+static FIXTURE_GRACE_MILLIS: AtomicU64 = AtomicU64::new(5_000);
+#[cfg(feature = "worker-test-fixtures")]
+static FIXTURE_WATCHDOG_AUTHORIZED: AtomicBool = AtomicBool::new(false);
+#[cfg(feature = "worker-test-fixtures")]
+static FIXTURE_CONTROL_UID: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(feature = "worker-test-fixtures")]
+pub(crate) fn set_fixture_grace_period(duration: Duration) {
+    let millis = u64::try_from(duration.as_millis()).unwrap_or(u64::MAX);
+    FIXTURE_GRACE_MILLIS.store(millis.max(1), Ordering::SeqCst);
+}
+
+#[cfg(feature = "worker-test-fixtures")]
+pub(crate) fn authorize_fixture_launch_watchdog() {
+    FIXTURE_WATCHDOG_AUTHORIZED.store(true, Ordering::SeqCst);
+}
+
+#[cfg(feature = "worker-test-fixtures")]
+pub(crate) fn set_fixture_control_uid(uid: u32) {
+    FIXTURE_CONTROL_UID.store(u64::from(uid), Ordering::SeqCst);
+}
+
+fn internal_control_peer_uid() -> u32 {
+    #[cfg(feature = "worker-test-fixtures")]
+    {
+        u32::try_from(FIXTURE_CONTROL_UID.load(Ordering::SeqCst)).unwrap_or(0)
+    }
+    #[cfg(not(feature = "worker-test-fixtures"))]
+    {
+        0
+    }
+}
+
+fn authorize_launch_watchdog(
+    session_id: &str,
+) -> Result<Duration, crate::smoke::RealGraphicalSmokeGuardError> {
+    #[cfg(feature = "worker-test-fixtures")]
+    if FIXTURE_WATCHDOG_AUTHORIZED.load(Ordering::SeqCst) {
+        return Ok(Duration::from_secs(300));
+    }
+    authorize_real_graphical_smoke_for_runtime(session_id)
+}
+
+fn configured_session_termination_grace() -> Duration {
+    #[cfg(feature = "worker-test-fixtures")]
+    {
+        Duration::from_millis(FIXTURE_GRACE_MILLIS.load(Ordering::SeqCst))
+    }
+    #[cfg(not(feature = "worker-test-fixtures"))]
+    {
+        SESSION_TERMINATION_GRACE
+    }
+}
+
+fn emit_fixture_event(event: &str) {
+    #[cfg(feature = "worker-test-fixtures")]
+    crate::full_worker_fixture::emit_fixture_event(event);
+
+    #[cfg(not(feature = "worker-test-fixtures"))]
+    let _ = event;
+}
+
+fn emit_fixture_cause(cause: &crate::termination::TerminationCause) {
+    use crate::termination::{TerminationCause, WorkerTerminationSignal};
+
+    let event = match cause {
+        TerminationCause::WorkerSignal(WorkerTerminationSignal::Sigterm) => "Cause:Sigterm",
+        TerminationCause::WorkerSignal(WorkerTerminationSignal::Sigint) => "Cause:Sigint",
+        TerminationCause::WorkerSignal(WorkerTerminationSignal::Sighup) => "Cause:Sighup",
+        TerminationCause::SupervisorDisconnected => "Cause:SupervisorDisconnected",
+        TerminationCause::InternalTerminateRequest => "Cause:InternalTerminateRequest",
+        TerminationCause::LeaderExited(_) => "Cause:LeaderExited",
+        TerminationCause::RuntimeFailure => "Cause:RuntimeFailure",
+    };
+    emit_fixture_event(event);
+}
+
+fn emit_fixture_launch_signal(signal: i32) {
+    let name = match signal {
+        libc::SIGTERM => "SIGTERM",
+        libc::SIGINT => "SIGINT",
+        libc::SIGHUP => "SIGHUP",
+        _ => "UNKNOWN",
+    };
+    emit_fixture_event(&format!("LaunchCancellationSignal:{name}"));
+}
+
+fn worker_signal_fd() -> i32 {
+    WORKER_SIGNAL_FD.get()
+}
+fn supervisor_channel_fd() -> i32 {
+    SUPERVISOR_CHANNEL_FD.get()
+}
+fn set_worker_signal_fd(fd: i32) -> i32 {
+    WORKER_SIGNAL_FD.replace(fd)
+}
+fn set_supervisor_channel_fd(fd: i32) -> i32 {
+    SUPERVISOR_CHANNEL_FD.replace(fd)
+}
+
+pub fn run_worker_process_with_signals<R: Read + AsRawFd, W: Write>(
+    reader: &mut R,
+    writer: &mut W,
+    signals: &crate::termination::WorkerSignalFd,
+) -> Result<(), SessionError> {
+    run_worker_process_with_dependencies_and_signals(
+        reader,
+        writer,
+        signals,
+        WorkerDependencies {
+            authenticator_factory: &PamAuthenticatorFactory,
+            identity_resolver: &NssUnixIdentityResolver,
+            supplementary_groups_resolver: &NssSupplementaryGroupsResolver,
+            session_child_runner_factory: &ProcessSessionChildRunnerFactory,
+            logind_resolver: &SdLoginResolver,
+            virtual_terminal_allocator: &LinuxVirtualTerminalAllocator,
+            runtime_dir_validator: &LinuxRuntimeDirValidator,
+            selinux_context_manager: &LinuxSelinuxContextManager,
+            payload_scope_manager: &crate::payload_scope::SystemdPayloadScopeManager,
+            launch_phase_gate: &NoopLaunchPhaseGate,
+        },
+    )
+}
+
+pub(crate) fn run_worker_process_with_dependencies_and_signals<
+    R: Read + AsRawFd,
+    W: Write,
+    F: WorkerAuthenticatorFactory,
+    I: UnixIdentityResolver,
+    G: SupplementaryGroupsResolver,
+    C: SessionChildRunnerFactory,
+    L: LogindSessionResolver,
+>(
+    reader: &mut R,
+    writer: &mut W,
+    signals: &crate::termination::WorkerSignalFd,
+    dependencies: WorkerDependencies<'_, F, I, G, C, L>,
+) -> Result<(), SessionError> {
+    let previous = set_worker_signal_fd(signals.as_raw_fd());
+    let previous_supervisor = set_supervisor_channel_fd(reader.as_raw_fd());
+    let result = run_worker_process_with_dependencies(reader, writer, dependencies);
+    set_worker_signal_fd(previous);
+    set_supervisor_channel_fd(previous_supervisor);
+    result
 }
 
 pub fn run_worker_process_with_dependencies<
@@ -154,6 +332,7 @@ pub fn run_worker_process_with_dependencies<
         write_rejection(writer, WorkerErrorCode::UnsupportedVersion)?;
         return Err(SessionError::WorkerRejected);
     }
+    emit_fixture_event("RequestAccepted");
 
     match envelope.message {
         WorkerRequest::PrepareSession { request } => {
@@ -206,6 +385,7 @@ pub fn run_worker_process_with_dependencies<
                 dependencies.runtime_dir_validator,
                 dependencies.selinux_context_manager,
                 dependencies.payload_scope_manager,
+                dependencies.launch_phase_gate,
                 launch_plan,
             )
         }
@@ -238,6 +418,7 @@ fn run_pam_session<
     runtime_dir_validator: &dyn RuntimeDirValidator,
     selinux_context_manager: &dyn SelinuxContextManager,
     payload_scope_manager: &dyn crate::payload_scope::PayloadScopeManager,
+    launch_phase_gate: &dyn LaunchPhaseGate,
     launch_plan: niralis_session::SessionExecPlan,
 ) -> Result<(), SessionError> {
     if launch_plan.validate().is_err() {
@@ -265,7 +446,7 @@ fn run_pam_session<
         )?;
         return Err(SessionError::AuthenticatedSessionFailed);
     }
-    let watchdog = match authorize_real_graphical_smoke_for_runtime(&request.session.id) {
+    let watchdog = match authorize_launch_watchdog(&request.session.id) {
         Ok(duration) => duration,
         Err(error) => {
             warn!(session = %request.session.id, ?error, "real graphical session rejected before PAM");
@@ -646,6 +827,20 @@ fn run_pam_session<
                 }
             };
             let child_report = pending_handoff.report().clone();
+            launch_phase_gate.reached(WorkerLaunchPhase::PendingHandoffBeforeScope)?;
+            if let Some(signal) = pending_worker_signal()? {
+                emit_fixture_launch_signal(signal);
+                info!("worker signal received during PendingExecHandoff; cancelling launch");
+                let _ = pending_handoff.abort();
+                drop(transaction);
+                write_envelope(
+                    writer,
+                    WorkerResponse::SessionFailed {
+                        code: WorkerSessionFailureCode::SessionChildFailed,
+                    },
+                )?;
+                return Err(SessionError::AuthenticatedSessionFailed);
+            }
             if Instant::now() >= launch_watchdog_deadline {
                 let _ = pending_handoff.abort();
                 drop(transaction);
@@ -738,7 +933,7 @@ fn run_pam_session<
             let logind_session_id =
                 niralis_session::LogindSessionId::new(logind.id.as_str().to_owned())
                     .ok_or(SessionError::AuthenticatedSessionFailed)?;
-            let authoritative_scope = match payload_scope_manager.prepare(
+            let mut authoritative_scope = match payload_scope_manager.prepare(
                 pending_handoff.report(),
                 pending_handoff.authoritative_pidfd(),
                 credentials.identity.uid,
@@ -788,7 +983,9 @@ fn run_pam_session<
                     drop(transaction);
                     return Err(error);
                 }
+                emit_fixture_event("PayloadScopePreparedSent");
                 info!(unit = %authoritative_scope.identity().unit_name, "payload scope prepared for supervisor registration");
+                launch_phase_gate.reached(WorkerLaunchPhase::ScopePinnedBeforeAck)?;
                 if let Err(error) = await_payload_scope_ack(
                     control_listener
                         .as_ref()
@@ -796,7 +993,7 @@ fn run_pam_session<
                     &worker_id,
                     std::process::id(),
                     &registration_nonce,
-                    0,
+                    internal_control_peer_uid(),
                     launcher_pid,
                     launch_watchdog_deadline,
                 ) {
@@ -804,12 +1001,12 @@ fn run_pam_session<
                     let scope_identity = authoritative_scope.identity().clone();
                     let _ = pending_handoff.abort();
                     let local_cleanup_succeeded = authoritative_scope
-                        .cleanup(launch_watchdog_deadline)
+                        .cleanup_preserving_pin(launch_watchdog_deadline)
                         .is_ok();
                     if !local_cleanup_succeeded {
                         warn!("payload scope pre-commit cleanup failed");
                     }
-                    let _ = request_payload_scope_release(
+                    let release = request_payload_scope_release(
                         writer,
                         control_listener
                             .as_ref()
@@ -821,6 +1018,26 @@ fn run_pam_session<
                         local_cleanup_succeeded,
                         launch_watchdog_deadline,
                     );
+                    match release {
+                        Ok(PayloadScopeReleaseOutcome::Released) => {
+                            emit_fixture_event("PayloadScopeReleasedReceived");
+                            if authoritative_scope.release_pin().is_err() {
+                                wait_for_prestarted_recovery(
+                                    authoritative_scope,
+                                    transaction,
+                                    terminal,
+                                );
+                            }
+                        }
+                        Ok(PayloadScopeReleaseOutcome::RecoveryRequired) | Err(_) => {
+                            emit_fixture_event("PayloadScopeRecoveryRequiredReceived");
+                            wait_for_prestarted_recovery(
+                                authoritative_scope,
+                                transaction,
+                                terminal,
+                            );
+                        }
+                    }
                     drop(transaction);
                     write_envelope(
                         writer,
@@ -833,6 +1050,61 @@ fn run_pam_session<
                 info!(
                     "authenticated payload scope registration acknowledged; CommitExec authorized"
                 );
+                emit_fixture_event("PayloadScopeAcknowledged");
+                launch_phase_gate.reached(WorkerLaunchPhase::AckReceivedBeforeCommitExec)?;
+            }
+            if let Some(signal) = pending_worker_signal()? {
+                emit_fixture_launch_signal(signal);
+                info!("worker signal received during PendingExecHandoff; CommitExec cancelled");
+                let scope_identity = authoritative_scope.identity().clone();
+                let _ = pending_handoff.abort();
+                let local_cleanup_succeeded = authoritative_scope
+                    .cleanup_preserving_pin(launch_watchdog_deadline)
+                    .is_ok();
+                if requires_registration {
+                    let release = request_payload_scope_release(
+                        writer,
+                        control_listener
+                            .as_ref()
+                            .expect("registration requires listener"),
+                        &worker_id,
+                        launcher_pid,
+                        &registration_nonce,
+                        &scope_identity,
+                        local_cleanup_succeeded,
+                        launch_watchdog_deadline,
+                    );
+                    match release {
+                        Ok(PayloadScopeReleaseOutcome::Released) => {
+                            emit_fixture_event("PayloadScopeReleasedReceived");
+                            if authoritative_scope.release_pin().is_err() {
+                                wait_for_prestarted_recovery(
+                                    authoritative_scope,
+                                    transaction,
+                                    terminal,
+                                );
+                            }
+                        }
+                        Ok(PayloadScopeReleaseOutcome::RecoveryRequired) | Err(_) => {
+                            emit_fixture_event("PayloadScopeRecoveryRequiredReceived");
+                            wait_for_prestarted_recovery(
+                                authoritative_scope,
+                                transaction,
+                                terminal,
+                            );
+                        }
+                    }
+                } else if authoritative_scope.release_pin().is_err() {
+                    wait_for_prestarted_recovery(authoritative_scope, transaction, terminal);
+                }
+                drop(transaction);
+                write_envelope(
+                    writer,
+                    WorkerResponse::SessionFailed {
+                        code: WorkerSessionFailureCode::SessionChildFailed,
+                    },
+                )?;
+                return Err(SessionError::AuthenticatedSessionFailed);
             }
             let child_report = match pending_handoff.commit_exec() {
                 Ok(report) => report,
@@ -936,7 +1208,6 @@ fn run_pam_session<
             }
             // Ownership of the validated boundary remains live for the entire
             // Running state. A3.2 will use it for bounded scope termination.
-            let _authoritative_scope = authoritative_scope;
             info!(
                 username = %canonical_username,
                 session = %session.session.id,
@@ -977,6 +1248,7 @@ fn run_pam_session<
                     .expect("validated logind id"),
                 },
             )?;
+            emit_fixture_event("Running");
             info!(username = %canonical_username, session = %session.session.id, pid = child_report.child_pid, "worker session started; PAM transaction remains open");
             let child_status = match wait_for_session(
                 control_listener,
@@ -984,8 +1256,43 @@ fn run_pam_session<
                 worker_id,
                 child_report.child_pid,
                 child_report.process_identity.pgid,
+                authoritative_scope.as_ref(),
             ) {
-                Ok(status) => status,
+                Ok(SessionWaitResult::Legacy(status)) => status,
+                Ok(SessionWaitResult::Graceful(outcome)) => {
+                    info!(?outcome, "graceful outcome received");
+                    match crate::termination::consume_graceful_outcome(
+                        outcome,
+                        authoritative_scope.as_ref(),
+                    ) {
+                        crate::termination::GracefulFinalizationDecision::FinalizeCooperative(
+                            proof,
+                        ) => {
+                            emit_fixture_event("BoundaryEmptyProofAccepted");
+                            return finalize_cooperative_session(
+                                authoritative_scope.as_mut(),
+                                transaction,
+                                &mut terminal,
+                                proof,
+                            );
+                        }
+                        decision => {
+                            match &decision {
+                                crate::termination::GracefulFinalizationDecision::NeedsEscalation { .. } => {
+                                    emit_fixture_event("NeedsEscalation");
+                                    emit_fixture_event("OwnershipRetained:Pam,Vt,Pin");
+                                }
+                                crate::termination::GracefulFinalizationDecision::RecoveryRequired { .. } => {
+                                    emit_fixture_event("RecoveryRequired");
+                                    emit_fixture_event("OwnershipRetained:Pam,Vt,Pin");
+                                }
+                                crate::termination::GracefulFinalizationDecision::FinalizeCooperative(_) => unreachable!(),
+                            }
+                            warn!(?decision, "graceful finalization requires escalation or recovery; PAM, VT and pin remain owned");
+                            wait_for_graceful_handoff();
+                        }
+                    }
+                }
                 Err(error) => {
                     warn!(username = %canonical_username, session = %session.session.id, ?error, "worker failed while waiting for session child");
                     drop(transaction);
@@ -1064,6 +1371,14 @@ fn valid_terminal_proof(
 
 const SESSION_TERMINATION_GRACE: Duration = Duration::from_secs(5);
 
+fn pending_worker_signal() -> Result<Option<i32>, SessionError> {
+    let fd = worker_signal_fd();
+    if fd < 0 {
+        return Ok(None);
+    }
+    crate::termination::read_signal_fd(fd).map_err(|_| SessionError::WorkerIoFailed)
+}
+
 fn bind_control_listener(path: &std::path::Path) -> Result<UnixListener, SessionError> {
     if !path.is_absolute() || path.exists() {
         return Err(SessionError::WorkerProtocolFailed);
@@ -1081,42 +1396,391 @@ fn wait_for_session(
     worker_id: String,
     session_pid: u32,
     session_pgid: u32,
+    authoritative_scope: &dyn crate::payload_scope::AuthoritativePayloadScope,
+) -> Result<SessionWaitResult, SessionError> {
+    wait_for_session_with_grace(
+        listener,
+        child_runner,
+        worker_id,
+        session_pid,
+        session_pgid,
+        authoritative_scope,
+        configured_session_termination_grace(),
+        0,
+    )
+}
+
+fn wait_for_session_with_grace(
+    listener: Option<UnixListener>,
+    child_runner: &dyn crate::session_child::SessionChildRunner,
+    worker_id: String,
+    session_pid: u32,
+    session_pgid: u32,
+    authoritative_scope: &dyn crate::payload_scope::AuthoritativePayloadScope,
+    grace: Duration,
+    expected_control_uid: u32,
+) -> Result<SessionWaitResult, SessionError> {
+    use crate::termination::{
+        BoundaryTerminalObservation, GracefulTerminationCoordinator, GracefulTerminationError,
+        LeaderExit, TerminationCause, WorkerTerminationSignal,
+    };
+    let mut coordinator = match GracefulTerminationCoordinator::new() {
+        Ok(coordinator) => coordinator,
+        Err(_) => {
+            return Ok(SessionWaitResult::Graceful(
+                crate::termination::GracefulTerminationOutcome::InfrastructureFailure {
+                    cause: TerminationCause::RuntimeFailure,
+                    leader_exit: None,
+                    error: GracefulTerminationError::Timer,
+                },
+            ))
+        }
+    };
+    let timer_flags = unsafe { libc::fcntl(coordinator.timer_fd(), libc::F_GETFD) };
+    if timer_flags >= 0 && timer_flags & libc::FD_CLOEXEC != 0 {
+        emit_fixture_event("TimerFdCloexec");
+    }
+    let signal_fd = worker_signal_fd();
+    let supervisor_fd = supervisor_channel_fd();
+    if signal_fd < 0 {
+        return wait_for_session_without_signal_fd(
+            listener,
+            child_runner,
+            worker_id,
+            session_pid,
+            session_pgid,
+        )
+        .map(SessionWaitResult::Legacy);
+    }
+    let pidfd = child_runner.authoritative_pidfd();
+    if pidfd < 0 {
+        return Ok(SessionWaitResult::Graceful(
+            coordinator.infrastructure(GracefulTerminationError::LeaderReap),
+        ));
+    }
+    let mut leader_reaped = false;
+    let mut observer: Option<Box<dyn crate::payload_scope::PayloadBoundaryObserver>> = None;
+    loop {
+        let mut fds = [
+            libc::pollfd {
+                fd: if leader_reaped { -1 } else { pidfd },
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: listener.as_ref().map_or(-1, AsRawFd::as_raw_fd),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: signal_fd,
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: coordinator.timer_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: supervisor_fd,
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: observer.as_ref().map_or(-1, |value| value.as_raw_fd()),
+                events: observer.as_ref().map_or(0, |value| value.poll_events()),
+                revents: 0,
+            },
+        ];
+        if unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, -1) } < 0 {
+            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Ok(SessionWaitResult::Graceful(
+                coordinator.infrastructure(GracefulTerminationError::Poll),
+            ));
+        }
+        let mut trigger = None;
+        if fds[0].revents & (libc::POLLIN | libc::POLLHUP) != 0 && !leader_reaped {
+            let status = match child_runner.poll_child() {
+                Ok(status) => status,
+                Err(_) => {
+                    return Ok(SessionWaitResult::Graceful(
+                        coordinator.infrastructure(GracefulTerminationError::LeaderReap),
+                    ))
+                }
+            };
+            if let Some(status) = status {
+                let exit = LeaderExit::from_status(status);
+                info!(?exit, "authoritative session leader exited");
+                coordinator.record_leader_exit(exit.clone());
+                leader_reaped = true;
+                trigger = Some(TerminationCause::LeaderExited(exit));
+            }
+        }
+        if fds[5].revents != 0 {
+            let Some(boundary_observer) = observer.as_mut() else {
+                return Ok(SessionWaitResult::Graceful(
+                    coordinator.infrastructure(GracefulTerminationError::BoundaryObserver),
+                ));
+            };
+            if boundary_observer.consume_wakeup().is_err() {
+                return Ok(SessionWaitResult::Graceful(
+                    coordinator.infrastructure(GracefulTerminationError::BoundaryObserver),
+                ));
+            }
+            match authoritative_scope.boundary_appears_terminal() {
+                Ok(true) => {
+                    emit_fixture_event("BoundaryCandidate");
+                    return Ok(SessionWaitResult::Graceful(coordinator.boundary_candidate(
+                        BoundaryTerminalObservation::CgroupEventRevalidated,
+                    )));
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    return Ok(SessionWaitResult::Graceful(coordinator.scope_error(error)))
+                }
+            }
+        }
+        if fds[2].revents & libc::POLLIN != 0 {
+            loop {
+                let signal = match crate::termination::read_signal_fd(signal_fd) {
+                    Ok(Some(signal)) => signal,
+                    Ok(None) => break,
+                    Err(_) => {
+                        return Ok(SessionWaitResult::Graceful(
+                            coordinator.infrastructure(GracefulTerminationError::Signal),
+                        ))
+                    }
+                };
+                let name = match signal {
+                    libc::SIGTERM => "SIGTERM",
+                    libc::SIGINT => "SIGINT",
+                    libc::SIGHUP => "SIGHUP",
+                    _ => "UNKNOWN",
+                };
+                info!(signal = name, "worker signal received");
+                let Some(signal) = WorkerTerminationSignal::from_raw(signal) else {
+                    return Ok(SessionWaitResult::Graceful(
+                        coordinator.infrastructure(GracefulTerminationError::Signal),
+                    ));
+                };
+                trigger.get_or_insert(TerminationCause::WorkerSignal(signal));
+            }
+        }
+        if fds[1].revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
+            warn!("control channel disconnected; terminating session");
+            trigger.get_or_insert(TerminationCause::SupervisorDisconnected);
+        }
+        if fds[4].revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
+            warn!("supervisor channel disconnected; terminating session");
+            trigger.get_or_insert(TerminationCause::SupervisorDisconnected);
+        }
+        if fds[1].revents & libc::POLLIN != 0 {
+            let Some(listener) = listener.as_ref() else {
+                return Ok(SessionWaitResult::Graceful(
+                    coordinator.infrastructure(GracefulTerminationError::Control),
+                ));
+            };
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    if !peer_has_uid(&stream, expected_control_uid) {
+                        continue;
+                    }
+                    let request = match read_control_request(&mut stream) {
+                        Ok(request) => request,
+                        Err(_) => {
+                            return Ok(SessionWaitResult::Graceful(
+                                coordinator.infrastructure(GracefulTerminationError::Control),
+                            ))
+                        }
+                    };
+                    if request.version != WORKER_CONTROL_PROTOCOL_VERSION {
+                        return Ok(SessionWaitResult::Graceful(
+                            coordinator.infrastructure(GracefulTerminationError::Control),
+                        ));
+                    }
+                    match request.message {
+                        WorkerControlRequest::PayloadScopeRegistered { .. } => {
+                            return Ok(SessionWaitResult::Graceful(
+                                coordinator.infrastructure(GracefulTerminationError::Control),
+                            ));
+                        }
+                        WorkerControlRequest::Terminate {
+                            worker_id: requested_worker_id,
+                            expected_worker_pid,
+                            expected_session_pid,
+                            expected_session_pgid,
+                        } if requested_worker_id == worker_id
+                            && expected_worker_pid == std::process::id()
+                            && expected_session_pid == session_pid
+                            && expected_session_pgid == session_pgid =>
+                        {
+                            trigger.get_or_insert(TerminationCause::InternalTerminateRequest);
+                        }
+                        _ => {
+                            return Ok(SessionWaitResult::Graceful(
+                                coordinator.infrastructure(GracefulTerminationError::Control),
+                            ))
+                        }
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(_) => {
+                    return Ok(SessionWaitResult::Graceful(
+                        coordinator.infrastructure(GracefulTerminationError::Control),
+                    ))
+                }
+            }
+        }
+        if let Some(new_cause) = trigger {
+            if let Some(original) = coordinator.cause() {
+                info!(original_cause = ?original, new_cause = ?new_cause, "duplicate termination trigger ignored");
+            } else {
+                info!(cause = ?new_cause, "session termination requested");
+                emit_fixture_cause(&new_cause);
+                if let TerminationCause::WorkerSignal(signal) = &new_cause {
+                    debug!(
+                        ?signal,
+                        "worker signal selected as authoritative termination cause"
+                    );
+                }
+                match coordinator.begin(new_cause, grace, authoritative_scope) {
+                    Ok(Some(new_observer)) => observer = Some(new_observer),
+                    Ok(None) => {}
+                    Err(outcome) => return Ok(SessionWaitResult::Graceful(outcome)),
+                }
+                emit_fixture_event("TimerArmed");
+                info!(unit = %authoritative_scope.identity().unit_name, invocation_id = %authoritative_scope.identity().invocation_id, "graceful payload scope termination requested");
+                info!(duration_ms = grace.as_millis(), "grace period armed");
+            }
+        }
+        let deadline_expired = if fds[3].revents & libc::POLLIN != 0 {
+            match coordinator.consume_deadline() {
+                Ok(expired) => expired,
+                Err(_) => {
+                    return Ok(SessionWaitResult::Graceful(
+                        coordinator.infrastructure(GracefulTerminationError::Timer),
+                    ))
+                }
+            }
+        } else {
+            false
+        };
+        if deadline_expired {
+            warn!("grace deadline expired");
+            emit_fixture_event("DeadlineExpired");
+            return Ok(SessionWaitResult::Graceful(coordinator.deadline_expired()));
+        }
+    }
+}
+
+enum SessionWaitResult {
+    Legacy(std::process::ExitStatus),
+    Graceful(crate::termination::GracefulTerminationOutcome),
+}
+
+fn finalize_cooperative_session(
+    scope: &mut dyn crate::payload_scope::AuthoritativePayloadScope,
+    mut transaction: Box<dyn niralis_auth::AuthenticatedTransaction>,
+    terminal: &mut VirtualTerminalGuard,
+    proof: crate::termination::BoundaryEmptyProof,
+) -> Result<(), SessionError> {
+    info!("releasing pinned systemd unit reference");
+    if let Err(error) = scope.release_pin() {
+        warn!(
+            ?error,
+            "pinned unit reference release failed after empty proof"
+        );
+    }
+    info!("closing worker PAM transaction after empty proof");
+    let pam_result = transaction.close_session().map_err(|error| {
+        warn!(?error, "worker PAM close failed after empty proof");
+        SessionError::AuthenticatedSessionFailed
+    });
+    drop(transaction);
+    info!("releasing session VT after PAM close");
+    let vt_result = terminal.release().map_err(|error| {
+        warn!(?error, "session VT release failed after PAM close");
+        SessionError::AuthenticatedSessionFailed
+    });
+    pam_result?;
+    vt_result?;
+    info!("cooperative session finalization complete");
+    emit_fixture_event("WorkerReturning");
+    if matches!(
+        proof.leader_exit(),
+        crate::termination::LeaderExit::ExitedZero
+    ) {
+        Ok(())
+    } else {
+        Err(SessionError::AuthenticatedSessionFailed)
+    }
+}
+
+fn wait_for_graceful_handoff() -> ! {
+    let mut fd = libc::pollfd {
+        fd: worker_signal_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    loop {
+        fd.revents = 0;
+        let _ = unsafe { libc::poll(&mut fd, 1, -1) };
+        while crate::termination::read_signal_fd(fd.fd)
+            .ok()
+            .flatten()
+            .is_some()
+        {}
+    }
+}
+
+fn wait_for_prestarted_recovery(
+    _scope: Box<dyn crate::payload_scope::AuthoritativePayloadScope>,
+    _transaction: Box<dyn niralis_auth::AuthenticatedTransaction>,
+    _terminal: VirtualTerminalGuard,
+) -> ! {
+    emit_fixture_event("PreStartedRecoveryHeld");
+    wait_for_graceful_handoff()
+}
+
+fn wait_for_session_without_signal_fd(
+    listener: Option<UnixListener>,
+    child_runner: &dyn crate::session_child::SessionChildRunner,
+    worker_id: String,
+    session_pid: u32,
+    session_pgid: u32,
 ) -> Result<std::process::ExitStatus, SessionError> {
+    // Test-only/backward-compatible seam for dependency-injected unit tests.
+    // The production entrypoint always installs WORKER_SIGNAL_FD and therefore
+    // cannot enter this PGID-based legacy path while Running.
     loop {
         match child_runner
-            .wait_for_child_or_control(listener.as_ref().map(std::os::fd::AsRawFd::as_raw_fd))
+            .wait_for_child_or_control(listener.as_ref().map(AsRawFd::as_raw_fd))
             .map_err(|_| SessionError::AuthenticatedSessionFailed)?
         {
             crate::session_child::SessionChildWaitEvent::Exited(status) => return Ok(status),
             crate::session_child::SessionChildWaitEvent::ControlReady => {
-                let Some(listener) = listener.as_ref() else {
-                    return Err(SessionError::AuthenticatedSessionFailed);
-                };
+                let listener = listener
+                    .as_ref()
+                    .ok_or(SessionError::AuthenticatedSessionFailed)?;
                 match listener.accept() {
-                    Ok((mut stream, _)) => {
-                        if !peer_is_root(&stream) {
-                            continue;
-                        }
+                    Ok((mut stream, _)) if peer_is_root(&stream) => {
                         let request = read_control_request(&mut stream)
                             .map_err(|_| SessionError::AuthenticatedSessionFailed)?;
-                        if request.version != WORKER_CONTROL_PROTOCOL_VERSION {
-                            return Err(SessionError::AuthenticatedSessionFailed);
-                        }
                         match request.message {
-                            WorkerControlRequest::PayloadScopeRegistered { .. } => {
-                                return Err(SessionError::AuthenticatedSessionFailed);
-                            }
                             WorkerControlRequest::Terminate {
                                 worker_id: requested_worker_id,
                                 expected_worker_pid,
                                 expected_session_pid,
                                 expected_session_pgid,
-                            } if requested_worker_id == worker_id
+                            } if request.version == WORKER_CONTROL_PROTOCOL_VERSION
+                                && requested_worker_id == worker_id
                                 && expected_worker_pid == std::process::id()
                                 && expected_session_pid == session_pid
                                 && expected_session_pgid == session_pgid =>
                             {
-                                info!("worker session termination requested");
                                 return child_runner
                                     .terminate(SESSION_TERMINATION_GRACE)
                                     .map_err(|_| SessionError::AuthenticatedSessionFailed);
@@ -1124,7 +1788,8 @@ fn wait_for_session(
                             _ => return Err(SessionError::AuthenticatedSessionFailed),
                         }
                     }
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                    Ok(_) => {}
+                    Err(ref error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
                     Err(_) => return Err(SessionError::AuthenticatedSessionFailed),
                 }
             }
@@ -1133,7 +1798,731 @@ fn wait_for_session(
 }
 
 fn peer_is_root(stream: &UnixStream) -> bool {
-    peer_credentials(stream).is_some_and(|credentials| credentials.uid == 0)
+    peer_has_uid(stream, 0)
+}
+
+fn peer_has_uid(stream: &UnixStream, expected_uid: u32) -> bool {
+    peer_credentials(stream).is_some_and(|credentials| credentials.uid == expected_uid)
+}
+
+#[cfg(test)]
+mod graceful_coordinator_tests {
+    use super::*;
+    use std::os::fd::{FromRawFd, OwnedFd, RawFd};
+    use std::os::unix::process::ExitStatusExt;
+    use std::sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering},
+        Arc, Mutex,
+    };
+
+    static SIGNAL_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    struct OrderedTransaction {
+        events: Arc<Mutex<Vec<&'static str>>>,
+        close_fails: bool,
+    }
+    impl niralis_auth::AuthenticatedTransaction for OrderedTransaction {
+        fn user(&self) -> &niralis_auth::AuthenticatedUser {
+            panic!("unused by finalizer")
+        }
+        fn open_session(
+            &mut self,
+            _: &niralis_auth::PamSessionMetadata,
+        ) -> Result<(), niralis_auth::AuthSessionError> {
+            panic!("unused by finalizer")
+        }
+        fn session_environment(
+            &mut self,
+        ) -> Result<niralis_auth::PamSessionEnvironment, niralis_auth::AuthSessionError> {
+            panic!("unused by finalizer")
+        }
+        fn close_session(&mut self) -> Result<(), niralis_auth::AuthSessionError> {
+            self.events.lock().unwrap().push("pam_close_started");
+            if self.close_fails {
+                Err(niralis_auth::AuthSessionError::CloseFailed)
+            } else {
+                self.events.lock().unwrap().push("pam_close_completed");
+                Ok(())
+            }
+        }
+    }
+    impl Drop for OrderedTransaction {
+        fn drop(&mut self) {
+            self.events.lock().unwrap().push("pam_dropped");
+        }
+    }
+
+    struct OrderedLease {
+        events: Arc<Mutex<Vec<&'static str>>>,
+        fail: bool,
+    }
+    impl crate::VirtualTerminalLease for OrderedLease {
+        fn seat(&self) -> &niralis_auth::SeatId {
+            panic!("unused by finalizer")
+        }
+        fn vtnr(&self) -> niralis_auth::VirtualTerminalId {
+            niralis_auth::VirtualTerminalId::new(1).unwrap()
+        }
+        fn duplicate_terminal_fd(&self) -> Result<OwnedFd, crate::VirtualTerminalError> {
+            panic!("unused by finalizer")
+        }
+        fn activate(&mut self, _: Duration) -> Result<(), crate::VirtualTerminalError> {
+            panic!("unused by finalizer")
+        }
+        fn release(&mut self) -> Result<(), crate::VirtualTerminalError> {
+            self.events.lock().unwrap().push("vt_released");
+            if self.fail {
+                Err(crate::VirtualTerminalError::CleanupFailed)
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    struct OrderedScope {
+        identity: niralis_session::PayloadScopeIdentity,
+        events: Arc<Mutex<Vec<&'static str>>>,
+        unref_fails: bool,
+    }
+    impl crate::payload_scope::AuthoritativePayloadScope for OrderedScope {
+        fn identity(&self) -> &niralis_session::PayloadScopeIdentity {
+            &self.identity
+        }
+        fn control_group(&self) -> &str {
+            "/test"
+        }
+        fn cleanup(
+            self: Box<Self>,
+            _: Instant,
+        ) -> Result<(), crate::payload_scope::PayloadScopeError> {
+            Ok(())
+        }
+        fn release_pin(&mut self) -> Result<(), crate::payload_scope::PayloadScopeError> {
+            self.events.lock().unwrap().push("unit_unref_attempted");
+            if self.unref_fails {
+                Err(crate::payload_scope::PayloadScopeError::UnrefFailed)
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    struct EventObserver(OwnedFd);
+    impl crate::payload_scope::PayloadBoundaryObserver for EventObserver {
+        fn as_raw_fd(&self) -> RawFd {
+            self.0.as_raw_fd()
+        }
+        fn poll_events(&self) -> libc::c_short {
+            libc::POLLIN
+        }
+        fn consume_wakeup(&mut self) -> Result<(), crate::payload_scope::PayloadScopeError> {
+            read_event(self.0.as_raw_fd())
+                .then_some(())
+                .ok_or(crate::payload_scope::PayloadScopeError::ObserverFailed)
+        }
+    }
+
+    struct EventScope {
+        identity: niralis_session::PayloadScopeIdentity,
+        boundary_fd: OwnedFd,
+        pid_fd: RawFd,
+        cooperative: bool,
+        terminal: AtomicBool,
+        requests: AtomicUsize,
+        unrefs: AtomicUsize,
+        fail: Option<crate::payload_scope::PayloadScopeError>,
+        observe_fail: Option<crate::payload_scope::PayloadScopeError>,
+    }
+    impl EventScope {
+        fn new(
+            pid_fd: RawFd,
+            cooperative: bool,
+            fail: Option<crate::payload_scope::PayloadScopeError>,
+        ) -> Self {
+            Self {
+                identity: niralis_session::PayloadScopeIdentity {
+                    unit_name: "niralis-payload-11111111111111111111111111111111.scope".into(),
+                    invocation_id: "11111111111111111111111111111111".into(),
+                    expected_uid: 1000,
+                    logind_session_id: niralis_session::LogindSessionId::new("1".into()).unwrap(),
+                },
+                boundary_fd: event_fd(),
+                pid_fd,
+                cooperative,
+                terminal: AtomicBool::new(false),
+                requests: AtomicUsize::new(0),
+                unrefs: AtomicUsize::new(0),
+                fail,
+                observe_fail: None,
+            }
+        }
+    }
+    impl crate::payload_scope::AuthoritativePayloadScope for EventScope {
+        fn identity(&self) -> &niralis_session::PayloadScopeIdentity {
+            &self.identity
+        }
+        fn control_group(&self) -> &str {
+            "/test"
+        }
+        fn cleanup(
+            self: Box<Self>,
+            _: Instant,
+        ) -> Result<(), crate::payload_scope::PayloadScopeError> {
+            Ok(())
+        }
+        fn create_boundary_observer(
+            &self,
+        ) -> Result<
+            Box<dyn crate::payload_scope::PayloadBoundaryObserver>,
+            crate::payload_scope::PayloadScopeError,
+        > {
+            let fd = unsafe { libc::fcntl(self.boundary_fd.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
+            if fd < 0 {
+                Err(crate::payload_scope::PayloadScopeError::ObserverFailed)
+            } else {
+                Ok(Box::new(EventObserver(unsafe { OwnedFd::from_raw_fd(fd) })))
+            }
+        }
+        fn request_graceful_termination(
+            &self,
+        ) -> Result<(), crate::payload_scope::PayloadScopeError> {
+            self.requests.fetch_add(1, AtomicOrdering::SeqCst);
+            if let Some(error) = &self.fail {
+                return Err(error.clone());
+            }
+            if self.cooperative {
+                self.terminal.store(true, AtomicOrdering::SeqCst);
+                write_event(self.pid_fd);
+                write_event(self.boundary_fd.as_raw_fd());
+            }
+            Ok(())
+        }
+        fn boundary_appears_terminal(
+            &self,
+        ) -> Result<bool, crate::payload_scope::PayloadScopeError> {
+            if let Some(error) = &self.observe_fail {
+                Err(error.clone())
+            } else {
+                Ok(self.terminal.load(AtomicOrdering::SeqCst))
+            }
+        }
+        fn prove_empty_boundary(
+            &self,
+            leader_exit: &crate::termination::LeaderExit,
+        ) -> Result<crate::termination::BoundaryEmptyProof, crate::payload_scope::PayloadScopeError>
+        {
+            if !self.terminal.load(AtomicOrdering::SeqCst) {
+                return Err(crate::payload_scope::PayloadScopeError::BoundaryNotEmpty);
+            }
+            Ok(crate::termination::BoundaryEmptyProof::new(
+                &self.identity,
+                self.control_group(),
+                leader_exit.clone(),
+            ))
+        }
+        fn release_pin(&mut self) -> Result<(), crate::payload_scope::PayloadScopeError> {
+            self.unrefs.fetch_add(1, AtomicOrdering::SeqCst);
+            Ok(())
+        }
+    }
+
+    struct EventRunner {
+        pidfd: OwnedFd,
+        status: Mutex<Option<std::process::ExitStatus>>,
+    }
+    impl crate::session_child::SessionChildRunner for EventRunner {
+        fn run_child_until_ready(
+            &self,
+            _: crate::session_child::SessionChildExpectation,
+        ) -> Result<
+            Box<dyn crate::session_child::PendingExecHandoff>,
+            crate::session_child::SessionChildError,
+        > {
+            Err(crate::session_child::SessionChildError::IoFailed)
+        }
+        fn authoritative_pidfd(&self) -> RawFd {
+            self.pidfd.as_raw_fd()
+        }
+        fn poll_child(
+            &self,
+        ) -> Result<Option<std::process::ExitStatus>, crate::session_child::SessionChildError>
+        {
+            let _ = read_event(self.pidfd.as_raw_fd());
+            Ok(self.status.lock().unwrap().take())
+        }
+    }
+
+    struct OwnedLifecycle(Arc<AtomicUsize>);
+    impl Drop for OwnedLifecycle {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, AtomicOrdering::SeqCst);
+        }
+    }
+
+    fn event_fd() -> OwnedFd {
+        let fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
+        assert!(fd >= 0);
+        unsafe { OwnedFd::from_raw_fd(fd) }
+    }
+    fn write_event(fd: RawFd) {
+        let one = 1_u64;
+        assert_eq!(
+            unsafe { libc::write(fd, (&one as *const u64).cast(), 8) },
+            8
+        );
+    }
+    fn read_event(fd: RawFd) -> bool {
+        let mut value = 0_u64;
+        (unsafe { libc::read(fd, (&mut value as *mut u64).cast(), 8) }) == 8
+    }
+
+    fn run_signal_case(signal: i32, expected: crate::termination::WorkerTerminationSignal) {
+        let signals = crate::termination::WorkerSignalFd::install().unwrap();
+        set_worker_signal_fd(signals.as_raw_fd());
+        set_supervisor_channel_fd(-1);
+        let runner = EventRunner {
+            pidfd: event_fd(),
+            status: Mutex::new(Some(std::process::ExitStatus::from_raw(0))),
+        };
+        let scope = EventScope::new(runner.pidfd.as_raw_fd(), true, None);
+        let drops = Arc::new(AtomicUsize::new(0));
+        let pam = OwnedLifecycle(drops.clone());
+        let vt = OwnedLifecycle(drops.clone());
+        assert_eq!(
+            unsafe { libc::pthread_kill(libc::pthread_self(), signal) },
+            0
+        );
+        let result = wait_for_session_with_grace(
+            None,
+            &runner,
+            "worker".into(),
+            1,
+            1,
+            &scope,
+            Duration::from_millis(100),
+            unsafe { libc::getuid() },
+        )
+        .unwrap();
+        assert!(
+            matches!(result, SessionWaitResult::Graceful(crate::termination::GracefulTerminationOutcome::BoundaryTerminalCandidate { cause: crate::termination::TerminationCause::WorkerSignal(value), leader_exit: Some(crate::termination::LeaderExit::ExitedZero), .. }) if value == expected)
+        );
+        assert_eq!(scope.requests.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(drops.load(AtomicOrdering::SeqCst), 0);
+        drop((pam, vt));
+        set_worker_signal_fd(-1);
+    }
+
+    #[test]
+    fn production_loop_cooperates_for_real_worker_signals() {
+        let _lock = SIGNAL_TEST_LOCK.lock().unwrap();
+        run_signal_case(
+            libc::SIGTERM,
+            crate::termination::WorkerTerminationSignal::Sigterm,
+        );
+        run_signal_case(
+            libc::SIGINT,
+            crate::termination::WorkerTerminationSignal::Sigint,
+        );
+        run_signal_case(
+            libc::SIGHUP,
+            crate::termination::WorkerTerminationSignal::Sighup,
+        );
+    }
+
+    #[test]
+    fn production_loop_deadline_and_infrastructure_retain_ownership() {
+        let _lock = SIGNAL_TEST_LOCK.lock().unwrap();
+        let signals = crate::termination::WorkerSignalFd::install().unwrap();
+        set_worker_signal_fd(signals.as_raw_fd());
+        for failure in [
+            None,
+            Some(crate::payload_scope::PayloadScopeError::BusUnavailable),
+        ] {
+            let runner = EventRunner {
+                pidfd: event_fd(),
+                status: Mutex::new(None),
+            };
+            let scope = EventScope::new(runner.pidfd.as_raw_fd(), false, failure.clone());
+            let drops = Arc::new(AtomicUsize::new(0));
+            let pam = OwnedLifecycle(drops.clone());
+            let vt = OwnedLifecycle(drops.clone());
+            assert_eq!(
+                unsafe { libc::pthread_kill(libc::pthread_self(), libc::SIGTERM) },
+                0
+            );
+            let result = wait_for_session_with_grace(
+                None,
+                &runner,
+                "worker".into(),
+                1,
+                1,
+                &scope,
+                Duration::from_millis(1),
+                unsafe { libc::getuid() },
+            )
+            .unwrap();
+            if failure.is_some() {
+                assert!(matches!(
+                    result,
+                    SessionWaitResult::Graceful(
+                        crate::termination::GracefulTerminationOutcome::InfrastructureFailure { .. }
+                    )
+                ));
+            } else {
+                assert!(matches!(
+                    result,
+                    SessionWaitResult::Graceful(
+                        crate::termination::GracefulTerminationOutcome::DeadlineExpired { .. }
+                    )
+                ));
+            }
+            assert_eq!(drops.load(AtomicOrdering::SeqCst), 0);
+            drop((pam, vt));
+        }
+        set_worker_signal_fd(-1);
+    }
+
+    #[test]
+    fn simultaneous_boundary_and_deadline_prefers_revalidated_candidate() {
+        let _lock = SIGNAL_TEST_LOCK.lock().unwrap();
+        let signals = crate::termination::WorkerSignalFd::install().unwrap();
+        set_worker_signal_fd(signals.as_raw_fd());
+        let runner = EventRunner {
+            pidfd: event_fd(),
+            status: Mutex::new(Some(std::process::ExitStatus::from_raw(42 << 8))),
+        };
+        let scope = EventScope::new(runner.pidfd.as_raw_fd(), true, None);
+        unsafe { libc::pthread_kill(libc::pthread_self(), libc::SIGTERM) };
+        let result = wait_for_session_with_grace(
+            None,
+            &runner,
+            "worker".into(),
+            1,
+            1,
+            &scope,
+            Duration::from_nanos(1),
+            unsafe { libc::getuid() },
+        )
+        .unwrap();
+        assert!(matches!(
+            result,
+            SessionWaitResult::Graceful(
+                crate::termination::GracefulTerminationOutcome::BoundaryTerminalCandidate {
+                    leader_exit: Some(crate::termination::LeaderExit::ExitedNonZero(42)),
+                    ..
+                }
+            )
+        ));
+        set_worker_signal_fd(-1);
+    }
+
+    #[test]
+    fn replacement_during_observation_is_recovery_required() {
+        let _lock = SIGNAL_TEST_LOCK.lock().unwrap();
+        let signals = crate::termination::WorkerSignalFd::install().unwrap();
+        set_worker_signal_fd(signals.as_raw_fd());
+        let runner = EventRunner {
+            pidfd: event_fd(),
+            status: Mutex::new(Some(std::process::ExitStatus::from_raw(libc::SIGSEGV))),
+        };
+        let mut scope = EventScope::new(runner.pidfd.as_raw_fd(), true, None);
+        scope.observe_fail = Some(crate::payload_scope::PayloadScopeError::UnitReplaced);
+        unsafe { libc::pthread_kill(libc::pthread_self(), libc::SIGTERM) };
+        let result = wait_for_session_with_grace(
+            None,
+            &runner,
+            "worker".into(),
+            1,
+            1,
+            &scope,
+            Duration::from_millis(100),
+            unsafe { libc::getuid() },
+        )
+        .unwrap();
+        assert!(
+            matches!(result, SessionWaitResult::Graceful(crate::termination::GracefulTerminationOutcome::RecoveryRequired { leader_exit: Some(crate::termination::LeaderExit::KilledBySignal(value)), .. }) if value == libc::SIGSEGV)
+        );
+        set_worker_signal_fd(-1);
+    }
+
+    #[test]
+    fn simultaneous_supervisor_disconnect_and_signal_is_single_lifecycle() {
+        let _lock = SIGNAL_TEST_LOCK.lock().unwrap();
+        let signals = crate::termination::WorkerSignalFd::install().unwrap();
+        set_worker_signal_fd(signals.as_raw_fd());
+        let supervisor = event_fd();
+        write_event(supervisor.as_raw_fd());
+        set_supervisor_channel_fd(supervisor.as_raw_fd());
+        let runner = EventRunner {
+            pidfd: event_fd(),
+            status: Mutex::new(Some(std::process::ExitStatus::from_raw(0))),
+        };
+        let scope = EventScope::new(runner.pidfd.as_raw_fd(), true, None);
+        unsafe { libc::pthread_kill(libc::pthread_self(), libc::SIGTERM) };
+        let result = wait_for_session_with_grace(
+            None,
+            &runner,
+            "worker".into(),
+            1,
+            1,
+            &scope,
+            Duration::from_millis(100),
+            unsafe { libc::getuid() },
+        )
+        .unwrap();
+        assert!(matches!(
+            result,
+            SessionWaitResult::Graceful(
+                crate::termination::GracefulTerminationOutcome::BoundaryTerminalCandidate {
+                    cause: crate::termination::TerminationCause::WorkerSignal(
+                        crate::termination::WorkerTerminationSignal::Sigterm
+                    ),
+                    ..
+                }
+            )
+        ));
+        assert_eq!(scope.requests.load(AtomicOrdering::SeqCst), 1);
+        set_supervisor_channel_fd(-1);
+        set_worker_signal_fd(-1);
+    }
+
+    #[test]
+    fn authenticated_pidfd_and_terminate_share_one_poll_cycle() {
+        let _lock = SIGNAL_TEST_LOCK.lock().unwrap();
+        let signals = crate::termination::WorkerSignalFd::install().unwrap();
+        set_worker_signal_fd(signals.as_raw_fd());
+        set_supervisor_channel_fd(-1);
+        let runner = EventRunner {
+            pidfd: event_fd(),
+            status: Mutex::new(Some(std::process::ExitStatus::from_raw(0))),
+        };
+        write_event(runner.pidfd.as_raw_fd());
+        let scope = EventScope::new(runner.pidfd.as_raw_fd(), true, None);
+        let path = std::env::temp_dir().join(format!("n-a326-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let listener = bind_control_listener(&path).unwrap();
+        let mut stream = UnixStream::connect(&path).unwrap();
+        niralis_session::write_control_request(
+            &mut stream,
+            WorkerControlRequest::Terminate {
+                worker_id: "worker".into(),
+                expected_worker_pid: std::process::id(),
+                expected_session_pid: 1,
+                expected_session_pgid: 1,
+            },
+        )
+        .unwrap();
+        let result = wait_for_session_with_grace(
+            Some(listener),
+            &runner,
+            "worker".into(),
+            1,
+            1,
+            &scope,
+            Duration::from_millis(100),
+            unsafe { libc::getuid() },
+        )
+        .unwrap();
+        assert!(matches!(
+            result,
+            SessionWaitResult::Graceful(
+                crate::termination::GracefulTerminationOutcome::BoundaryTerminalCandidate {
+                    cause: crate::termination::TerminationCause::LeaderExited(
+                        crate::termination::LeaderExit::ExitedZero
+                    ),
+                    leader_exit: Some(crate::termination::LeaderExit::ExitedZero),
+                    ..
+                }
+            )
+        ));
+        assert_eq!(scope.requests.load(AtomicOrdering::SeqCst), 1);
+        let _ = std::fs::remove_file(path);
+        set_worker_signal_fd(-1);
+    }
+
+    #[test]
+    fn cooperative_finalizer_orders_unref_pam_and_vt() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let identity = niralis_session::PayloadScopeIdentity {
+            unit_name: "niralis-payload-00000000000000000000000000000000.scope".into(),
+            invocation_id: "00000000000000000000000000000000".into(),
+            expected_uid: 1000,
+            logind_session_id: niralis_session::LogindSessionId::new("1".into()).unwrap(),
+        };
+        let proof = crate::termination::BoundaryEmptyProof::new(
+            &identity,
+            "/test",
+            crate::termination::LeaderExit::ExitedZero,
+        );
+        let mut scope = OrderedScope {
+            identity,
+            events: events.clone(),
+            unref_fails: false,
+        };
+        let transaction: Box<dyn niralis_auth::AuthenticatedTransaction> =
+            Box::new(OrderedTransaction {
+                events: events.clone(),
+                close_fails: false,
+            });
+        let mut terminal = VirtualTerminalGuard::new(Box::new(OrderedLease {
+            events: events.clone(),
+            fail: false,
+        }));
+        assert!(
+            finalize_cooperative_session(&mut scope, transaction, &mut terminal, proof).is_ok()
+        );
+        assert_eq!(
+            *events.lock().unwrap(),
+            [
+                "unit_unref_attempted",
+                "pam_close_started",
+                "pam_close_completed",
+                "pam_dropped",
+                "vt_released"
+            ]
+        );
+    }
+
+    #[test]
+    fn production_loop_candidate_is_consumed_and_cooperative_finalizer_returns() {
+        let _lock = SIGNAL_TEST_LOCK.lock().unwrap();
+        let signals = crate::termination::WorkerSignalFd::install().unwrap();
+        set_worker_signal_fd(signals.as_raw_fd());
+        let runner = EventRunner {
+            pidfd: event_fd(),
+            status: Mutex::new(Some(std::process::ExitStatus::from_raw(0))),
+        };
+        let mut scope = EventScope::new(runner.pidfd.as_raw_fd(), true, None);
+        unsafe { libc::pthread_kill(libc::pthread_self(), libc::SIGTERM) };
+        let outcome = match wait_for_session_with_grace(
+            None,
+            &runner,
+            "worker".into(),
+            1,
+            1,
+            &scope,
+            Duration::from_millis(100),
+            unsafe { libc::getuid() },
+        )
+        .unwrap()
+        {
+            SessionWaitResult::Graceful(outcome) => outcome,
+            SessionWaitResult::Legacy(_) => panic!("expected graceful outcome"),
+        };
+        let proof = match crate::termination::consume_graceful_outcome(outcome, &scope) {
+            crate::termination::GracefulFinalizationDecision::FinalizeCooperative(proof) => proof,
+            decision => panic!("unexpected finalization decision: {decision:?}"),
+        };
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let transaction: Box<dyn niralis_auth::AuthenticatedTransaction> =
+            Box::new(OrderedTransaction {
+                events: events.clone(),
+                close_fails: false,
+            });
+        let mut terminal = VirtualTerminalGuard::new(Box::new(OrderedLease {
+            events: events.clone(),
+            fail: false,
+        }));
+        assert!(
+            finalize_cooperative_session(&mut scope, transaction, &mut terminal, proof).is_ok()
+        );
+        assert_eq!(scope.unrefs.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(
+            *events.lock().unwrap(),
+            [
+                "pam_close_started",
+                "pam_close_completed",
+                "pam_dropped",
+                "vt_released"
+            ]
+        );
+        set_worker_signal_fd(-1);
+    }
+
+    #[test]
+    fn unref_failure_does_not_keep_pam_or_vt_and_vt_failure_is_reported() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let identity = niralis_session::PayloadScopeIdentity {
+            unit_name: "niralis-payload-00000000000000000000000000000000.scope".into(),
+            invocation_id: "00000000000000000000000000000000".into(),
+            expected_uid: 1000,
+            logind_session_id: niralis_session::LogindSessionId::new("1".into()).unwrap(),
+        };
+        let proof = crate::termination::BoundaryEmptyProof::new(
+            &identity,
+            "/test",
+            crate::termination::LeaderExit::ExitedZero,
+        );
+        let mut scope = OrderedScope {
+            identity,
+            events: events.clone(),
+            unref_fails: true,
+        };
+        let transaction: Box<dyn niralis_auth::AuthenticatedTransaction> =
+            Box::new(OrderedTransaction {
+                events: events.clone(),
+                close_fails: false,
+            });
+        let mut terminal = VirtualTerminalGuard::new(Box::new(OrderedLease {
+            events: events.clone(),
+            fail: true,
+        }));
+        assert!(
+            finalize_cooperative_session(&mut scope, transaction, &mut terminal, proof).is_err()
+        );
+        assert_eq!(
+            *events.lock().unwrap(),
+            [
+                "unit_unref_attempted",
+                "pam_close_started",
+                "pam_close_completed",
+                "pam_dropped",
+                "vt_released"
+            ]
+        );
+    }
+
+    #[test]
+    fn pam_close_failure_still_releases_vt_and_returns_failure() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let identity = niralis_session::PayloadScopeIdentity {
+            unit_name: "niralis-payload-00000000000000000000000000000000.scope".into(),
+            invocation_id: "00000000000000000000000000000000".into(),
+            expected_uid: 1000,
+            logind_session_id: niralis_session::LogindSessionId::new("1".into()).unwrap(),
+        };
+        let proof = crate::termination::BoundaryEmptyProof::new(
+            &identity,
+            "/test",
+            crate::termination::LeaderExit::ExitedZero,
+        );
+        let mut scope = OrderedScope {
+            identity,
+            events: events.clone(),
+            unref_fails: false,
+        };
+        let transaction: Box<dyn niralis_auth::AuthenticatedTransaction> =
+            Box::new(OrderedTransaction {
+                events: events.clone(),
+                close_fails: true,
+            });
+        let mut terminal = VirtualTerminalGuard::new(Box::new(OrderedLease {
+            events: events.clone(),
+            fail: false,
+        }));
+        assert!(
+            finalize_cooperative_session(&mut scope, transaction, &mut terminal, proof).is_err()
+        );
+        assert_eq!(
+            *events.lock().unwrap(),
+            [
+                "unit_unref_attempted",
+                "pam_close_started",
+                "pam_dropped",
+                "vt_released"
+            ]
+        );
+    }
 }
 
 fn peer_credentials(stream: &UnixStream) -> Option<libc::ucred> {
@@ -1170,17 +2559,50 @@ fn await_payload_scope_ack(
     let timeout = deadline
         .checked_duration_since(Instant::now())
         .ok_or(SessionError::WorkerTimedOut)?;
-    let mut pollfd = libc::pollfd {
-        fd: listener.as_raw_fd(),
-        events: libc::POLLIN,
-        revents: 0,
-    };
+    let signal_fd = worker_signal_fd();
+    let supervisor_fd = supervisor_channel_fd();
+    let mut pollfds = [
+        libc::pollfd {
+            fd: listener.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        },
+        libc::pollfd {
+            fd: signal_fd,
+            events: libc::POLLIN,
+            revents: 0,
+        },
+        libc::pollfd {
+            fd: supervisor_fd,
+            events: libc::POLLIN,
+            revents: 0,
+        },
+    ];
     let milliseconds = timeout.as_millis().min(i32::MAX as u128) as i32;
-    let result = unsafe { libc::poll(&mut pollfd, 1, milliseconds) };
+    let result = unsafe {
+        libc::poll(
+            pollfds.as_mut_ptr(),
+            pollfds.len() as libc::nfds_t,
+            milliseconds,
+        )
+    };
     if result == 0 {
         return Err(SessionError::WorkerTimedOut);
     }
-    if result < 0 || pollfd.revents & libc::POLLIN == 0 {
+    if result < 0 {
+        return Err(SessionError::WorkerIoFailed);
+    }
+    if pollfds[1].revents & libc::POLLIN != 0 {
+        if let Ok(Some(signal)) = crate::termination::read_signal_fd(signal_fd) {
+            emit_fixture_launch_signal(signal);
+        }
+        return Err(SessionError::AuthenticatedSessionFailed);
+    }
+    if pollfds[2].revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
+        emit_fixture_event("LaunchSupervisorDisconnected");
+        return Err(SessionError::AuthenticatedSessionFailed);
+    }
+    if pollfds[0].revents & libc::POLLIN == 0 {
         return Err(SessionError::WorkerIoFailed);
     }
     let (mut stream, _) = listener
@@ -1209,6 +2631,12 @@ fn await_payload_scope_ack(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PayloadScopeReleaseOutcome {
+    Released,
+    RecoveryRequired,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn request_payload_scope_release<W: Write>(
     writer: &mut W,
@@ -1219,7 +2647,7 @@ fn request_payload_scope_release<W: Write>(
     identity: &niralis_session::PayloadScopeIdentity,
     local_cleanup_succeeded: bool,
     deadline: Instant,
-) -> Result<(), SessionError> {
+) -> Result<PayloadScopeReleaseOutcome, SessionError> {
     write_envelope(
         writer,
         WorkerResponse::PayloadScopeReleaseReady {
@@ -1252,7 +2680,7 @@ fn request_payload_scope_release<W: Write>(
         .accept()
         .map_err(|_| SessionError::WorkerIoFailed)?;
     let credentials = peer_credentials(&stream).ok_or(SessionError::WorkerProtocolFailed)?;
-    if credentials.uid != 0 || credentials.pid as u32 != launcher_pid {
+    if credentials.uid != internal_control_peer_uid() || credentials.pid as u32 != launcher_pid {
         return Err(SessionError::WorkerProtocolFailed);
     }
     let release_nonce = random_release_nonce()?;
@@ -1267,6 +2695,7 @@ fn request_payload_scope_release<W: Write>(
             local_cleanup_succeeded,
         },
     )?;
+    emit_fixture_event("PayloadScopeReleaseRequested:count=1");
     let response = read_control_request(&mut stream)?;
     if response.version != WORKER_CONTROL_PROTOCOL_VERSION {
         return Err(SessionError::WorkerProtocolFailed);
@@ -1283,7 +2712,7 @@ fn request_payload_scope_release<W: Write>(
             && response_release_nonce == release_nonce =>
         {
             info!(unit = %identity.unit_name, "payload scope release independently verified and acknowledged");
-            Ok(())
+            Ok(PayloadScopeReleaseOutcome::Released)
         }
         WorkerControlRequest::PayloadScopeRecoveryRequired {
             worker_id: response_worker_id,
@@ -1297,7 +2726,7 @@ fn request_payload_scope_release<W: Write>(
             && response_release_nonce == release_nonce =>
         {
             warn!(?reason, unit = %identity.unit_name, "supervisor could not prove payload scope cleanup; recovery required");
-            Err(SessionError::AuthenticatedSessionFailed)
+            Ok(PayloadScopeReleaseOutcome::RecoveryRequired)
         }
         _ => Err(SessionError::WorkerProtocolFailed),
     }

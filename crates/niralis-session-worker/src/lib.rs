@@ -1,3 +1,5 @@
+#[cfg(feature = "worker-test-fixtures")]
+mod full_worker_fixture;
 mod identity;
 mod isolation;
 mod logind;
@@ -9,9 +11,12 @@ mod runtime_tests;
 mod selinux;
 mod session_child;
 mod smoke;
+mod termination;
 mod user_bus;
 mod vt;
 
+#[cfg(feature = "worker-test-fixtures")]
+pub use full_worker_fixture::{emit_fixture_event, run_full_worker_fixture};
 pub use identity::{
     GroupResolutionError, IdentityError, NssSupplementaryGroupsResolver, NssUnixIdentityResolver,
     ResolvedUnixCredentials, SupplementaryGroupsResolver, UnixIdentity, UnixIdentityResolver,
@@ -32,8 +37,9 @@ pub use privilege_drop::{
     PrivilegeDropper,
 };
 pub use runtime::{
-    run_worker_process, LinuxRuntimeDirValidator, RuntimeDirValidationError, RuntimeDirValidator,
-    StubRuntimeDirValidator, WorkerAuthenticatorFactory,
+    run_worker_process, run_worker_process_with_signals, LinuxRuntimeDirValidator,
+    RuntimeDirValidationError, RuntimeDirValidator, StubRuntimeDirValidator,
+    WorkerAuthenticatorFactory,
 };
 pub use selinux::{
     LinuxSelinuxContextManager, PamSelinuxExecContext, SelinuxContextManager, SelinuxError,
@@ -49,6 +55,12 @@ pub use session_child::{
     SESSION_CHILD_PROTOCOL_VERSION, SESSION_EXEC_PROBE_VERSION,
 };
 pub use smoke::{authorize_real_graphical_smoke, RealGraphicalSmokeGuardError};
+pub use termination::WorkerSignalFd;
+pub use termination::{
+    BoundaryEmptyProof, BoundaryTerminalObservation, GracefulFinalizationDecision,
+    GracefulTerminationError, GracefulTerminationOutcome, LeaderExit, RecoveryReason,
+    TerminationCause, WorkerTerminationSignal,
+};
 pub use user_bus::{prove_user_bus, UserBusError};
 pub use vt::{
     LinuxVirtualTerminalAllocator, OwnedVirtualTerminal, VirtualTerminalAllocator,

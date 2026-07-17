@@ -134,6 +134,10 @@ pub trait SessionChildRunner: Send + Sync {
         Ok(None)
     }
 
+    fn authoritative_pidfd(&self) -> RawFd {
+        -1
+    }
+
     fn terminate(&self, _grace: Duration) -> Result<std::process::ExitStatus, SessionChildError> {
         Err(SessionChildError::IoFailed)
     }
@@ -466,7 +470,18 @@ impl SessionChildRunner for ProcessSessionChildRunner {
         }
     }
 
+    fn authoritative_pidfd(&self) -> RawFd {
+        self.live_child
+            .lock()
+            .ok()
+            .and_then(|guard| guard.as_ref().map(|live| live.pidfd.as_raw_fd()))
+            .unwrap_or(-1)
+    }
+
     fn terminate(&self, grace: Duration) -> Result<std::process::ExitStatus, SessionChildError> {
+        // Legacy pre-Running/error-path cleanup. The production Running
+        // coordinator never calls this method and never treats PGID as the
+        // authoritative payload boundary.
         let mut live = self
             .live_child
             .lock()
@@ -1218,6 +1233,10 @@ pub(crate) fn run_child_process_with_dependencies(
         None
     };
     if child_pid == std::process::id() {
+        if crate::termination::restore_payload_signal_state().is_err() {
+            let _ = write_rejection(&mut writer, SessionChildErrorCode::IsolationAuditFailed);
+            return 1;
+        }
         let home = match runtime.home.to_path_buf() {
             Ok(path) if path.is_absolute() => path,
             _ => {

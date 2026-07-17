@@ -369,6 +369,14 @@ impl crate::payload_scope::AuthoritativePayloadScope for StubAuthoritativePayloa
     ) -> Result<(), crate::payload_scope::PayloadScopeError> {
         Ok(())
     }
+
+    fn request_graceful_termination(&self) -> Result<(), crate::payload_scope::PayloadScopeError> {
+        Ok(())
+    }
+
+    fn boundary_appears_terminal(&self) -> Result<bool, crate::payload_scope::PayloadScopeError> {
+        Ok(true)
+    }
 }
 
 impl crate::payload_scope::PayloadScopeManager for StubPayloadScopeManager {

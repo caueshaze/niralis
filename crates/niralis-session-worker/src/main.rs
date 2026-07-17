@@ -1,13 +1,20 @@
-use niralis_session_worker::run_worker_process;
 use tracing_subscriber::EnvFilter;
 
 fn main() {
+    let signals = match niralis_session_worker::WorkerSignalFd::install() {
+        Ok(signals) => signals,
+        Err(_) => std::process::exit(1),
+    };
     init_logging();
 
     let mut stdin = std::io::stdin().lock();
     let mut stdout = std::io::stdout().lock();
 
-    let exit_code = match run_worker_process(&mut stdin, &mut stdout) {
+    let exit_code = match niralis_session_worker::run_worker_process_with_signals(
+        &mut stdin,
+        &mut stdout,
+        &signals,
+    ) {
         Ok(()) => 0,
         Err(_) => 1,
     };

@@ -119,6 +119,23 @@ impl NativePamTransaction {
         self.conversation.password_is_cleared()
     }
 
+    pub(crate) fn close_session(&mut self) -> Result<(), AuthSessionError> {
+        if !self.session_open {
+            return Ok(());
+        }
+        let result = pam::close_session(self.handle_mut(), false);
+        if result != PamReturnCode::Success {
+            tracing::warn!(
+                stage = "pam_close_session",
+                ?result,
+                "PAM session close failed"
+            );
+            return Err(AuthSessionError::CloseFailed);
+        }
+        self.session_open = false;
+        Ok(())
+    }
+
     pub(crate) fn session_environment(
         &mut self,
     ) -> Result<PamSessionEnvironment, AuthSessionError> {

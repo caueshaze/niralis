@@ -126,6 +126,8 @@ pub enum AuthSessionError {
     OpenFailed,
     #[error("required PAM session environment is invalid")]
     EnvironmentInvalid,
+    #[error("failed to close authenticated session")]
+    CloseFailed,
 }
 
 pub trait AuthenticatedTransaction: Send {
@@ -134,6 +136,10 @@ pub trait AuthenticatedTransaction: Send {
     fn open_session(&mut self, metadata: &PamSessionMetadata) -> Result<(), AuthSessionError>;
 
     fn session_environment(&mut self) -> Result<PamSessionEnvironment, AuthSessionError>;
+
+    fn close_session(&mut self) -> Result<(), AuthSessionError> {
+        Ok(())
+    }
 }
 
 pub trait Authenticator: Send + Sync {

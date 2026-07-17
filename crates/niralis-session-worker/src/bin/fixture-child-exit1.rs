@@ -1,6 +1,12 @@
 use std::io::Write;
 
 fn main() {
+    let mut exit_signal = unsafe { std::mem::zeroed::<libc::sigset_t>() };
+    unsafe {
+        libc::sigemptyset(&mut exit_signal);
+        libc::sigaddset(&mut exit_signal, libc::SIGUSR1);
+        libc::pthread_sigmask(libc::SIG_BLOCK, &exit_signal, std::ptr::null_mut());
+    }
     let mut stdin = std::io::stdin();
     let mut request = Vec::new();
     let _ = std::io::BufRead::read_until(
@@ -41,6 +47,10 @@ fn main() {
         std::io::BufRead::read_until(&mut std::io::BufReader::new(&mut stdin), b'\n', &mut commit);
     unsafe {
         libc::close(4);
+    }
+    let mut received = 0;
+    unsafe {
+        libc::sigwait(&exit_signal, &mut received);
     }
     std::process::exit(1);
 }

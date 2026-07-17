@@ -53,6 +53,7 @@ fn pam_worker_reports_started_before_lifecycle_completion() {
             runtime_dir_validator: &StubRuntimeDirValidator,
             selinux_context_manager: &StubSelinux::default(),
             payload_scope_manager: &StubPayloadScopeManager,
+            launch_phase_gate: &crate::runtime::NoopLaunchPhaseGate,
         },
     )
     .expect("worker should succeed");
@@ -112,6 +113,7 @@ fn identity_resolution_uses_pam_user_not_requested_username() {
             runtime_dir_validator: &StubRuntimeDirValidator,
             selinux_context_manager: &StubSelinux::default(),
             payload_scope_manager: &StubPayloadScopeManager,
+            launch_phase_gate: &crate::runtime::NoopLaunchPhaseGate,
         },
     )
     .expect("worker should succeed");
@@ -171,6 +173,7 @@ fn child_failure_drops_pam_transaction_after_child_returns() {
             runtime_dir_validator: &StubRuntimeDirValidator,
             selinux_context_manager: &StubSelinux::default(),
             payload_scope_manager: &StubPayloadScopeManager,
+            launch_phase_gate: &crate::runtime::NoopLaunchPhaseGate,
         },
     );
 
