@@ -45,9 +45,29 @@ impl SessionChildRunner for FixtureChildRunner {
                     || fd == ready_write.as_raw_fd()
                     || unsafe { libc::fcntl(fd, libc::F_GETFD) } == -1
             });
-            let flags = [u8::from(signal_state_clean), u8::from(fd_hygiene)];
+            let member_pid = if self.0.mode == FixtureMode::LeaderExitRemainingMember {
+                let member = unsafe { libc::fork() };
+                if member < 0 {
+                    unsafe { libc::_exit(2) }
+                }
+                if member == 0 {
+                    loop {
+                        unsafe { libc::pause() };
+                    }
+                }
+                member as u32
+            } else {
+                0
+            };
+            let mut flags = [0_u8; 6];
+            flags[0] = u8::from(signal_state_clean);
+            flags[1] = u8::from(fd_hygiene);
+            flags[2..].copy_from_slice(&member_pid.to_ne_bytes());
             unsafe {
                 libc::write(ready_write.as_raw_fd(), flags.as_ptr().cast(), flags.len());
+            }
+            if member_pid != 0 {
+                unsafe { libc::_exit(0) }
             }
             let mut byte = 0_u8;
             unsafe {
@@ -57,8 +77,10 @@ impl SessionChildRunner for FixtureChildRunner {
         }
         drop(command_read);
         drop(ready_write);
-        let mut flags = [0_u8; 2];
-        if unsafe { libc::read(ready_read.as_raw_fd(), flags.as_mut_ptr().cast(), 2) } != 2 {
+        let mut flags = [0_u8; 6];
+        if unsafe { libc::read(ready_read.as_raw_fd(), flags.as_mut_ptr().cast(), flags.len()) }
+            != flags.len() as isize
+        {
             return Err(SessionChildError::IoFailed);
         }
         if flags[0] == 1 {
@@ -71,6 +93,15 @@ impl SessionChildRunner for FixtureChildRunner {
         emit_fixture_event(&format!("LeaderPid:{pid}"));
         let pidfd = open_pidfd(pid)?;
         *self.0.pid.lock().map_err(|_| SessionChildError::IoFailed)? = Some(pid);
+        let member_pid = u32::from_ne_bytes(flags[2..].try_into().expect("four pid bytes"));
+        if member_pid != 0 {
+            *self
+                .0
+                .member_pid
+                .lock()
+                .map_err(|_| SessionChildError::IoFailed)? = Some(member_pid);
+            emit_fixture_event(&format!("BoundaryMemberPid:{member_pid}"));
+        }
         *self
             .0
             .command

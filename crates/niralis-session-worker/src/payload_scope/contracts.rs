@@ -179,6 +179,15 @@ pub trait AuthoritativePayloadScope: Send {
     fn request_graceful_termination(&self) -> Result<(), PayloadScopeError> {
         Err(PayloadScopeError::StartFailed)
     }
+    fn validate_forced_termination_eligibility(&self) -> Result<(), PayloadScopeError> {
+        Err(PayloadScopeError::InvalidIdentity)
+    }
+    fn request_forced_termination(&self) -> Result<(), PayloadScopeError> {
+        Err(PayloadScopeError::StartFailed)
+    }
+    fn validate_forced_termination_post_kill(&self) -> Result<(), PayloadScopeError> {
+        Err(PayloadScopeError::InvalidIdentity)
+    }
     fn boundary_appears_terminal(&self) -> Result<bool, PayloadScopeError> {
         Ok(false)
     }

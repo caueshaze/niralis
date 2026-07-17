@@ -122,6 +122,34 @@ impl AuthoritativePayloadScope for SystemdPayloadScope {
             self.launcher_pid,
         ))
     }
+    fn validate_forced_termination_eligibility(&self) -> Result<(), PayloadScopeError> {
+        async_io::block_on(validate_forced_termination_eligibility(
+            self.invocation_provider.as_ref(),
+            &self.identity,
+            &self.pinned_unit,
+            &self.control_group,
+            self.worker_pid,
+            self.launcher_pid,
+        ))
+    }
+    fn request_forced_termination(&self) -> Result<(), PayloadScopeError> {
+        async_io::block_on(request_forced_termination(
+            self.invocation_provider.as_ref(),
+            &self.identity,
+            &self.pinned_unit,
+            &self.control_group,
+            self.worker_pid,
+            self.launcher_pid,
+        ))
+    }
+    fn validate_forced_termination_post_kill(&self) -> Result<(), PayloadScopeError> {
+        async_io::block_on(validate_forced_termination_post_kill(
+            self.invocation_provider.as_ref(),
+            &self.identity,
+            &self.pinned_unit,
+            &self.control_group,
+        ))
+    }
     fn boundary_appears_terminal(&self) -> Result<bool, PayloadScopeError> {
         async_io::block_on(boundary_appears_terminal(
             self.invocation_provider.as_ref(),

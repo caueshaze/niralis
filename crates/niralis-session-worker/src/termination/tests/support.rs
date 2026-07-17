@@ -25,6 +25,8 @@
         event_fd: OwnedFd,
         requests: Arc<AtomicUsize>,
         fail: Option<crate::payload_scope::PayloadScopeError>,
+        forced_request_fail: Option<crate::payload_scope::PayloadScopeError>,
+        forced_post_kill_fail: Option<crate::payload_scope::PayloadScopeError>,
     }
     impl TestScope {
         fn new(fail: Option<crate::payload_scope::PayloadScopeError>) -> Self {
@@ -39,7 +41,23 @@
                 event_fd: unsafe { OwnedFd::from_raw_fd(fd) },
                 requests: Arc::new(AtomicUsize::new(0)),
                 fail,
+                forced_request_fail: None,
+                forced_post_kill_fail: None,
             }
+        }
+        fn with_forced_request_failure(
+            mut self,
+            error: crate::payload_scope::PayloadScopeError,
+        ) -> Self {
+            self.forced_request_fail = Some(error);
+            self
+        }
+        fn with_forced_post_kill_failure(
+            mut self,
+            error: crate::payload_scope::PayloadScopeError,
+        ) -> Self {
+            self.forced_post_kill_fail = Some(error);
+            self
         }
     }
     impl crate::payload_scope::AuthoritativePayloadScope for TestScope {
@@ -73,6 +91,35 @@
         ) -> Result<(), crate::payload_scope::PayloadScopeError> {
             self.requests.fetch_add(1, Ordering::SeqCst);
             self.fail.clone().map_or(Ok(()), Err)
+        }
+        fn validate_forced_termination_eligibility(
+            &self,
+        ) -> Result<(), crate::payload_scope::PayloadScopeError> {
+            match &self.fail {
+                Some(crate::payload_scope::PayloadScopeError::BoundaryNotEmpty
+                | crate::payload_scope::PayloadScopeError::UnitNotTerminal) => Ok(()),
+                Some(error) => Err(error.clone()),
+                None => Ok(()),
+            }
+        }
+        fn request_forced_termination(
+            &self,
+        ) -> Result<(), crate::payload_scope::PayloadScopeError> {
+            self.requests.fetch_add(1, Ordering::SeqCst);
+            if let Some(error) = &self.forced_request_fail {
+                return Err(error.clone());
+            }
+            match &self.fail {
+                Some(crate::payload_scope::PayloadScopeError::BoundaryNotEmpty
+                | crate::payload_scope::PayloadScopeError::UnitNotTerminal) => Ok(()),
+                Some(error) => Err(error.clone()),
+                None => Ok(()),
+            }
+        }
+        fn validate_forced_termination_post_kill(
+            &self,
+        ) -> Result<(), crate::payload_scope::PayloadScopeError> {
+            self.forced_post_kill_fail.clone().map_or(Ok(()), Err)
         }
         fn prove_empty_boundary(
             &self,

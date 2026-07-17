@@ -61,7 +61,7 @@
             signal: libc::c_int,
         ) -> InvocationFuture<'a, ()> {
             Box::pin(async move {
-                assert_eq!(signal, libc::SIGTERM);
+                self.signals.lock().unwrap().push(signal);
                 match self.consume(
                     InvocationOperation::KillPinnedUnit,
                     expected_invocation_id,

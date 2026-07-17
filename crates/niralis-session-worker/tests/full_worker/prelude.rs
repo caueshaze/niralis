@@ -27,6 +27,7 @@ struct FullWorker {
     harness: BufReader<UnixStream>,
     events: Vec<String>,
     leader_pid: Option<u32>,
+    member_pid: Option<u32>,
     _control_dir: Option<tempfile::TempDir>,
     control_path: std::path::PathBuf,
 }

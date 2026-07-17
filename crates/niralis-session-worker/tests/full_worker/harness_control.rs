@@ -84,6 +84,9 @@ impl FullWorker {
         if let Some(value) = event.strip_prefix("LeaderPid:") {
             self.leader_pid = Some(value.parse().expect("numeric leader pid"));
         }
+        if let Some(value) = event.strip_prefix("BoundaryMemberPid:") {
+            self.member_pid = Some(value.parse().expect("numeric member pid"));
+        }
         self.events.push(event.clone());
         event
     }
@@ -180,6 +183,26 @@ impl FullWorker {
             "full worker returned {status:?}; events={:?}",
             self.events
         );
+    }
+
+    fn finish_forced(&mut self, expect_leader_sigkill: bool) {
+        self.expect("ForcedKillObserved:count=1");
+        self.expect("ForcedTerminationRequested:count=1");
+        self.expect("ForcedTimerArmed");
+        if expect_leader_sigkill {
+            self.expect("LeaderReaped");
+            self.expect("LeaderKilledBySigkill");
+        }
+        self.expect("BoundaryEmptyProofEstablished:count=1");
+        self.expect("BoundaryEmptyProofAccepted");
+        self.expect("UnitUnrefAttempted:count=1");
+        self.expect("PamCloseStarted");
+        self.expect("PamCloseCompleted");
+        self.expect("PamDropped");
+        self.expect("VtReleased");
+        self.expect("WorkerReturning");
+        let status = self.child.wait().expect("reap forced full worker fixture");
+        assert!(status.success(), "forced worker returned {status:?}; events={:?}", self.events);
     }
 
     fn teardown_non_cooperative(&mut self) {

@@ -92,6 +92,10 @@ pub fn run_full_worker_fixture(
         "invalidation-before-kill" => FixtureMode::InvalidationBeforeKill,
         "replacement-during-proof" => FixtureMode::ReplacementDuringProof,
         "bus-loss-before-kill" => FixtureMode::BusLossBeforeKill,
+        "leader-exit-remaining-member" => FixtureMode::LeaderExitRemainingMember,
+        "forced-deadline" => FixtureMode::ForcedDeadline,
+        "replacement-before-forced-kill" => FixtureMode::ReplacementBeforeForcedKill,
+        "bus-loss-after-forced-kill" => FixtureMode::BusLossAfterForcedKill,
         _ => return Err(niralis_session::SessionError::WorkerRejected),
     };
     let state = Arc::new(FixtureState::new(mode)?);
@@ -160,6 +164,10 @@ enum FixtureMode {
     InvalidationBeforeKill,
     ReplacementDuringProof,
     BusLossBeforeKill,
+    LeaderExitRemainingMember,
+    ForcedDeadline,
+    ReplacementBeforeForcedKill,
+    BusLossAfterForcedKill,
 }
 
 impl FixtureMode {
@@ -175,6 +183,10 @@ impl FixtureMode {
             | Self::InvalidationBeforeKill
             | Self::ReplacementDuringProof
             | Self::BusLossBeforeKill
+            | Self::LeaderExitRemainingMember
+            | Self::ForcedDeadline
+            | Self::ReplacementBeforeForcedKill
+            | Self::BusLossAfterForcedKill
             | Self::LauncherChannel => None,
         }
     }
@@ -187,12 +199,14 @@ impl FixtureMode {
 struct FixtureState {
     mode: FixtureMode,
     pid: Mutex<Option<u32>>,
+    member_pid: Mutex<Option<u32>>,
     pidfd: Mutex<Option<OwnedFd>>,
     command: Mutex<Option<OwnedFd>>,
     boundary: OwnedFd,
     terminal: AtomicBool,
     reaped: AtomicBool,
     kill_count: AtomicUsize,
+    forced_kill_count: AtomicUsize,
     proof_count: AtomicUsize,
     unref_count: AtomicUsize,
     commit_count: AtomicUsize,

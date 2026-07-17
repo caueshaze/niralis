@@ -73,6 +73,7 @@ pub enum GracefulTerminationError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecoveryReason {
     BoundaryIdentityChanged,
+    BoundaryIdentityUnproven,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -126,12 +127,72 @@ impl BoundaryEmptyProof {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub enum GracefulFinalizationDecision {
-    FinalizeCooperative(BoundaryEmptyProof),
-    NeedsEscalation {
+pub enum EscalationEligibility {
+    Eligible {
         cause: TerminationCause,
         leader_exit: Option<LeaderExit>,
     },
+    InfrastructureFailure {
+        cause: TerminationCause,
+        leader_exit: Option<LeaderExit>,
+        error: GracefulTerminationError,
+    },
+    RecoveryRequired {
+        cause: TerminationCause,
+        leader_exit: Option<LeaderExit>,
+        reason: RecoveryReason,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForcedTerminationStage {
+    Eligibility,
+    PreKillValidation,
+    Kill,
+    PostKillValidation,
+    LeaderReap,
+    BoundaryObservation,
+    EmptyProof,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ForcedTerminationError {
+    ScopeOperation(crate::payload_scope::PayloadScopeError),
+    Timer,
+    Poll,
+    LeaderReap,
+    Signal,
+    Control,
+    BoundaryObserver,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum ForcedTerminationOutcome {
+    BoundaryEmpty {
+        proof: BoundaryEmptyProof,
+        leader_exit: LeaderExit,
+    },
+    ForcedDeadlineExpired {
+        cause: TerminationCause,
+        leader_exit: Option<LeaderExit>,
+    },
+    InfrastructureFailure {
+        cause: TerminationCause,
+        leader_exit: Option<LeaderExit>,
+        stage: ForcedTerminationStage,
+        error: ForcedTerminationError,
+    },
+    RecoveryRequired {
+        cause: TerminationCause,
+        leader_exit: Option<LeaderExit>,
+        reason: RecoveryReason,
+    },
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum GracefulFinalizationDecision {
+    FinalizeCooperative(BoundaryEmptyProof),
+    NeedsEscalation(EscalationEligibility),
     RecoveryRequired {
         cause: TerminationCause,
         leader_exit: Option<LeaderExit>,
@@ -157,23 +218,47 @@ pub fn consume_graceful_outcome(
                     reason: RecoveryReason::BoundaryIdentityChanged,
                 }
             }
-            Err(_) => GracefulFinalizationDecision::NeedsEscalation {
-                cause,
-                leader_exit: Some(leader_exit),
-            },
+            Err(crate::payload_scope::PayloadScopeError::WorkerInsideBoundary
+            | crate::payload_scope::PayloadScopeError::InvalidIdentity
+            | crate::payload_scope::PayloadScopeError::CgroupMismatch
+            | crate::payload_scope::PayloadScopeError::InvalidMembership) => {
+                GracefulFinalizationDecision::RecoveryRequired {
+                    cause,
+                    leader_exit: Some(leader_exit),
+                    reason: RecoveryReason::BoundaryIdentityUnproven,
+                }
+            }
+            Err(crate::payload_scope::PayloadScopeError::BoundaryNotEmpty
+            | crate::payload_scope::PayloadScopeError::UnitNotTerminal) => {
+                eligibility_after_identity_validation(cause, Some(leader_exit), scope)
+            }
+            Err(error) => GracefulFinalizationDecision::NeedsEscalation(
+                EscalationEligibility::InfrastructureFailure {
+                    cause,
+                    leader_exit: Some(leader_exit),
+                    error: GracefulTerminationError::ScopeOperation(error),
+                },
+            ),
         },
         GracefulTerminationOutcome::BoundaryTerminalCandidate {
             cause,
             leader_exit: None,
             ..
-        } => GracefulFinalizationDecision::NeedsEscalation {
+        } => eligibility_after_identity_validation(cause, None, scope),
+        GracefulTerminationOutcome::DeadlineExpired { cause, leader_exit } => {
+            eligibility_after_identity_validation(cause, leader_exit, scope)
+        }
+        GracefulTerminationOutcome::InfrastructureFailure {
             cause,
-            leader_exit: None,
-        },
-        GracefulTerminationOutcome::DeadlineExpired { cause, leader_exit }
-        | GracefulTerminationOutcome::InfrastructureFailure {
-            cause, leader_exit, ..
-        } => GracefulFinalizationDecision::NeedsEscalation { cause, leader_exit },
+            leader_exit,
+            error,
+        } => GracefulFinalizationDecision::NeedsEscalation(
+            EscalationEligibility::InfrastructureFailure {
+                cause,
+                leader_exit,
+                error,
+            },
+        ),
         GracefulTerminationOutcome::RecoveryRequired {
             cause,
             leader_exit,
@@ -186,3 +271,42 @@ pub fn consume_graceful_outcome(
     }
 }
 
+fn eligibility_after_identity_validation(
+    cause: TerminationCause,
+    leader_exit: Option<LeaderExit>,
+    scope: &dyn crate::payload_scope::AuthoritativePayloadScope,
+) -> GracefulFinalizationDecision {
+    match scope.validate_forced_termination_eligibility() {
+        Ok(()) => GracefulFinalizationDecision::NeedsEscalation(
+            EscalationEligibility::Eligible { cause, leader_exit },
+        ),
+        Err(crate::payload_scope::PayloadScopeError::UnitReplaced) => {
+            GracefulFinalizationDecision::NeedsEscalation(
+                EscalationEligibility::RecoveryRequired {
+                    cause,
+                    leader_exit,
+                    reason: RecoveryReason::BoundaryIdentityChanged,
+                },
+            )
+        }
+        Err(crate::payload_scope::PayloadScopeError::WorkerInsideBoundary
+        | crate::payload_scope::PayloadScopeError::InvalidIdentity
+        | crate::payload_scope::PayloadScopeError::CgroupMismatch
+        | crate::payload_scope::PayloadScopeError::InvalidMembership) => {
+            GracefulFinalizationDecision::NeedsEscalation(
+                EscalationEligibility::RecoveryRequired {
+                    cause,
+                    leader_exit,
+                    reason: RecoveryReason::BoundaryIdentityUnproven,
+                },
+            )
+        }
+        Err(error) => GracefulFinalizationDecision::NeedsEscalation(
+            EscalationEligibility::InfrastructureFailure {
+                cause,
+                leader_exit,
+                error: GracefulTerminationError::ScopeOperation(error),
+            },
+        ),
+    }
+}

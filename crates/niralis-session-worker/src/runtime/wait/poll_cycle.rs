@@ -6,7 +6,7 @@
                 revents: 0,
             },
             libc::pollfd {
-                fd: listener.as_ref().map_or(-1, AsRawFd::as_raw_fd),
+                fd: listener.map_or(-1, AsRawFd::as_raw_fd),
                 events: libc::POLLIN,
                 revents: 0,
             },

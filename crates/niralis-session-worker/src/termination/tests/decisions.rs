@@ -19,10 +19,9 @@
         };
         assert!(matches!(
             consume_graceful_outcome(without_reap, &scope),
-            GracefulFinalizationDecision::NeedsEscalation {
-                leader_exit: None,
-                ..
-            }
+            GracefulFinalizationDecision::NeedsEscalation(
+                EscalationEligibility::Eligible { leader_exit: None, .. }
+            )
         ));
     }
     #[test]
@@ -37,7 +36,9 @@
         };
         assert!(matches!(
             consume_graceful_outcome(candidate, &populated),
-            GracefulFinalizationDecision::NeedsEscalation { .. }
+            GracefulFinalizationDecision::NeedsEscalation(
+                EscalationEligibility::Eligible { .. }
+            )
         ));
 
         let replaced = TestScope::new(Some(crate::payload_scope::PayloadScopeError::UnitReplaced));
@@ -57,7 +58,9 @@
         };
         assert!(matches!(
             consume_graceful_outcome(deadline, &populated),
-            GracefulFinalizationDecision::NeedsEscalation { .. }
+            GracefulFinalizationDecision::NeedsEscalation(
+                EscalationEligibility::Eligible { .. }
+            )
         ));
     }
     #[test]

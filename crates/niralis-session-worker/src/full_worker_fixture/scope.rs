@@ -99,7 +99,61 @@ impl AuthoritativePayloadScope for FixtureScope {
         }
         Ok(())
     }
+    fn validate_forced_termination_eligibility(&self) -> Result<(), PayloadScopeError> {
+        if self.state.mode == FixtureMode::ReplacementBeforeForcedKill {
+            emit_fixture_event("InvocationReplacedBeforeForcedKill");
+            return Err(PayloadScopeError::UnitReplaced);
+        }
+        Ok(())
+    }
+    fn request_forced_termination(&self) -> Result<(), PayloadScopeError> {
+        let count = self
+            .state
+            .forced_kill_count
+            .fetch_add(1, Ordering::SeqCst)
+            + 1;
+        emit_fixture_event(&format!("ForcedKillObserved:count={count}"));
+        if self.state.mode == FixtureMode::ForcedDeadline {
+            return Ok(());
+        }
+        let target = if self.state.mode == FixtureMode::LeaderExitRemainingMember {
+            self.state.member_pid.lock().ok().and_then(|pid| *pid)
+        } else {
+            self.state.pid.lock().ok().and_then(|pid| *pid)
+        }
+        .ok_or(PayloadScopeError::InvalidMembership)?;
+        let pidfd = open_pidfd(target).map_err(|_| PayloadScopeError::InvalidMembership)?;
+        if unsafe { libc::kill(target as libc::pid_t, libc::SIGKILL) } != 0 {
+            return Err(PayloadScopeError::TransportFailure);
+        }
+        let state = self.state.clone();
+        std::thread::spawn(move || {
+            let mut pollfd = libc::pollfd {
+                fd: pidfd.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            if unsafe { libc::poll(&mut pollfd, 1, -1) } != 1 {
+                return;
+            }
+            state.terminal.store(true, Ordering::SeqCst);
+            let one = 1_u64;
+            unsafe {
+                libc::write(state.boundary.as_raw_fd(), (&one as *const u64).cast(), 8);
+            }
+        });
+        Ok(())
+    }
+    fn validate_forced_termination_post_kill(&self) -> Result<(), PayloadScopeError> {
+        Ok(())
+    }
     fn boundary_appears_terminal(&self) -> Result<bool, PayloadScopeError> {
+        if self.state.mode == FixtureMode::BusLossAfterForcedKill
+            && self.state.forced_kill_count.load(Ordering::SeqCst) > 0
+        {
+            emit_fixture_event("SystemBusLostAfterForcedKill");
+            return Err(PayloadScopeError::BusUnavailable);
+        }
         Ok(self.state.terminal.load(Ordering::SeqCst))
     }
     fn prove_empty_boundary(

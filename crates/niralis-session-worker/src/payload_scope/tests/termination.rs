@@ -40,6 +40,165 @@
     }
 
     #[test]
+    fn forced_sigkill_is_invocation_bound_and_sent_once() {
+        let backend = ScriptedInvocationBackend::new(vec![
+            ScriptedInvocationStep::new(
+                InvocationOperation::ResolveByInvocation,
+                ScriptedInvocationResponse::Resolved(path_a()),
+            ),
+            ScriptedInvocationStep::new(
+                InvocationOperation::ReadPropertiesAfterRef,
+                ScriptedInvocationResponse::Properties(properties_a()),
+            ),
+            ScriptedInvocationStep::new(
+                InvocationOperation::KillPinnedUnit,
+                ScriptedInvocationResponse::Success,
+            ),
+            ScriptedInvocationStep::new(
+                InvocationOperation::ResolveByInvocation,
+                ScriptedInvocationResponse::Resolved(path_a()),
+            ),
+            ScriptedInvocationStep::new(
+                InvocationOperation::ReadPropertiesAfterKill,
+                ScriptedInvocationResponse::Properties(terminal_properties_a()),
+            ),
+        ]);
+        async_io::block_on(request_forced_termination_invocation(
+            &backend,
+            &identity_a(),
+            &pinned_a(),
+            CONTROL_GROUP,
+        ))
+        .unwrap();
+        backend.assert_signals(&[libc::SIGKILL]);
+        backend.assert_consumed();
+    }
+
+    #[test]
+    fn forced_pre_kill_identity_divergence_sends_no_signal() {
+        let backend = ScriptedInvocationBackend::new(vec![ScriptedInvocationStep::new(
+            InvocationOperation::ResolveByInvocation,
+            ScriptedInvocationResponse::Resolved(path_b()),
+        )]);
+        assert_eq!(
+            async_io::block_on(request_forced_termination_invocation(
+                &backend,
+                &identity_a(),
+                &pinned_a(),
+                CONTROL_GROUP,
+            )),
+            Err(PayloadScopeError::UnitReplaced)
+        );
+        backend.assert_signals(&[]);
+        backend.assert_consumed();
+    }
+
+    #[test]
+    fn forced_bus_or_owner_loss_before_kill_sends_no_signal() {
+        for response in [
+            ScriptedInvocationResponse::BusDisconnected,
+            ScriptedInvocationResponse::ServiceOwnerChanged,
+        ] {
+            let backend = ScriptedInvocationBackend::new(vec![ScriptedInvocationStep::new(
+                InvocationOperation::ResolveByInvocation,
+                response,
+            )]);
+            let error = async_io::block_on(request_forced_termination_invocation(
+                &backend,
+                &identity_a(),
+                &pinned_a(),
+                CONTROL_GROUP,
+            ))
+            .unwrap_err();
+            assert!(matches!(
+                error,
+                PayloadScopeError::BusUnavailable | PayloadScopeError::ServiceOwnerChanged
+            ));
+            backend.assert_signals(&[]);
+            backend.assert_consumed();
+        }
+    }
+
+    #[test]
+    fn forced_kill_failure_is_not_retried_or_treated_as_success() {
+        let backend = ScriptedInvocationBackend::new(kill_steps(
+            ScriptedInvocationResponse::BusDisconnected,
+        ));
+        assert_eq!(
+            async_io::block_on(request_forced_termination_invocation(
+                &backend,
+                &identity_a(),
+                &pinned_a(),
+                CONTROL_GROUP,
+            )),
+            Err(PayloadScopeError::BusUnavailable)
+        );
+        backend.assert_signals(&[libc::SIGKILL]);
+        backend.assert_consumed();
+    }
+
+    #[test]
+    fn forced_post_kill_disappearance_is_deferred_to_empty_proof() {
+        let mut steps = kill_steps(ScriptedInvocationResponse::Success);
+        steps.push(ScriptedInvocationStep::new(
+            InvocationOperation::ResolveByInvocation,
+            ScriptedInvocationResponse::NoSuchUnit,
+        ));
+        let backend = ScriptedInvocationBackend::new(steps);
+        async_io::block_on(request_forced_termination_invocation(
+            &backend,
+            &identity_a(),
+            &pinned_a(),
+            CONTROL_GROUP,
+        ))
+        .unwrap();
+        backend.assert_signals(&[libc::SIGKILL]);
+        backend.assert_consumed();
+    }
+
+    #[test]
+    fn forced_post_kill_bus_loss_cannot_establish_success() {
+        let mut steps = kill_steps(ScriptedInvocationResponse::Success);
+        steps.push(ScriptedInvocationStep::new(
+            InvocationOperation::ResolveByInvocation,
+            ScriptedInvocationResponse::BusDisconnected,
+        ));
+        let backend = ScriptedInvocationBackend::new(steps);
+        assert_eq!(
+            async_io::block_on(request_forced_termination_invocation(
+                &backend,
+                &identity_a(),
+                &pinned_a(),
+                CONTROL_GROUP,
+            )),
+            Err(PayloadScopeError::BusUnavailable)
+        );
+        backend.assert_signals(&[libc::SIGKILL]);
+        backend.assert_consumed();
+    }
+
+    #[test]
+    fn forced_post_kill_replacement_is_not_touched_again() {
+        let mut steps = kill_steps(ScriptedInvocationResponse::Success);
+        steps.push(ScriptedInvocationStep::new(
+            InvocationOperation::ResolveByInvocation,
+            ScriptedInvocationResponse::Resolved(path_b()),
+        ));
+        let backend = ScriptedInvocationBackend::new(steps);
+        assert_eq!(
+            async_io::block_on(request_forced_termination_invocation(
+                &backend,
+                &identity_a(),
+                &pinned_a(),
+                CONTROL_GROUP,
+            )),
+            Err(PayloadScopeError::UnitReplaced)
+        );
+        backend.assert_signals(&[libc::SIGKILL]);
+        backend.assert_consumed();
+    }
+
+    #[test]
     fn cleared_control_group_before_terminal_state_is_identity_change() {
         let backend = ScriptedInvocationBackend::new(vec![
             ScriptedInvocationStep::new(
@@ -154,4 +313,3 @@
         );
         backend.assert_consumed();
     }
-

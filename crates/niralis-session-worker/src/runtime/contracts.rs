@@ -209,6 +209,17 @@ fn configured_session_termination_grace() -> Duration {
     }
 }
 
+fn configured_forced_cleanup_timeout() -> Duration {
+    #[cfg(feature = "worker-test-fixtures")]
+    {
+        Duration::from_millis(FIXTURE_GRACE_MILLIS.load(Ordering::SeqCst))
+    }
+    #[cfg(not(feature = "worker-test-fixtures"))]
+    {
+        FORCED_CLEANUP_TIMEOUT
+    }
+}
+
 fn emit_fixture_event(event: &str) {
     #[cfg(feature = "worker-test-fixtures")]
     crate::full_worker_fixture::emit_fixture_event(event);

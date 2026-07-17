@@ -75,6 +75,7 @@ impl FullWorker {
             harness: BufReader::new(parent_harness),
             events: Vec::new(),
             leader_pid: None,
+            member_pid: None,
             _control_dir: control_dir,
             control_path,
         };
@@ -89,6 +90,9 @@ impl FullWorker {
         worker.expect("PayloadSignalMaskRestored");
         worker.expect("PayloadFdHygieneVerified");
         worker.expect_prefix("LeaderPid:");
+        if mode == "leader-exit-remaining-member" {
+            worker.expect_prefix("BoundaryMemberPid:");
+        }
         worker.expect("PendingExecHandoffReady");
         worker
     }

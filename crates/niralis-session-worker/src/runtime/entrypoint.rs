@@ -135,6 +135,8 @@ fn valid_terminal_proof(
 }
 
 const SESSION_TERMINATION_GRACE: Duration = Duration::from_secs(5);
+#[cfg(not(feature = "worker-test-fixtures"))]
+const FORCED_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn pending_worker_signal() -> Result<Option<i32>, SessionError> {
     let fd = worker_signal_fd();
@@ -156,7 +158,7 @@ fn bind_control_listener(path: &std::path::Path) -> Result<UnixListener, Session
 }
 
 fn wait_for_session(
-    listener: Option<UnixListener>,
+    listener: Option<&UnixListener>,
     child_runner: &dyn crate::session_child::SessionChildRunner,
     worker_id: String,
     session_pid: u32,

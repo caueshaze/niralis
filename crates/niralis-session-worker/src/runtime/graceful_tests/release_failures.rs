@@ -27,7 +27,8 @@
             fail: true,
         }));
         assert!(
-            finalize_cooperative_session(&mut scope, transaction, &mut terminal, proof).is_err()
+            finalize_session_after_empty_proof(&mut scope, transaction, &mut terminal, proof, false)
+                .is_err()
         );
         assert_eq!(
             *events.lock().unwrap(),
@@ -70,7 +71,8 @@
             fail: false,
         }));
         assert!(
-            finalize_cooperative_session(&mut scope, transaction, &mut terminal, proof).is_err()
+            finalize_session_after_empty_proof(&mut scope, transaction, &mut terminal, proof, false)
+                .is_err()
         );
         assert_eq!(
             *events.lock().unwrap(),

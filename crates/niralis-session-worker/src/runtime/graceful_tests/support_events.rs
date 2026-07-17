@@ -62,6 +62,41 @@
             }
             Ok(())
         }
+        fn validate_forced_termination_eligibility(
+            &self,
+        ) -> Result<(), crate::payload_scope::PayloadScopeError> {
+            match &self.fail {
+                Some(crate::payload_scope::PayloadScopeError::BoundaryNotEmpty
+                | crate::payload_scope::PayloadScopeError::UnitNotTerminal) => Ok(()),
+                Some(error) => Err(error.clone()),
+                None => Ok(()),
+            }
+        }
+        fn request_forced_termination(
+            &self,
+        ) -> Result<(), crate::payload_scope::PayloadScopeError> {
+            self.requests.fetch_add(1, AtomicOrdering::SeqCst);
+            if let Some(error) = &self.fail {
+                if !matches!(
+                    error,
+                    crate::payload_scope::PayloadScopeError::BoundaryNotEmpty
+                        | crate::payload_scope::PayloadScopeError::UnitNotTerminal
+                ) {
+                    return Err(error.clone());
+                }
+            }
+            if self.cooperative {
+                self.terminal.store(true, AtomicOrdering::SeqCst);
+                write_event(self.pid_fd);
+                write_event(self.boundary_fd.as_raw_fd());
+            }
+            Ok(())
+        }
+        fn validate_forced_termination_post_kill(
+            &self,
+        ) -> Result<(), crate::payload_scope::PayloadScopeError> {
+            Ok(())
+        }
         fn boundary_appears_terminal(
             &self,
         ) -> Result<bool, crate::payload_scope::PayloadScopeError> {
@@ -176,4 +211,3 @@
         drop((pam, vt));
         set_worker_signal_fd(-1);
     }
-

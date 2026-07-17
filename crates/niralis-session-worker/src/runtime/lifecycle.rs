@@ -1,6 +1,6 @@
 
 fn wait_for_session_with_grace(
-    listener: Option<UnixListener>,
+    listener: Option<&UnixListener>,
     child_runner: &dyn crate::session_child::SessionChildRunner,
     worker_id: String,
     session_pid: u32,
@@ -59,11 +59,12 @@ enum SessionWaitResult {
     Graceful(crate::termination::GracefulTerminationOutcome),
 }
 
-fn finalize_cooperative_session(
+fn finalize_session_after_empty_proof(
     scope: &mut dyn crate::payload_scope::AuthoritativePayloadScope,
     mut transaction: Box<dyn niralis_auth::AuthenticatedTransaction>,
     terminal: &mut VirtualTerminalGuard,
     proof: crate::termination::BoundaryEmptyProof,
+    forced: bool,
 ) -> Result<(), SessionError> {
     info!("releasing pinned systemd unit reference");
     if let Err(error) = scope.release_pin() {
@@ -85,15 +86,127 @@ fn finalize_cooperative_session(
     });
     pam_result?;
     vt_result?;
-    info!("cooperative session finalization complete");
+    if forced {
+        info!("forced session finalization complete");
+    } else {
+        info!("cooperative session finalization complete");
+    }
     emit_fixture_event("WorkerReturning");
-    if matches!(
-        proof.leader_exit(),
-        crate::termination::LeaderExit::ExitedZero
-    ) {
+    if matches!(proof.leader_exit(), crate::termination::LeaderExit::ExitedZero)
+        || (forced
+            && matches!(
+                proof.leader_exit(),
+                crate::termination::LeaderExit::KilledBySignal(libc::SIGKILL)
+            ))
+    {
         Ok(())
     } else {
         Err(SessionError::AuthenticatedSessionFailed)
+    }
+}
+
+struct ForcedWaitContext<'a> {
+    listener: Option<&'a UnixListener>,
+    child_runner: &'a dyn crate::session_child::SessionChildRunner,
+    worker_id: &'a str,
+    session_pid: u32,
+    session_pgid: u32,
+    authoritative_scope: &'a dyn crate::payload_scope::AuthoritativePayloadScope,
+    expected_control_uid: u32,
+}
+
+fn wait_for_forced_cleanup(
+    context: ForcedWaitContext<'_>,
+    cause: crate::termination::TerminationCause,
+    leader_exit: Option<crate::termination::LeaderExit>,
+    timeout: Duration,
+) -> crate::termination::ForcedTerminationOutcome {
+    use crate::termination::{
+        ForcedTerminationCoordinator, ForcedTerminationError, ForcedTerminationStage, LeaderExit,
+        WorkerTerminationSignal,
+    };
+    let ForcedWaitContext {
+        listener,
+        child_runner,
+        worker_id,
+        session_pid,
+        session_pgid,
+        authoritative_scope,
+        expected_control_uid,
+    } = context;
+    let mut coordinator = match ForcedTerminationCoordinator::new(cause, leader_exit) {
+        Ok(coordinator) => coordinator,
+        Err(_) => {
+            return crate::termination::ForcedTerminationOutcome::InfrastructureFailure {
+                cause: crate::termination::TerminationCause::RuntimeFailure,
+                leader_exit: None,
+                stage: ForcedTerminationStage::Eligibility,
+                error: ForcedTerminationError::Timer,
+            }
+        }
+    };
+    let signal_fd = worker_signal_fd();
+    let supervisor_fd = supervisor_channel_fd();
+    let pidfd = child_runner.authoritative_pidfd();
+    if signal_fd < 0 || (coordinator.leader_exit().is_none() && pidfd < 0) {
+        return coordinator.infrastructure(
+            ForcedTerminationStage::Eligibility,
+            ForcedTerminationError::LeaderReap,
+        );
+    }
+    let mut observer = match coordinator.begin(timeout, authoritative_scope) {
+        Ok(observer) => observer,
+        Err(outcome) => return outcome,
+    };
+    info!(unit = %authoritative_scope.identity().unit_name, invocation_id = %authoritative_scope.identity().invocation_id, "forced payload termination requested");
+    emit_fixture_event("ForcedTerminationRequested:count=1");
+    emit_fixture_event("ForcedTimerArmed");
+    info!(timeout_ms = timeout.as_millis(), "waiting for forced boundary cleanup");
+    let mut leader_reaped = coordinator.leader_exit().is_some();
+
+    if let Some(outcome) = try_forced_empty_proof(authoritative_scope, &mut coordinator) {
+        return outcome;
+    }
+    loop {
+        include!("wait/forced_poll_cycle.rs");
+    }
+}
+
+fn try_forced_empty_proof(
+    scope: &dyn crate::payload_scope::AuthoritativePayloadScope,
+    coordinator: &mut crate::termination::ForcedTerminationCoordinator,
+) -> Option<crate::termination::ForcedTerminationOutcome> {
+    use crate::termination::ForcedTerminationStage;
+    let proof_may_be_attempted = match scope.boundary_appears_terminal() {
+        Ok(value) => value,
+        // After a confirmed SIGKILL, disappearance is resolved only by the
+        // strong two-resolution/cgroup policy inside prove_empty_boundary().
+        Err(crate::payload_scope::PayloadScopeError::InvocationUnavailable) => true,
+        Err(error) => {
+            return Some(
+                coordinator.scope_error(ForcedTerminationStage::BoundaryObservation, error),
+            )
+        }
+    };
+    if !proof_may_be_attempted {
+        return None;
+    }
+    let leader_exit = coordinator.leader_exit()?.clone();
+    match scope.prove_empty_boundary(&leader_exit) {
+        Ok(proof) => {
+            info!("forced boundary empty proof established");
+            emit_fixture_event("BoundaryEmptyProofAccepted");
+            Some(coordinator.boundary_empty(proof))
+        }
+        Err(crate::payload_scope::PayloadScopeError::BoundaryNotEmpty
+        | crate::payload_scope::PayloadScopeError::UnitNotTerminal) => None,
+        Err(crate::payload_scope::PayloadScopeError::UnitReplaced) => Some(
+            coordinator.scope_error(
+                ForcedTerminationStage::EmptyProof,
+                crate::payload_scope::PayloadScopeError::UnitReplaced,
+            ),
+        ),
+        Err(error) => Some(coordinator.scope_error(ForcedTerminationStage::EmptyProof, error)),
     }
 }
 
@@ -124,7 +237,7 @@ fn wait_for_prestarted_recovery(
 }
 
 fn wait_for_session_without_signal_fd(
-    listener: Option<UnixListener>,
+    listener: Option<&UnixListener>,
     child_runner: &dyn crate::session_child::SessionChildRunner,
     worker_id: String,
     session_pid: u32,
@@ -135,7 +248,7 @@ fn wait_for_session_without_signal_fd(
     // cannot enter this PGID-based legacy path while Running.
     loop {
         match child_runner
-            .wait_for_child_or_control(listener.as_ref().map(AsRawFd::as_raw_fd))
+            .wait_for_child_or_control(listener.map(AsRawFd::as_raw_fd))
             .map_err(|_| SessionError::AuthenticatedSessionFailed)?
         {
             crate::session_child::SessionChildWaitEvent::Exited(status) => return Ok(status),

@@ -57,7 +57,8 @@ pub use session_child::{
 pub use smoke::{authorize_real_graphical_smoke, RealGraphicalSmokeGuardError};
 pub use termination::WorkerSignalFd;
 pub use termination::{
-    BoundaryEmptyProof, BoundaryTerminalObservation, GracefulFinalizationDecision,
+    BoundaryEmptyProof, BoundaryTerminalObservation, EscalationEligibility, ForcedTerminationError,
+    ForcedTerminationOutcome, ForcedTerminationStage, GracefulFinalizationDecision,
     GracefulTerminationError, GracefulTerminationOutcome, LeaderExit, RecoveryReason,
     TerminationCause, WorkerTerminationSignal,
 };

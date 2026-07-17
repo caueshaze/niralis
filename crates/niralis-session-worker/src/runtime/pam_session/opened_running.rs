@@ -44,9 +44,9 @@
             emit_fixture_event("Running");
             info!(username = %canonical_username, session = %session.session.id, pid = child_report.child_pid, "worker session started; PAM transaction remains open");
             let child_status = match wait_for_session(
-                control_listener,
+                control_listener.as_ref(),
                 child_runner.as_ref(),
-                worker_id,
+                worker_id.clone(),
                 child_report.child_pid,
                 child_report.process_identity.pgid,
                 authoritative_scope.as_ref(),
@@ -62,26 +62,77 @@
                             proof,
                         ) => {
                             emit_fixture_event("BoundaryEmptyProofAccepted");
-                            return finalize_cooperative_session(
+                            return finalize_session_after_empty_proof(
                                 authoritative_scope.as_mut(),
                                 transaction,
                                 &mut terminal,
                                 proof,
+                                false,
                             );
                         }
-                        decision => {
-                            match &decision {
-                                crate::termination::GracefulFinalizationDecision::NeedsEscalation { .. } => {
-                                    emit_fixture_event("NeedsEscalation");
-                                    emit_fixture_event("OwnershipRetained:Pam,Vt,Pin");
+                        crate::termination::GracefulFinalizationDecision::NeedsEscalation(
+                            crate::termination::EscalationEligibility::Eligible {
+                                cause,
+                                leader_exit,
+                            },
+                        ) => {
+                            warn!("grace deadline expired; forced escalation required");
+                            info!(unit = %authoritative_scope.identity().unit_name, invocation_id = %authoritative_scope.identity().invocation_id, "forced escalation eligibility confirmed");
+                            emit_fixture_event("NeedsEscalation");
+                            match wait_for_forced_cleanup(
+                                ForcedWaitContext {
+                                    listener: control_listener.as_ref(),
+                                    child_runner: child_runner.as_ref(),
+                                    worker_id: &worker_id,
+                                    session_pid: child_report.child_pid,
+                                    session_pgid: child_report.process_identity.pgid,
+                                    authoritative_scope: authoritative_scope.as_ref(),
+                                    expected_control_uid: internal_control_peer_uid(),
+                                },
+                                cause,
+                                leader_exit,
+                                configured_forced_cleanup_timeout(),
+                            ) {
+                                crate::termination::ForcedTerminationOutcome::BoundaryEmpty {
+                                    proof,
+                                    ..
+                                } => {
+                                    return finalize_session_after_empty_proof(
+                                        authoritative_scope.as_mut(),
+                                        transaction,
+                                        &mut terminal,
+                                        proof,
+                                        true,
+                                    );
                                 }
-                                crate::termination::GracefulFinalizationDecision::RecoveryRequired { .. } => {
-                                    emit_fixture_event("RecoveryRequired");
+                                forced_outcome => {
+                                    match &forced_outcome {
+                                        crate::termination::ForcedTerminationOutcome::ForcedDeadlineExpired { .. } => {
+                                            warn!(boundary_still_populated = "unknown", "SIGKILL was requested but the authoritative boundary did not become provably empty before the forced deadline");
+                                        }
+                                        crate::termination::ForcedTerminationOutcome::InfrastructureFailure { stage, .. } => {
+                                            warn!(?stage, "forced termination infrastructure failed");
+                                        }
+                                        crate::termination::ForcedTerminationOutcome::RecoveryRequired { reason, .. } => {
+                                            warn!(?reason, "forced termination requires recovery");
+                                        }
+                                        crate::termination::ForcedTerminationOutcome::BoundaryEmpty { .. } => unreachable!(),
+                                    }
+                                    warn!(?forced_outcome, "forced finalization requires recovery; PAM, VT and pin remain owned");
                                     emit_fixture_event("OwnershipRetained:Pam,Vt,Pin");
+                                    wait_for_graceful_handoff();
                                 }
-                                crate::termination::GracefulFinalizationDecision::FinalizeCooperative(_) => unreachable!(),
                             }
-                            warn!(?decision, "graceful finalization requires escalation or recovery; PAM, VT and pin remain owned");
+                        }
+                        decision => {
+                            warn!(?decision, "graceful finalization requires recovery; PAM, VT and pin remain owned");
+                            match decision {
+                                crate::termination::GracefulFinalizationDecision::NeedsEscalation(
+                                    crate::termination::EscalationEligibility::InfrastructureFailure { .. },
+                                ) => emit_fixture_event("InfrastructureFailure"),
+                                _ => emit_fixture_event("RecoveryRequired"),
+                            }
+                            emit_fixture_event("OwnershipRetained:Pam,Vt,Pin");
                             wait_for_graceful_handoff();
                         }
                     }

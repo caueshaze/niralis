@@ -102,12 +102,14 @@
 
     struct ScriptedInvocationBackend {
         steps: Mutex<VecDeque<ScriptedInvocationStep>>,
+        signals: Mutex<Vec<libc::c_int>>,
     }
 
     impl ScriptedInvocationBackend {
         fn new(steps: Vec<ScriptedInvocationStep>) -> Self {
             Self {
                 steps: Mutex::new(steps.into()),
+                signals: Mutex::new(Vec::new()),
             }
         }
 
@@ -144,6 +146,10 @@
                 steps.is_empty(),
                 "scripted invocation steps left unconsumed: {steps:#?}"
             );
+        }
+
+        fn assert_signals(&self, expected: &[libc::c_int]) {
+            assert_eq!(*self.signals.lock().unwrap(), expected);
         }
     }
 
