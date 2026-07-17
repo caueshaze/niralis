@@ -11,6 +11,9 @@ pub const MAX_WORKER_MESSAGE_BYTES: usize = 64 * 1024;
 /// Version 3 adds the authenticated bidirectional payload-scope release round-trip.
 pub const WORKER_CONTROL_PROTOCOL_VERSION: u32 = 3;
 pub const MAX_WORKER_CONTROL_MESSAGE_BYTES: usize = 4096;
+/// Private inherited descriptor used for supervisor lifecycle traffic. Stdin
+/// remains a one-shot WorkerRequest transport and is expected to reach EOF.
+pub const WORKER_SUPERVISOR_FD_ENV: &str = "NIRALIS_WORKER_SUPERVISOR_FD";
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkerEnvelope<T> {
@@ -126,7 +129,7 @@ pub enum WorkerResponse {
         scope_identity: PayloadScopeIdentity,
     },
     /// Non-authoritative wakeup. The correlated release request is exchanged
-    /// over the SO_PEERCRED-authenticated internal control socket.
+    /// over the inherited, peer-validated supervisor channel.
     PayloadScopeReleaseReady {
         worker_id: String,
     },

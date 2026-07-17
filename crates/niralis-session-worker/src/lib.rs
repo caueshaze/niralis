@@ -37,9 +37,9 @@ pub use privilege_drop::{
     PrivilegeDropper,
 };
 pub use runtime::{
-    run_worker_process, run_worker_process_with_signals, LinuxRuntimeDirValidator,
-    RuntimeDirValidationError, RuntimeDirValidator, StubRuntimeDirValidator,
-    WorkerAuthenticatorFactory,
+    run_worker_process, run_worker_process_with_signals, take_inherited_supervisor_channel,
+    LinuxRuntimeDirValidator, RuntimeDirValidationError, RuntimeDirValidator,
+    StubRuntimeDirValidator, WorkerAuthenticatorFactory,
 };
 pub use selinux::{
     LinuxSelinuxContextManager, PamSelinuxExecContext, SelinuxContextManager, SelinuxError,

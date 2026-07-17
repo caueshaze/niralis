@@ -2,7 +2,7 @@ use std::cell::Cell;
 use std::io::{Read, Write};
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
-use std::os::unix::io::AsRawFd;
+use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
@@ -255,15 +255,38 @@ fn set_supervisor_channel_fd(fd: i32) -> i32 {
     SUPERVISOR_CHANNEL_FD.replace(fd)
 }
 
-pub fn run_worker_process_with_signals<R: Read + AsRawFd, W: Write>(
+fn duplicate_supervisor_channel() -> Result<UnixStream, SessionError> {
+    let fd = supervisor_channel_fd();
+    if fd < 0 {
+        return Err(SessionError::WorkerProtocolFailed);
+    }
+    let duplicate = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 3) };
+    if duplicate < 0 {
+        return Err(SessionError::WorkerIoFailed);
+    }
+    Ok(unsafe { UnixStream::from_raw_fd(duplicate) })
+}
+
+fn supervisor_peer_matches(expected_uid: u32, expected_pid: u32) -> bool {
+    duplicate_supervisor_channel()
+        .ok()
+        .and_then(|stream| peer_credentials(&stream))
+        .is_some_and(|credentials| {
+            credentials.uid == expected_uid && credentials.pid as u32 == expected_pid
+        })
+}
+
+pub fn run_worker_process_with_signals<R: Read, W: Write>(
     reader: &mut R,
     writer: &mut W,
     signals: &crate::termination::WorkerSignalFd,
+    supervisor_fd: RawFd,
 ) -> Result<(), SessionError> {
     run_worker_process_with_dependencies_and_signals(
         reader,
         writer,
         signals,
+        supervisor_fd,
         WorkerDependencies {
             authenticator_factory: &PamAuthenticatorFactory,
             identity_resolver: &NssUnixIdentityResolver,
@@ -280,7 +303,7 @@ pub fn run_worker_process_with_signals<R: Read + AsRawFd, W: Write>(
 }
 
 pub(crate) fn run_worker_process_with_dependencies_and_signals<
-    R: Read + AsRawFd,
+    R: Read,
     W: Write,
     F: WorkerAuthenticatorFactory,
     I: UnixIdentityResolver,
@@ -291,14 +314,46 @@ pub(crate) fn run_worker_process_with_dependencies_and_signals<
     reader: &mut R,
     writer: &mut W,
     signals: &crate::termination::WorkerSignalFd,
+    supervisor_fd: RawFd,
     dependencies: WorkerDependencies<'_, F, I, G, C, L>,
 ) -> Result<(), SessionError> {
     let previous = set_worker_signal_fd(signals.as_raw_fd());
-    let previous_supervisor = set_supervisor_channel_fd(reader.as_raw_fd());
+    let previous_supervisor = set_supervisor_channel_fd(supervisor_fd);
     let result = run_worker_process_with_dependencies(reader, writer, dependencies);
     set_worker_signal_fd(previous);
     set_supervisor_channel_fd(previous_supervisor);
     result
+}
+
+pub fn take_inherited_supervisor_channel() -> Result<UnixStream, SessionError> {
+    let value = std::env::var_os(niralis_session::WORKER_SUPERVISOR_FD_ENV)
+        .ok_or(SessionError::WorkerProtocolFailed)?;
+    std::env::remove_var(niralis_session::WORKER_SUPERVISOR_FD_ENV);
+    let fd = value
+        .to_str()
+        .and_then(|value| value.parse::<RawFd>().ok())
+        .filter(|fd| *fd > libc::STDERR_FILENO)
+        .ok_or(SessionError::WorkerProtocolFailed)?;
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0 {
+        return Err(SessionError::WorkerProtocolFailed);
+    }
+    let mut socket_type: libc::c_int = 0;
+    let mut length = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+    if unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_TYPE,
+            (&mut socket_type as *mut libc::c_int).cast(),
+            &mut length,
+        )
+    } < 0
+        || socket_type != libc::SOCK_STREAM
+    {
+        return Err(SessionError::WorkerProtocolFailed);
+    }
+    Ok(unsafe { UnixStream::from_raw_fd(fd) })
 }
 
 pub fn run_worker_process_with_dependencies<
@@ -358,6 +413,13 @@ pub fn run_worker_process_with_dependencies<
             worker_id,
             launcher_pid,
         } => {
+            if !control_path.as_os_str().is_empty()
+                && !supervisor_peer_matches(internal_control_peer_uid(), launcher_pid)
+            {
+                warn!("dedicated supervisor channel peer validation failed");
+                write_rejection(writer, WorkerErrorCode::InvalidRequest)?;
+                return Err(SessionError::WorkerRejected);
+            }
             if !control_path.as_os_str().is_empty() {
                 write_envelope(
                     writer,
@@ -987,32 +1049,24 @@ fn run_pam_session<
                 info!(unit = %authoritative_scope.identity().unit_name, "payload scope prepared for supervisor registration");
                 launch_phase_gate.reached(WorkerLaunchPhase::ScopePinnedBeforeAck)?;
                 if let Err(error) = await_payload_scope_ack(
-                    control_listener
-                        .as_ref()
-                        .expect("registration requires listener"),
                     &worker_id,
                     std::process::id(),
                     &registration_nonce,
-                    internal_control_peer_uid(),
-                    launcher_pid,
                     launch_watchdog_deadline,
                 ) {
                     warn!(?error, "payload scope registration acknowledgement failed");
                     let scope_identity = authoritative_scope.identity().clone();
-                    let _ = pending_handoff.abort();
-                    let local_cleanup_succeeded = authoritative_scope
-                        .cleanup_preserving_pin(launch_watchdog_deadline)
-                        .is_ok();
+                    let probe_reaped = pending_handoff.abort().is_ok();
+                    let local_cleanup_succeeded = probe_reaped
+                        && authoritative_scope
+                            .cleanup_preserving_pin(launch_watchdog_deadline)
+                            .is_ok();
                     if !local_cleanup_succeeded {
-                        warn!("payload scope pre-commit cleanup failed");
+                        warn!(probe_reaped, "payload scope pre-commit cleanup failed");
                     }
                     let release = request_payload_scope_release(
                         writer,
-                        control_listener
-                            .as_ref()
-                            .expect("registration requires listener"),
                         &worker_id,
-                        launcher_pid,
                         &registration_nonce,
                         &scope_identity,
                         local_cleanup_succeeded,
@@ -1057,18 +1111,15 @@ fn run_pam_session<
                 emit_fixture_launch_signal(signal);
                 info!("worker signal received during PendingExecHandoff; CommitExec cancelled");
                 let scope_identity = authoritative_scope.identity().clone();
-                let _ = pending_handoff.abort();
-                let local_cleanup_succeeded = authoritative_scope
-                    .cleanup_preserving_pin(launch_watchdog_deadline)
-                    .is_ok();
+                let probe_reaped = pending_handoff.abort().is_ok();
+                let local_cleanup_succeeded = probe_reaped
+                    && authoritative_scope
+                        .cleanup_preserving_pin(launch_watchdog_deadline)
+                        .is_ok();
                 if requires_registration {
                     let release = request_payload_scope_release(
                         writer,
-                        control_listener
-                            .as_ref()
-                            .expect("registration requires listener"),
                         &worker_id,
-                        launcher_pid,
                         &registration_nonce,
                         &scope_identity,
                         local_cleanup_succeeded,
@@ -1120,11 +1171,7 @@ fn run_pam_session<
                     if requires_registration {
                         let _ = request_payload_scope_release(
                             writer,
-                            control_listener
-                                .as_ref()
-                                .expect("registration requires listener"),
                             &worker_id,
-                            launcher_pid,
                             &registration_nonce,
                             &scope_identity,
                             local_cleanup_succeeded,
@@ -1185,11 +1232,7 @@ fn run_pam_session<
                     if requires_registration {
                         let _ = request_payload_scope_release(
                             writer,
-                            control_listener
-                                .as_ref()
-                                .expect("registration requires listener"),
                             &worker_id,
-                            launcher_pid,
                             &registration_nonce,
                             &scope_identity,
                             local_cleanup_succeeded,
@@ -2548,12 +2591,9 @@ fn peer_credentials(stream: &UnixStream) -> Option<libc::ucred> {
 /// persisted. A3.1 calls this between PayloadScopePrepared and CommitExec.
 #[cfg_attr(not(test), allow(dead_code))]
 fn await_payload_scope_ack(
-    listener: &UnixListener,
     worker_id: &str,
     expected_worker_pid: u32,
     registration_nonce: &str,
-    expected_peer_uid: u32,
-    expected_peer_pid: u32,
     deadline: Instant,
 ) -> Result<(), SessionError> {
     let timeout = deadline
@@ -2562,11 +2602,6 @@ fn await_payload_scope_ack(
     let signal_fd = worker_signal_fd();
     let supervisor_fd = supervisor_channel_fd();
     let mut pollfds = [
-        libc::pollfd {
-            fd: listener.as_raw_fd(),
-            events: libc::POLLIN,
-            revents: 0,
-        },
         libc::pollfd {
             fd: signal_fd,
             events: libc::POLLIN,
@@ -2592,43 +2627,53 @@ fn await_payload_scope_ack(
     if result < 0 {
         return Err(SessionError::WorkerIoFailed);
     }
-    if pollfds[1].revents & libc::POLLIN != 0 {
+    if pollfds[0].revents & libc::POLLIN != 0 {
         if let Ok(Some(signal)) = crate::termination::read_signal_fd(signal_fd) {
             emit_fixture_launch_signal(signal);
         }
         return Err(SessionError::AuthenticatedSessionFailed);
     }
-    if pollfds[2].revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
+    let supervisor_events = pollfds[1].revents;
+    if supervisor_events & libc::POLLIN != 0 {
+        let mut stream = duplicate_supervisor_channel()?;
+        let read_timeout = deadline
+            .checked_duration_since(Instant::now())
+            .filter(|timeout| !timeout.is_zero())
+            .ok_or(SessionError::WorkerTimedOut)?;
+        stream
+            .set_read_timeout(Some(read_timeout))
+            .map_err(|_| SessionError::WorkerIoFailed)?;
+        match read_control_request(&mut stream) {
+            Ok(envelope) if envelope.version == WORKER_CONTROL_PROTOCOL_VERSION => {
+                return match envelope.message {
+                    WorkerControlRequest::PayloadScopeRegistered {
+                        worker_id: ack_worker_id,
+                        expected_worker_pid: ack_pid,
+                        registration_nonce: ack_nonce,
+                    } if ack_worker_id == worker_id
+                        && ack_pid == expected_worker_pid
+                        && ack_nonce == registration_nonce =>
+                    {
+                        Ok(())
+                    }
+                    _ => Err(SessionError::WorkerProtocolFailed),
+                };
+            }
+            Ok(_) => return Err(SessionError::WorkerProtocolFailed),
+            Err(error)
+                if supervisor_events & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) == 0 =>
+            {
+                return Err(error)
+            }
+            Err(_) => {}
+        }
+    }
+    if supervisor_events & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
         emit_fixture_event("LaunchSupervisorDisconnected");
+        warn!(stage = "ack", "dedicated supervisor channel disconnected");
         return Err(SessionError::AuthenticatedSessionFailed);
     }
-    if pollfds[0].revents & libc::POLLIN == 0 {
-        return Err(SessionError::WorkerIoFailed);
-    }
-    let (mut stream, _) = listener
-        .accept()
-        .map_err(|_| SessionError::WorkerIoFailed)?;
-    let credentials = peer_credentials(&stream).ok_or(SessionError::WorkerProtocolFailed)?;
-    if credentials.uid != expected_peer_uid || credentials.pid as u32 != expected_peer_pid {
-        return Err(SessionError::WorkerProtocolFailed);
-    }
-    let envelope = read_control_request(&mut stream)?;
-    if envelope.version != WORKER_CONTROL_PROTOCOL_VERSION {
-        return Err(SessionError::WorkerProtocolFailed);
-    }
-    match envelope.message {
-        WorkerControlRequest::PayloadScopeRegistered {
-            worker_id: ack_worker_id,
-            expected_worker_pid: ack_pid,
-            registration_nonce: ack_nonce,
-        } if ack_worker_id == worker_id
-            && ack_pid == expected_worker_pid
-            && ack_nonce == registration_nonce =>
-        {
-            Ok(())
-        }
-        _ => Err(SessionError::WorkerProtocolFailed),
-    }
+    Err(SessionError::WorkerIoFailed)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2640,9 +2685,7 @@ enum PayloadScopeReleaseOutcome {
 #[allow(clippy::too_many_arguments)]
 fn request_payload_scope_release<W: Write>(
     writer: &mut W,
-    listener: &UnixListener,
     worker_id: &str,
-    launcher_pid: u32,
     registration_nonce: &str,
     identity: &niralis_session::PayloadScopeIdentity,
     local_cleanup_succeeded: bool,
@@ -2655,34 +2698,7 @@ fn request_payload_scope_release<W: Write>(
         },
     )?;
     info!(unit = %identity.unit_name, local_cleanup_succeeded, "payload scope release requested after post-ack launch failure");
-    let timeout = deadline
-        .checked_duration_since(Instant::now())
-        .ok_or(SessionError::WorkerTimedOut)?;
-    let mut pollfd = libc::pollfd {
-        fd: listener.as_raw_fd(),
-        events: libc::POLLIN,
-        revents: 0,
-    };
-    let result = unsafe {
-        libc::poll(
-            &mut pollfd,
-            1,
-            timeout.as_millis().min(i32::MAX as u128) as i32,
-        )
-    };
-    if result == 0 {
-        return Err(SessionError::WorkerTimedOut);
-    }
-    if result < 0 || pollfd.revents & libc::POLLIN == 0 {
-        return Err(SessionError::WorkerIoFailed);
-    }
-    let (mut stream, _) = listener
-        .accept()
-        .map_err(|_| SessionError::WorkerIoFailed)?;
-    let credentials = peer_credentials(&stream).ok_or(SessionError::WorkerProtocolFailed)?;
-    if credentials.uid != internal_control_peer_uid() || credentials.pid as u32 != launcher_pid {
-        return Err(SessionError::WorkerProtocolFailed);
-    }
+    let mut stream = duplicate_supervisor_channel()?;
     let release_nonce = random_release_nonce()?;
     niralis_session::write_control_request(
         &mut stream,
@@ -2696,6 +2712,43 @@ fn request_payload_scope_release<W: Write>(
         },
     )?;
     emit_fixture_event("PayloadScopeReleaseRequested:count=1");
+    let timeout = deadline
+        .checked_duration_since(Instant::now())
+        .ok_or(SessionError::WorkerTimedOut)?;
+    let mut pollfd = libc::pollfd {
+        fd: supervisor_channel_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let result = unsafe {
+        libc::poll(
+            &mut pollfd,
+            1,
+            timeout.as_millis().min(i32::MAX as u128) as i32,
+        )
+    };
+    if result == 0 {
+        return Err(SessionError::WorkerTimedOut);
+    }
+    if result < 0 {
+        return Err(SessionError::WorkerIoFailed);
+    }
+    if pollfd.revents & libc::POLLIN == 0 {
+        if pollfd.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
+            warn!(
+                stage = "release",
+                "dedicated supervisor channel disconnected"
+            );
+        }
+        return Err(SessionError::WorkerIoFailed);
+    }
+    let read_timeout = deadline
+        .checked_duration_since(Instant::now())
+        .filter(|timeout| !timeout.is_zero())
+        .ok_or(SessionError::WorkerTimedOut)?;
+    stream
+        .set_read_timeout(Some(read_timeout))
+        .map_err(|_| SessionError::WorkerIoFailed)?;
     let response = read_control_request(&mut stream)?;
     if response.version != WORKER_CONTROL_PROTOCOL_VERSION {
         return Err(SessionError::WorkerProtocolFailed);
@@ -2746,18 +2799,11 @@ mod pre_started_ack_tests {
 
     #[test]
     fn correlated_ack_round_trips_before_started() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("control.sock");
-        let listener = bind_control_listener(&path).unwrap();
+        let (mut launcher, worker) = UnixStream::pair().unwrap();
+        let previous = set_supervisor_channel_fd(worker.as_raw_fd());
         let writer = std::thread::spawn(move || {
-            let mut stream = loop {
-                match UnixStream::connect(&path) {
-                    Ok(stream) => break stream,
-                    Err(_) => std::thread::yield_now(),
-                }
-            };
             niralis_session::write_control_request(
-                &mut stream,
+                &mut launcher,
                 WorkerControlRequest::PayloadScopeRegistered {
                     worker_id: "worker-test".into(),
                     expected_worker_pid: 42,
@@ -2767,31 +2813,23 @@ mod pre_started_ack_tests {
             .unwrap();
         });
         await_payload_scope_ack(
-            &listener,
             "worker-test",
             42,
             "nonce-test",
-            unsafe { libc::getuid() },
-            std::process::id(),
             Instant::now() + Duration::from_secs(1),
         )
         .unwrap();
         writer.join().unwrap();
+        set_supervisor_channel_fd(previous);
     }
 
     #[test]
     fn divergent_ack_is_rejected() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("control.sock");
-        let listener = bind_control_listener(&path).unwrap();
+        let (mut launcher, worker) = UnixStream::pair().unwrap();
+        let previous = set_supervisor_channel_fd(worker.as_raw_fd());
         let writer = std::thread::spawn(move || {
-            let mut stream = loop {
-                if let Ok(stream) = UnixStream::connect(&path) {
-                    break stream;
-                }
-            };
             niralis_session::write_control_request(
-                &mut stream,
+                &mut launcher,
                 WorkerControlRequest::PayloadScopeRegistered {
                     worker_id: "other-worker".into(),
                     expected_worker_pid: 42,
@@ -2802,17 +2840,41 @@ mod pre_started_ack_tests {
         });
         assert_eq!(
             await_payload_scope_ack(
-                &listener,
                 "worker-test",
                 42,
                 "nonce-test",
-                unsafe { libc::getuid() },
-                std::process::id(),
                 Instant::now() + Duration::from_secs(1)
             ),
             Err(SessionError::WorkerProtocolFailed)
         );
         writer.join().unwrap();
+        set_supervisor_channel_fd(previous);
+    }
+
+    #[test]
+    fn complete_ack_is_drained_before_hup_is_classified() {
+        let (mut launcher, worker) = UnixStream::pair().unwrap();
+        let previous = set_supervisor_channel_fd(worker.as_raw_fd());
+        niralis_session::write_control_request(
+            &mut launcher,
+            WorkerControlRequest::PayloadScopeRegistered {
+                worker_id: "worker-test".into(),
+                expected_worker_pid: 42,
+                registration_nonce: "nonce-test".into(),
+            },
+        )
+        .unwrap();
+        drop(launcher);
+        assert_eq!(
+            await_payload_scope_ack(
+                "worker-test",
+                42,
+                "nonce-test",
+                Instant::now() + Duration::from_secs(1)
+            ),
+            Ok(())
+        );
+        set_supervisor_channel_fd(previous);
     }
 }
 

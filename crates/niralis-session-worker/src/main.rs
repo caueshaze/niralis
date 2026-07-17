@@ -7,6 +7,8 @@ fn main() {
     };
     init_logging();
 
+    let supervisor = niralis_session_worker::take_inherited_supervisor_channel().ok();
+
     let mut stdin = std::io::stdin().lock();
     let mut stdout = std::io::stdout().lock();
 
@@ -14,6 +16,9 @@ fn main() {
         &mut stdin,
         &mut stdout,
         &signals,
+        supervisor
+            .as_ref()
+            .map_or(-1, std::os::fd::AsRawFd::as_raw_fd),
     ) {
         Ok(()) => 0,
         Err(_) => 1,

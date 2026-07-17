@@ -69,6 +69,7 @@ enum InvocationOperation {
     ReadPropertiesAfterObserver,
     ReadBoundaryState,
     ReadPropertiesDuringEmptyProof,
+    ReadPropertiesDuringCleanup,
     UnrefPinnedUnit,
 }
 
@@ -82,6 +83,7 @@ impl InvocationOperation {
             Self::ReadPropertiesAfterKill => "post_kill",
             Self::CreateBoundaryObserver | Self::ReadPropertiesAfterObserver => "observe",
             Self::ReadBoundaryState | Self::ReadPropertiesDuringEmptyProof => "proof",
+            Self::ReadPropertiesDuringCleanup => "cleanup",
             Self::UnrefPinnedUnit => "unref",
         }
     }
@@ -535,10 +537,10 @@ impl AuthoritativePayloadScope for SystemdPayloadScope {
     fn cleanup(self: Box<Self>, deadline: Instant) -> Result<(), PayloadScopeError> {
         async_io::block_on(cleanup_unit(
             &self.connection,
-            &self.identity.unit_name,
-            &self.pinned_unit.object_path,
+            self.invocation_provider.as_ref(),
+            &self.identity,
+            &self.pinned_unit,
             &self.control_group,
-            &self.identity.invocation_id,
             deadline,
             true,
         ))
@@ -547,10 +549,10 @@ impl AuthoritativePayloadScope for SystemdPayloadScope {
     fn cleanup_preserving_pin(&mut self, deadline: Instant) -> Result<(), PayloadScopeError> {
         async_io::block_on(cleanup_unit(
             &self.connection,
-            &self.identity.unit_name,
-            &self.pinned_unit.object_path,
+            self.invocation_provider.as_ref(),
+            &self.identity,
+            &self.pinned_unit,
             &self.control_group,
-            &self.identity.invocation_id,
             deadline,
             false,
         ))
@@ -1323,18 +1325,34 @@ async fn wait_job(
 
 async fn cleanup_unit(
     connection: &zbus::Connection,
-    unit_name: &str,
-    object_path: &OwnedObjectPath,
+    provider: &dyn InvocationBoundProvider,
+    identity: &PayloadScopeIdentity,
+    pinned: &PinnedInvocationUnit,
     control_group: &str,
-    invocation_id: &str,
     deadline: Instant,
     release_pin: bool,
 ) -> Result<(), PayloadScopeError> {
-    info!(unit = %unit_name, "payload scope launch cleanup started");
+    info!(unit = %identity.unit_name, "payload scope launch cleanup started");
+    match provider.read_boundary_state(&identity.invocation_id, &pinned.object_path, control_group)
+    {
+        Ok(CgroupEmptyState::Absent) => {
+            prove_precommit_disappearance(provider, identity, pinned, control_group).await?;
+            if release_pin {
+                provider
+                    .unref_pinned_unit(&identity.invocation_id, &pinned.object_path)
+                    .await
+                    .map_err(|_| PayloadScopeError::CleanupFailed)?;
+            }
+            info!(unit = %identity.unit_name, "payload scope disappeared boundary cleanup proved");
+            return Ok(());
+        }
+        Ok(CgroupEmptyState::PresentEmpty) => {}
+        Err(_) => return Err(PayloadScopeError::CleanupFailed),
+    }
     let unit = zbus::Proxy::new(
         connection,
         SYSTEMD_DESTINATION,
-        object_path.as_str(),
+        pinned.object_path.as_str(),
         SYSTEMD_UNIT,
     )
     .await
@@ -1343,7 +1361,7 @@ async fn cleanup_unit(
         .get_property("InvocationID")
         .await
         .map_err(|_| PayloadScopeError::CleanupFailed)?;
-    if hex_id(&observed).as_deref() != Some(invocation_id)
+    if hex_id(&observed).as_deref() != Some(identity.invocation_id.as_str())
         || !read_members(control_group)?.is_empty()
     {
         return Err(PayloadScopeError::CleanupFailed);
@@ -1357,11 +1375,11 @@ async fn cleanup_unit(
     .await
     .map_err(|_| PayloadScopeError::CleanupFailed)?;
     let mut jobs = manager
-        .receive_signal_with_args("JobRemoved", &[(2, unit_name)])
+        .receive_signal_with_args("JobRemoved", &[(2, identity.unit_name.as_str())])
         .await
         .map_err(|_| PayloadScopeError::CleanupFailed)?;
     let job: OwnedObjectPath = manager
-        .call("StopUnit", &(unit_name, "fail"))
+        .call("StopUnit", &(identity.unit_name.as_str(), "fail"))
         .await
         .map_err(|_| PayloadScopeError::CleanupFailed)?;
     wait_job(&mut jobs, &job, deadline)
@@ -1372,7 +1390,75 @@ async fn cleanup_unit(
             .await
             .map_err(|_| PayloadScopeError::CleanupFailed)?;
     }
-    info!(unit = %unit_name, "payload scope launch cleanup completed");
+    info!(unit = %identity.unit_name, "payload scope launch cleanup completed");
+    Ok(())
+}
+
+async fn prove_precommit_disappearance(
+    provider: &dyn InvocationBoundProvider,
+    identity: &PayloadScopeIdentity,
+    pinned: &PinnedInvocationUnit,
+    control_group: &str,
+) -> Result<(), PayloadScopeError> {
+    if !pinned.reference_held {
+        return Err(PayloadScopeError::CleanupFailed);
+    }
+    let first_path = provider
+        .resolve_by_invocation(&identity.invocation_id)
+        .await
+        .map_err(|_| PayloadScopeError::CleanupFailed)?;
+    if first_path != pinned.object_path {
+        return Err(PayloadScopeError::UnitReplaced);
+    }
+    let first = provider
+        .read_properties(
+            InvocationOperation::ReadPropertiesDuringCleanup,
+            &identity.invocation_id,
+            &pinned.object_path,
+            &identity.unit_name,
+        )
+        .await
+        .map_err(|_| PayloadScopeError::CleanupFailed)?;
+    validate_disappeared_boundary_properties(identity, pinned, control_group, &first)?;
+    let second_path = provider
+        .resolve_by_invocation(&identity.invocation_id)
+        .await
+        .map_err(|_| PayloadScopeError::CleanupFailed)?;
+    if second_path != first_path {
+        return Err(PayloadScopeError::UnitReplaced);
+    }
+    let second = provider
+        .read_properties(
+            InvocationOperation::ReadPropertiesDuringCleanup,
+            &identity.invocation_id,
+            &pinned.object_path,
+            &identity.unit_name,
+        )
+        .await
+        .map_err(|_| PayloadScopeError::CleanupFailed)?;
+    validate_disappeared_boundary_properties(identity, pinned, control_group, &second)?;
+    if first != second {
+        return Err(PayloadScopeError::UnitReplaced);
+    }
+    Ok(())
+}
+
+fn validate_disappeared_boundary_properties(
+    identity: &PayloadScopeIdentity,
+    pinned: &PinnedInvocationUnit,
+    control_group: &str,
+    properties: &InvocationUnitProperties,
+) -> Result<(), PayloadScopeError> {
+    if properties.object_path != pinned.object_path
+        || properties.invocation_id != identity.invocation_id
+        || properties.id != identity.unit_name
+        || properties.slice != format!("user-{}.slice", identity.expected_uid)
+        || !properties.transient
+        || (!properties.control_group.is_empty() && properties.control_group != control_group)
+        || !terminal_unit_state(&properties.active_state, &properties.sub_state)
+    {
+        return Err(PayloadScopeError::UnitReplaced);
+    }
     Ok(())
 }
 
@@ -1567,6 +1653,7 @@ mod tests {
                         | InvocationOperation::ReadPropertiesAfterKill
                         | InvocationOperation::ReadPropertiesAfterObserver
                         | InvocationOperation::ReadPropertiesDuringEmptyProof
+                        | InvocationOperation::ReadPropertiesDuringCleanup
                 )
                 .then(|| UNIT_NAME.into()),
                 response,
@@ -1809,6 +1896,87 @@ mod tests {
             ),
             ScriptedInvocationStep::new(InvocationOperation::KillPinnedUnit, kill_response),
         ]
+    }
+
+    #[test]
+    fn precommit_cgroup_disappearance_requires_two_coherent_invocation_resolutions() {
+        let mut terminal = terminal_properties_a();
+        terminal.control_group.clear();
+        let backend = ScriptedInvocationBackend::new(vec![
+            ScriptedInvocationStep::new(
+                InvocationOperation::ReadBoundaryState,
+                ScriptedInvocationResponse::BoundaryState(CgroupEmptyState::Absent),
+            ),
+            ScriptedInvocationStep::new(
+                InvocationOperation::ResolveByInvocation,
+                ScriptedInvocationResponse::Resolved(path_a()),
+            ),
+            ScriptedInvocationStep::new(
+                InvocationOperation::ReadPropertiesDuringCleanup,
+                ScriptedInvocationResponse::Properties(terminal.clone()),
+            ),
+            ScriptedInvocationStep::new(
+                InvocationOperation::ResolveByInvocation,
+                ScriptedInvocationResponse::Resolved(path_a()),
+            ),
+            ScriptedInvocationStep::new(
+                InvocationOperation::ReadPropertiesDuringCleanup,
+                ScriptedInvocationResponse::Properties(terminal),
+            ),
+            ScriptedInvocationStep::new(
+                InvocationOperation::UnrefPinnedUnit,
+                ScriptedInvocationResponse::Success,
+            ),
+        ]);
+        assert_eq!(
+            backend
+                .read_boundary_state(INVOCATION_A, &path_a(), CONTROL_GROUP)
+                .unwrap(),
+            CgroupEmptyState::Absent
+        );
+        let mut pinned = pinned_a();
+        async_io::block_on(prove_precommit_disappearance(
+            &backend,
+            &identity_a(),
+            &pinned,
+            CONTROL_GROUP,
+        ))
+        .unwrap();
+        async_io::block_on(release_pin(&backend, &identity_a(), &mut pinned)).unwrap();
+        assert!(!pinned.reference_held);
+        backend.assert_consumed();
+    }
+
+    #[test]
+    fn replacement_between_precommit_disappearance_revalidations_preserves_pin() {
+        let mut terminal = terminal_properties_a();
+        terminal.control_group.clear();
+        let backend = ScriptedInvocationBackend::new(vec![
+            ScriptedInvocationStep::new(
+                InvocationOperation::ResolveByInvocation,
+                ScriptedInvocationResponse::Resolved(path_a()),
+            ),
+            ScriptedInvocationStep::new(
+                InvocationOperation::ReadPropertiesDuringCleanup,
+                ScriptedInvocationResponse::Properties(terminal),
+            ),
+            ScriptedInvocationStep::new(
+                InvocationOperation::ResolveByInvocation,
+                ScriptedInvocationResponse::Resolved(path_b()),
+            ),
+        ]);
+        let pinned = pinned_a();
+        assert_eq!(
+            async_io::block_on(prove_precommit_disappearance(
+                &backend,
+                &identity_a(),
+                &pinned,
+                CONTROL_GROUP,
+            )),
+            Err(PayloadScopeError::UnitReplaced)
+        );
+        assert!(pinned.reference_held);
+        backend.assert_consumed();
     }
 
     #[test]

@@ -17,7 +17,7 @@ pub use protocol::{
     PayloadScopeIdentity, PayloadScopeRecoveryReason, SessionExecPlan, WorkerControlRequest,
     WorkerEnvelope, WorkerErrorCode, WorkerRequest, WorkerResponse, WorkerSessionFailureCode,
     MAX_WORKER_CONTROL_MESSAGE_BYTES, MAX_WORKER_MESSAGE_BYTES, WORKER_CONTROL_PROTOCOL_VERSION,
-    WORKER_PROTOCOL_VERSION,
+    WORKER_PROTOCOL_VERSION, WORKER_SUPERVISOR_FD_ENV,
 };
 pub use scope_release::{
     PayloadScopeReleaseVerifier, ScopeReleaseVerification, SystemdPayloadScopeReleaseVerifier,

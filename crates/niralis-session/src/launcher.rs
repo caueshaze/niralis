@@ -57,6 +57,7 @@ enum WorkerSupervisorMessage {
     Register {
         runtime_id: RuntimeSessionId,
         child: Child,
+        supervisor_channel: UnixStream,
         session: StartedSession,
         session_pid: u32,
         session_pgid: u32,
@@ -84,6 +85,7 @@ struct WorkerSupervisor {
 struct SupervisedWorker {
     ownership: RuntimeOwnership,
     child: Child,
+    _supervisor_channel: UnixStream,
     session: StartedSession,
     session_pid: u32,
     session_pgid: u32,
@@ -291,6 +293,7 @@ impl WorkerSupervisor {
                     Ok(WorkerSupervisorMessage::Register {
                         runtime_id,
                         child,
+                        supervisor_channel,
                         session,
                         session_pid,
                         session_pgid,
@@ -318,6 +321,7 @@ impl WorkerSupervisor {
                                     payload_scope,
                                 },
                                 child,
+                                _supervisor_channel: supervisor_channel,
                                 session,
                                 session_pid,
                                 session_pgid,
@@ -365,6 +369,9 @@ impl WorkerSupervisor {
                                     );
                                 }
                             }
+                            let _ = worker
+                                ._supervisor_channel
+                                .shutdown(std::net::Shutdown::Both);
                         }
                         let deadline = Instant::now() + Duration::from_secs(6);
                         while !children.is_empty() && Instant::now() < deadline {
@@ -485,6 +492,7 @@ impl WorkerSupervisor {
     fn register(
         &self,
         child: Child,
+        supervisor_channel: UnixStream,
         session: StartedSession,
         session_pid: u32,
         session_pgid: u32,
@@ -507,6 +515,7 @@ impl WorkerSupervisor {
         match self.sender.send(WorkerSupervisorMessage::Register {
             runtime_id: runtime_id.clone(),
             child,
+            supervisor_channel,
             session,
             session_pid,
             session_pgid,
@@ -624,25 +633,6 @@ fn request_worker_termination(worker: &mut SupervisedWorker) -> Result<(), Sessi
     } else {
         result
     }
-}
-
-fn peer_matches(stream: &UnixStream, expected_uid: u32, expected_pid: u32) -> bool {
-    let mut credentials = libc::ucred {
-        pid: 0,
-        uid: 0,
-        gid: 0,
-    };
-    let mut length = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
-    let result = unsafe {
-        libc::getsockopt(
-            std::os::fd::AsRawFd::as_raw_fd(stream),
-            libc::SOL_SOCKET,
-            libc::SO_PEERCRED,
-            &mut credentials as *mut _ as *mut libc::c_void,
-            &mut length,
-        )
-    };
-    result == 0 && credentials.uid == expected_uid && credentials.pid as u32 == expected_pid
 }
 
 impl Drop for WorkerSupervisor {
@@ -839,12 +829,8 @@ impl WorkerSessionLauncher {
                         identity: scope_identity,
                         registration_nonce: registration_nonce.clone(),
                     };
-                    let mut control = match UnixStream::connect(&control_path) {
-                        Ok(control) => control,
-                        Err(_) => break Err(SessionError::WorkerIoFailed),
-                    };
                     if write_control_request(
-                        &mut control,
+                        attempt.supervisor_channel_mut(),
                         WorkerControlRequest::PayloadScopeRegistered {
                             worker_id: worker_id.clone(),
                             expected_worker_pid: worker_pid,
@@ -872,21 +858,15 @@ impl WorkerSessionLauncher {
                         }
                         _ => break Err(SessionError::WorkerProtocolFailed),
                     };
-                    let mut control = match UnixStream::connect(&control_path) {
-                        Ok(control) => control,
-                        Err(_) => break Err(SessionError::WorkerIoFailed),
-                    };
-                    if !peer_matches(&control, 0, worker_pid) {
-                        break Err(SessionError::WorkerProtocolFailed);
-                    }
-                    let request = match crate::read_control_request(&mut control) {
-                        Ok(request)
-                            if request.version == crate::WORKER_CONTROL_PROTOCOL_VERSION =>
-                        {
-                            request.message
-                        }
-                        _ => break Err(SessionError::WorkerProtocolFailed),
-                    };
+                    let request =
+                        match crate::read_control_request(attempt.supervisor_channel_mut()) {
+                            Ok(request)
+                                if request.version == crate::WORKER_CONTROL_PROTOCOL_VERSION =>
+                            {
+                                request.message
+                            }
+                            _ => break Err(SessionError::WorkerProtocolFailed),
+                        };
                     let (release_nonce, local_cleanup_succeeded) = match request {
                         WorkerControlRequest::PayloadScopeReleaseRequested {
                             worker_id: requested_worker_id,
@@ -941,7 +921,7 @@ impl WorkerSessionLauncher {
                             }
                         }
                     };
-                    if write_control_request(&mut control, response).is_err() {
+                    if write_control_request(attempt.supervisor_channel_mut(), response).is_err() {
                         break Err(SessionError::WorkerIoFailed);
                     }
                 }
@@ -989,9 +969,11 @@ impl WorkerSessionLauncher {
                         return Err(SessionError::WorkerExitedAfterStart);
                     }
                     attempt.finish();
+                    let supervisor_channel = attempt.take_supervisor_channel();
                     let child = attempt.take_child();
                     let runtime_id = self.supervisor.register(
                         child,
+                        supervisor_channel,
                         expected.clone(),
                         session_pid,
                         session_pgid,

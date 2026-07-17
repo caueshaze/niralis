@@ -54,20 +54,27 @@ pub fn emit_fixture_event(event: &str) {
 
 pub fn run_full_worker_fixture(
     mode: &str,
-    harness_fd: RawFd,
+    harness_fd: Option<RawFd>,
+    supervisor_fd: RawFd,
     signals: &WorkerSignalFd,
 ) -> Result<(), niralis_session::SessionError> {
-    let harness = unsafe { std::os::unix::net::UnixStream::from_raw_fd(harness_fd) };
-    let commands = harness
-        .try_clone()
-        .map_err(|_| niralis_session::SessionError::WorkerIoFailed)?;
-    let _ = HARNESS.set(Mutex::new(harness));
-    let _ = HARNESS_COMMANDS.set(Mutex::new(BufReader::new(commands)));
+    if let Some(harness_fd) = harness_fd {
+        let harness = unsafe { std::os::unix::net::UnixStream::from_raw_fd(harness_fd) };
+        let commands = harness
+            .try_clone()
+            .map_err(|_| niralis_session::SessionError::WorkerIoFailed)?;
+        let _ = HARNESS.set(Mutex::new(harness));
+        let _ = HARNESS_COMMANDS.set(Mutex::new(BufReader::new(commands)));
+    }
     emit_fixture_event("BootstrapEntered");
     emit_fixture_event("SignalMaskInstalled");
     let signal_flags = unsafe { libc::fcntl(signals.as_raw_fd(), libc::F_GETFD) };
     if signal_flags >= 0 && signal_flags & libc::FD_CLOEXEC != 0 {
         emit_fixture_event("SignalFdCloexec");
+    }
+    let supervisor_flags = unsafe { libc::fcntl(supervisor_fd, libc::F_GETFD) };
+    if supervisor_flags >= 0 && supervisor_flags & libc::FD_CLOEXEC != 0 {
+        emit_fixture_event("SupervisorFdCloexec");
     }
     crate::runtime::set_fixture_grace_period(Duration::from_millis(250));
     crate::runtime::authorize_fixture_launch_watchdog();
@@ -80,6 +87,8 @@ pub fn run_full_worker_fixture(
         "barrier-b" => FixtureMode::BarrierB,
         "barrier-c-released" => FixtureMode::BarrierCReleased,
         "barrier-c-recovery" => FixtureMode::BarrierCRecovery,
+        "barrier-c-disappearance" => FixtureMode::BarrierCDisappearance,
+        "launcher-channel" => FixtureMode::LauncherChannel,
         "invalidation-before-kill" => FixtureMode::InvalidationBeforeKill,
         "replacement-during-proof" => FixtureMode::ReplacementDuringProof,
         "bus-loss-before-kill" => FixtureMode::BusLossBeforeKill,
@@ -101,6 +110,7 @@ pub fn run_full_worker_fixture(
         &mut stdin,
         &mut stdout,
         signals,
+        supervisor_fd,
         WorkerDependencies {
             authenticator_factory: &auth,
             identity_resolver: &identity,
@@ -145,6 +155,8 @@ enum FixtureMode {
     BarrierB,
     BarrierCReleased,
     BarrierCRecovery,
+    BarrierCDisappearance,
+    LauncherChannel,
     InvalidationBeforeKill,
     ReplacementDuringProof,
     BusLossBeforeKill,
@@ -155,19 +167,20 @@ impl FixtureMode {
         match self {
             Self::BarrierA => Some(WorkerLaunchPhase::PendingHandoffBeforeScope),
             Self::BarrierB => Some(WorkerLaunchPhase::ScopePinnedBeforeAck),
-            Self::BarrierCReleased | Self::BarrierCRecovery => {
+            Self::BarrierCReleased | Self::BarrierCRecovery | Self::BarrierCDisappearance => {
                 Some(WorkerLaunchPhase::AckReceivedBeforeCommitExec)
             }
             Self::Cooperative
             | Self::NonCooperative
             | Self::InvalidationBeforeKill
             | Self::ReplacementDuringProof
-            | Self::BusLossBeforeKill => None,
+            | Self::BusLossBeforeKill
+            | Self::LauncherChannel => None,
         }
     }
 
     fn requires_registration(self) -> bool {
-        self.barrier().is_some()
+        self.barrier().is_some() || self == Self::LauncherChannel
     }
 }
 
@@ -632,6 +645,14 @@ impl AuthoritativePayloadScope for FixtureScope {
     fn cleanup_preserving_pin(&mut self, _: Instant) -> Result<(), PayloadScopeError> {
         let count = self.state.cleanup_count.fetch_add(1, Ordering::SeqCst) + 1;
         emit_fixture_event(&format!("ScopeCleanupRequested:count={count}"));
+        if self.state.mode == FixtureMode::BarrierCDisappearance {
+            emit_fixture_event("OriginalCgroupAbsent");
+            emit_fixture_event("CleanupResolveByInvocation:count=1");
+            emit_fixture_event("CleanupPropertiesValidated:count=1");
+            emit_fixture_event("CleanupResolveByInvocation:count=2");
+            emit_fixture_event("CleanupPropertiesValidated:count=2");
+            emit_fixture_event("PreCommitDisappearanceProofEstablished");
+        }
         emit_fixture_event("PinHeldAfterScopeCleanup");
         Ok(())
     }
@@ -663,11 +684,14 @@ impl AuthoritativePayloadScope for FixtureScope {
         }
         if matches!(
             self.state.mode,
-            FixtureMode::Cooperative | FixtureMode::ReplacementDuringProof
+            FixtureMode::Cooperative
+                | FixtureMode::ReplacementDuringProof
+                | FixtureMode::LauncherChannel
         ) {
             let state = self.state.clone();
             std::thread::spawn(move || {
-                if !read_fixture_command("AllowPayloadExit") {
+                let launcher_driven = state.mode == FixtureMode::LauncherChannel;
+                if !launcher_driven && !read_fixture_command("AllowPayloadExit") {
                     return;
                 }
                 let command = state.command.lock().ok().and_then(|mut value| value.take());
@@ -692,7 +716,7 @@ impl AuthoritativePayloadScope for FixtureScope {
                     unsafe {
                         libc::poll(&mut poll, 1, -1);
                     }
-                    if !read_fixture_command("MakeBoundaryTerminal") {
+                    if !launcher_driven && !read_fixture_command("MakeBoundaryTerminal") {
                         return;
                     }
                     state.terminal.store(true, Ordering::SeqCst);

@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::ErrorKind;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -59,25 +60,129 @@ fn verify_systemd(
     let manager =
         zbus::blocking::Proxy::new(&connection, DESTINATION, MANAGER_PATH, MANAGER_INTERFACE)
             .map_err(|_| PayloadScopeRecoveryReason::VerificationUnavailable)?;
-    let object_path: zbus::zvariant::OwnedObjectPath =
-        match manager.call("GetUnit", &(identity.unit_name.as_str(),)) {
-            Ok(path) => path,
-            Err(zbus::Error::MethodError(name, _, _))
-                if name.as_str() == "org.freedesktop.systemd1.NoSuchUnit" =>
-            {
-                return Ok(ScopeReleaseVerification::Released);
-            }
-            Err(_) => return Err(PayloadScopeRecoveryReason::VerificationUnavailable),
-        };
+    let invocation = parse_invocation_id(&identity.invocation_id)
+        .ok_or(PayloadScopeRecoveryReason::IdentityMismatch)?;
+    let expected_control_group = format!(
+        "/user.slice/user-{}.slice/{}",
+        identity.expected_uid, identity.unit_name
+    );
+    let first = resolve_by_invocation(&manager, &invocation)?;
+    let first_observation = match &first {
+        ResolvedInvocation::Present(path) => Some(read_observation(&connection, path)?),
+        ResolvedInvocation::Missing => None,
+    };
+    let second = resolve_by_invocation(&manager, &invocation)?;
+    match (&first, &second) {
+        (ResolvedInvocation::Missing, ResolvedInvocation::Missing) => {
+            return Ok(if boundary_absent(&expected_control_group)? {
+                ScopeReleaseVerification::Released
+            } else {
+                ScopeReleaseVerification::RecoveryRequired(
+                    PayloadScopeRecoveryReason::MembershipNotEmpty,
+                )
+            });
+        }
+        (ResolvedInvocation::Present(first_path), ResolvedInvocation::Present(second_path))
+            if first_path == second_path => {}
+        _ => {
+            return Ok(ScopeReleaseVerification::RecoveryRequired(
+                PayloadScopeRecoveryReason::InvocationIdMismatch,
+            ));
+        }
+    }
+    let object_path = match second {
+        ResolvedInvocation::Present(path) => path,
+        ResolvedInvocation::Missing => unreachable!(),
+    };
+    let observation = read_observation(&connection, &object_path)?;
+    if first_observation.as_ref() != Some(&observation) {
+        return Ok(ScopeReleaseVerification::RecoveryRequired(
+            PayloadScopeRecoveryReason::IdentityMismatch,
+        ));
+    }
+    if observation.id != identity.unit_name
+        || observation.invocation_id != identity.invocation_id
+        || observation.slice != format!("user-{}.slice", identity.expected_uid)
+        || !observation.transient
+        || (!observation.control_group.is_empty()
+            && observation.control_group != expected_control_group)
+    {
+        return Ok(ScopeReleaseVerification::RecoveryRequired(
+            PayloadScopeRecoveryReason::IdentityMismatch,
+        ));
+    }
+    if !matches!(observation.active.as_str(), "inactive" | "failed")
+        || !matches!(observation.sub.as_str(), "dead" | "failed" | "exited")
+    {
+        return Ok(ScopeReleaseVerification::RecoveryRequired(
+            PayloadScopeRecoveryReason::UnitStillActive,
+        ));
+    }
+    if !boundary_empty_or_absent(&expected_control_group)? {
+        return Ok(ScopeReleaseVerification::RecoveryRequired(
+            PayloadScopeRecoveryReason::MembershipNotEmpty,
+        ));
+    }
+    Ok(ScopeReleaseVerification::Released)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ResolvedInvocation {
+    Present(zbus::zvariant::OwnedObjectPath),
+    Missing,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReleaseObservation {
+    id: String,
+    invocation_id: String,
+    active: String,
+    sub: String,
+    slice: String,
+    control_group: String,
+    transient: bool,
+}
+
+fn parse_invocation_id(value: &str) -> Option<Vec<u8>> {
+    if value.len() != 32 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    (0..16)
+        .map(|index| u8::from_str_radix(&value[index * 2..index * 2 + 2], 16).ok())
+        .collect()
+}
+
+fn resolve_by_invocation(
+    manager: &zbus::blocking::Proxy<'_>,
+    invocation: &[u8],
+) -> Result<ResolvedInvocation, PayloadScopeRecoveryReason> {
+    match manager.call("GetUnitByInvocationID", &(invocation.to_vec(),)) {
+        Ok(path) => Ok(ResolvedInvocation::Present(path)),
+        Err(zbus::Error::MethodError(name, _, _))
+            if matches!(
+                name.as_str(),
+                "org.freedesktop.systemd1.NoSuchUnit" | "org.freedesktop.DBus.Error.UnknownObject"
+            ) =>
+        {
+            Ok(ResolvedInvocation::Missing)
+        }
+        Err(_) => Err(PayloadScopeRecoveryReason::VerificationUnavailable),
+    }
+}
+
+fn read_observation(
+    connection: &zbus::blocking::Connection,
+    object_path: &zbus::zvariant::OwnedObjectPath,
+) -> Result<ReleaseObservation, PayloadScopeRecoveryReason> {
     let unit = zbus::blocking::Proxy::new(
-        &connection,
+        connection,
         DESTINATION,
         object_path.as_str(),
         UNIT_INTERFACE,
     )
     .map_err(|_| PayloadScopeRecoveryReason::VerificationUnavailable)?;
     let scope = zbus::blocking::Proxy::new(
-        &connection,
+        connection,
         DESTINATION,
         object_path.as_str(),
         SCOPE_INTERFACE,
@@ -95,52 +200,52 @@ fn verify_systemd(
     let sub: String = unit
         .get_property("SubState")
         .map_err(|_| PayloadScopeRecoveryReason::VerificationUnavailable)?;
+    let transient: bool = unit
+        .get_property("Transient")
+        .map_err(|_| PayloadScopeRecoveryReason::VerificationUnavailable)?;
     let slice: String = scope
         .get_property("Slice")
         .map_err(|_| PayloadScopeRecoveryReason::VerificationUnavailable)?;
     let control_group: String = scope
         .get_property("ControlGroup")
         .map_err(|_| PayloadScopeRecoveryReason::VerificationUnavailable)?;
-    if id != identity.unit_name
-        || slice != format!("user-{}.slice", identity.expected_uid)
-        || control_group
-            != format!(
-                "/user.slice/user-{}.slice/{}",
-                identity.expected_uid, identity.unit_name
-            )
-    {
-        return Ok(ScopeReleaseVerification::RecoveryRequired(
-            PayloadScopeRecoveryReason::IdentityMismatch,
-        ));
-    }
     let observed_invocation = invocation
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
-    if invocation.len() != 16 || observed_invocation != identity.invocation_id {
-        return Ok(ScopeReleaseVerification::RecoveryRequired(
-            PayloadScopeRecoveryReason::InvocationIdMismatch,
-        ));
+    if invocation.len() != 16 {
+        return Err(PayloadScopeRecoveryReason::IdentityMismatch);
     }
-    let members = fs::read_to_string(
-        Path::new("/sys/fs/cgroup")
-            .join(control_group.trim_start_matches('/'))
-            .join("cgroup.procs"),
-    )
-    .map_err(|_| PayloadScopeRecoveryReason::VerificationUnavailable)?;
-    if members.lines().any(|line| !line.is_empty()) {
-        return Ok(ScopeReleaseVerification::RecoveryRequired(
-            PayloadScopeRecoveryReason::MembershipNotEmpty,
-        ));
+    Ok(ReleaseObservation {
+        id,
+        invocation_id: observed_invocation,
+        active,
+        sub,
+        slice,
+        control_group,
+        transient,
+    })
+}
+
+fn boundary_path(control_group: &str) -> std::path::PathBuf {
+    Path::new("/sys/fs/cgroup").join(control_group.trim_start_matches('/'))
+}
+
+fn boundary_absent(control_group: &str) -> Result<bool, PayloadScopeRecoveryReason> {
+    match fs::symlink_metadata(boundary_path(control_group)) {
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(true),
+        Ok(_) => Ok(false),
+        Err(_) => Err(PayloadScopeRecoveryReason::VerificationUnavailable),
     }
-    if !matches!(active.as_str(), "inactive" | "failed")
-        || !matches!(sub.as_str(), "dead" | "failed" | "exited")
-    {
-        return Ok(ScopeReleaseVerification::RecoveryRequired(
-            PayloadScopeRecoveryReason::UnitStillActive,
-        ));
+}
+
+fn boundary_empty_or_absent(control_group: &str) -> Result<bool, PayloadScopeRecoveryReason> {
+    let path = boundary_path(control_group);
+    match fs::read_to_string(path.join("cgroup.procs")) {
+        Ok(members) => Ok(!members.lines().any(|line| !line.is_empty())),
+        Err(error) if error.kind() == ErrorKind::NotFound => boundary_absent(control_group),
+        Err(_) => Err(PayloadScopeRecoveryReason::VerificationUnavailable),
     }
-    Ok(ScopeReleaseVerification::Released)
 }
 
 #[cfg(test)]
@@ -180,5 +285,12 @@ mod tests {
                 PayloadScopeRecoveryReason::VerificationUnavailable
             )
         );
+    }
+
+    #[test]
+    fn release_verifier_is_invocation_bound_and_never_resolves_by_name() {
+        let source = include_str!("scope_release.rs");
+        assert!(source.contains("GetUnitByInvocationID"));
+        assert!(!source.contains("manager.call(\"GetUnit\""));
     }
 }

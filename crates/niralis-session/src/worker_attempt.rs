@@ -1,3 +1,6 @@
+use std::os::fd::AsRawFd;
+use std::os::unix::net::UnixStream;
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver};
@@ -13,6 +16,7 @@ use crate::{
 
 pub(crate) struct WorkerAttempt {
     child: Option<Child>,
+    supervisor_channel: Option<UnixStream>,
     writer: Option<JoinHandle<()>>,
     writer_rx: Receiver<Result<(), SessionError>>,
     reader: Option<JoinHandle<()>>,
@@ -36,12 +40,22 @@ impl WorkerAttempt {
     pub(crate) fn take_child(&mut self) -> Child {
         self.child.take().expect("worker child ownership exists")
     }
+    pub(crate) fn supervisor_channel_mut(&mut self) -> &mut UnixStream {
+        self.supervisor_channel
+            .as_mut()
+            .expect("worker supervisor channel exists")
+    }
+    pub(crate) fn take_supervisor_channel(&mut self) -> UnixStream {
+        self.supervisor_channel
+            .take()
+            .expect("worker supervisor channel ownership exists")
+    }
     pub(crate) fn spawn(
         worker_path: &Path,
         worker_environment: &[(String, String)],
         request: WorkerRequest,
     ) -> Result<Self, SessionError> {
-        let mut child = spawn_worker(worker_path, worker_environment)?;
+        let (mut child, supervisor_channel) = spawn_worker(worker_path, worker_environment)?;
         let stdin = child.stdin.take().ok_or(SessionError::WorkerIoFailed)?;
         let stdout = child.stdout.take().ok_or(SessionError::WorkerIoFailed)?;
         let (writer, writer_rx) = spawn_writer(stdin, request);
@@ -49,6 +63,7 @@ impl WorkerAttempt {
 
         Ok(Self {
             child: Some(child),
+            supervisor_channel: Some(supervisor_channel),
             writer: Some(writer),
             writer_rx,
             reader: Some(reader),
@@ -108,20 +123,50 @@ impl Drop for WorkerAttempt {
 fn spawn_worker(
     worker_path: &Path,
     worker_environment: &[(String, String)],
-) -> Result<Child, SessionError> {
-    let result = Command::new(worker_path)
+) -> Result<(Child, UnixStream), SessionError> {
+    const CHILD_SUPERVISOR_FD: libc::c_int = 3;
+    let (parent_channel, child_channel) =
+        UnixStream::pair().map_err(|_| SessionError::WorkerSpawnFailed)?;
+    let child_channel_fd = child_channel.as_raw_fd();
+    let mut command = Command::new(worker_path);
+    command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .env_clear()
         .envs(worker_environment.iter().cloned())
-        .current_dir("/")
-        .spawn();
+        .env(
+            crate::WORKER_SUPERVISOR_FD_ENV,
+            CHILD_SUPERVISOR_FD.to_string(),
+        )
+        .current_dir("/");
+    unsafe {
+        command.pre_exec(move || {
+            if child_channel_fd != CHILD_SUPERVISOR_FD
+                && libc::dup2(child_channel_fd, CHILD_SUPERVISOR_FD) < 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+            let flags = libc::fcntl(CHILD_SUPERVISOR_FD, libc::F_GETFD);
+            if flags < 0
+                || libc::fcntl(
+                    CHILD_SUPERVISOR_FD,
+                    libc::F_SETFD,
+                    flags & !libc::FD_CLOEXEC,
+                ) < 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let result = command.spawn();
+    drop(child_channel);
 
     match result {
         Ok(child) => {
             info!(path = %worker_path.display(), "spawned session worker");
-            Ok(child)
+            Ok((child, parent_channel))
         }
         Err(error) => {
             tracing::error!(

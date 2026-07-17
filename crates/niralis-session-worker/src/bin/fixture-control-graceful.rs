@@ -12,6 +12,7 @@ fn main() {
 }
 
 fn run(stubborn: bool) {
+    let mut supervisor = niralis_session_worker::take_inherited_supervisor_channel().unwrap();
     let request: WorkerEnvelope<WorkerRequest> = read_envelope(&mut std::io::stdin()).unwrap();
     let (session, control_path, worker_id) = match request.message {
         WorkerRequest::PamSession {
@@ -71,8 +72,7 @@ fn run(stubborn: bool) {
     .unwrap();
     std::io::stdout().write_all(b"\n").unwrap();
     std::io::stdout().flush().unwrap();
-    let (mut acknowledgement, _) = listener.accept().unwrap();
-    let acknowledgement = read_control_request(&mut acknowledgement).unwrap();
+    let acknowledgement = read_control_request(&mut supervisor).unwrap();
     assert_eq!(acknowledgement.version, WORKER_CONTROL_PROTOCOL_VERSION);
     assert!(matches!(acknowledgement.message,
         WorkerControlRequest::PayloadScopeRegistered { worker_id: ack_worker_id, expected_worker_pid, registration_nonce: ack_nonce }
