@@ -37,6 +37,17 @@ fn payload_scope_identity_does_not_require_logind_cgroup_membership() {
     assert!(systemd_pin.contains("leader_cgroup != second.control_group"));
 }
 
+#[test]
+fn emergency_vt_releases_the_target_before_using_a_separate_control_tty() {
+    let vt = include_str!("../../vt.rs");
+    let target_release = vt.find("drop(tty_fd);").unwrap();
+    let control_open = vt.find("CString::new(\"/dev/tty0\")").unwrap();
+    let disallocate = vt.find("VT_DISALLOCATE").unwrap();
+    assert!(target_release < control_open && control_open < disallocate);
+    assert!(!vt.contains("try_clone"));
+    assert!(!vt.contains("dup("));
+}
+
 fn recovery_source() -> String {
     [
         include_str!("../../boundary.rs"),

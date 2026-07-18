@@ -1,5 +1,4 @@
 use super::*;
-
 pub(crate) fn recover_virtual_terminal(
     identity: &SupervisorVtIdentity,
 ) -> Result<(), SupervisorRecoveryError> {
@@ -64,8 +63,9 @@ pub(crate) fn recover_virtual_terminal(
     restore_default_selinux_context(&c_path)?;
     info!(tty = %path, "supervisor restored tty SELinux context");
     drop(tty_fd);
+    info!(target = %path, "emergency VT target handles released");
     let console =
-        CString::new("/dev/console").map_err(|_| SupervisorRecoveryError::VtIdentityChanged)?;
+        CString::new("/dev/tty0").map_err(|_| SupervisorRecoveryError::VtIdentityChanged)?;
     let console_fd = unsafe {
         libc::open(
             console.as_ptr(),
@@ -94,6 +94,11 @@ pub(crate) fn recover_virtual_terminal(
         active_vt = active_vt_number(console_fd.as_raw_fd())?,
         "supervisor confirmed VT activation before disallocation"
     );
+    info!(
+        control_device = "/dev/tty0",
+        target_vt = identity.number,
+        "requesting VT_DISALLOCATE"
+    );
     if unsafe {
         libc::ioctl(
             console_fd.as_raw_fd(),
@@ -119,7 +124,6 @@ pub(crate) fn recover_virtual_terminal(
     info!("emergency VT recovery complete");
     Ok(())
 }
-
 pub(crate) fn wait_for_previous_vt_activation(
     console_fd: RawFd,
     expected: u32,
