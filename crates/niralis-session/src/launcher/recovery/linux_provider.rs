@@ -45,6 +45,19 @@ impl SupervisorRecoveryProvider for LinuxSupervisorRecoveryProvider {
             || logind.seat != "seat0"
             || logind.vt_number == previous_vt.number
         {
+            warn!(
+                expected_uid = identity.expected_uid,
+                observed_uid = logind.uid,
+                expected_session_id = %identity.logind_session_id.as_str(),
+                observed_session_id = %logind.id.as_str(),
+                expected_worker_pid = worker_pid,
+                observed_logind_leader_pid = logind.leader,
+                expected_seat = "seat0",
+                observed_seat = %logind.seat,
+                previous_vt = previous_vt.number,
+                observed_session_vt = logind.vt_number,
+                "supervisor logind identity validation failed"
+            );
             return Err(SupervisorRecoveryError::LogindIdentityChanged);
         }
         let (target_uid, target_gid) = read_process_credentials(authoritative_leader_pid)?;
