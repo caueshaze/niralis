@@ -136,6 +136,19 @@ pub(crate) fn read_logind_identity(
         || state.is_empty()
         || scope.is_empty()
     {
+        warn!(
+            expected_session_id = %id.as_str(),
+            observed_session_id = %observed_id,
+            observed_uid = uid,
+            observed_logind_leader_pid = leader,
+            observed_seat = %seat,
+            observed_vt = vt_number,
+            observed_type = %session_type,
+            observed_class = %class,
+            observed_state = %state,
+            has_scope = !scope.is_empty(),
+            "supervisor rejected incomplete logind session identity"
+        );
         return Err(SupervisorRecoveryError::LogindIdentityChanged);
     }
     // The logind leader is normally the PAM worker while the authoritative
@@ -144,6 +157,12 @@ pub(crate) fn read_logind_identity(
     if let Some(payload_leader) = payload_leader {
         let leader_session = read_pid_session(payload_leader)?;
         if leader_session.as_deref() != Some(id.as_str()) {
+            warn!(
+                expected_session_id = %id.as_str(),
+                payload_leader_pid = payload_leader,
+                observed_payload_leader_session = ?leader_session,
+                "supervisor payload leader is not bound to expected logind session"
+            );
             return Err(SupervisorRecoveryError::LogindIdentityChanged);
         }
     }
