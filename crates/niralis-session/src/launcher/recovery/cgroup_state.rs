@@ -43,15 +43,28 @@ pub(crate) fn read_supervisor_boundary_state(
         Ok(metadata) if metadata.is_dir() => {}
         _ => return Err(SupervisorRecoveryError::InvalidPayloadIdentity),
     }
-    let events = read_bounded_file(&path.join("cgroup.events"))?;
+    let events = match read_bounded_file(&path.join("cgroup.events")) {
+        Ok(events) => events,
+        Err(error) => return cgroup_read_failure(&path, error),
+    };
     let populated =
         parse_populated(&events).ok_or(SupervisorRecoveryError::InvalidPayloadIdentity)?;
-    let procs = read_bounded_file(&path.join("cgroup.procs"))?;
+    let procs = match read_bounded_file(&path.join("cgroup.procs")) {
+        Ok(procs) => procs,
+        Err(error) => return cgroup_read_failure(&path, error),
+    };
     if populated != 0 || procs.iter().any(|byte| !byte.is_ascii_whitespace()) {
         return Ok(SupervisorBoundaryState::Populated);
     }
-    for entry in fs::read_dir(&path).map_err(|_| SupervisorRecoveryError::InvalidPayloadIdentity)? {
-        let entry = entry.map_err(|_| SupervisorRecoveryError::InvalidPayloadIdentity)?;
+    let entries = match fs::read_dir(&path) {
+        Ok(entries) => entries,
+        Err(error) => return cgroup_read_failure(&path, error),
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => return cgroup_read_failure(&path, error),
+        };
         if entry
             .file_type()
             .map_err(|_| SupervisorRecoveryError::InvalidPayloadIdentity)?
@@ -70,13 +83,26 @@ pub(crate) fn read_supervisor_boundary_state(
 pub(crate) fn read_supervisor_boundary_state_from_path(
     path: &Path,
 ) -> Result<SupervisorBoundaryState, SupervisorRecoveryError> {
-    let events = read_bounded_file(&path.join("cgroup.events"))?;
-    let procs = read_bounded_file(&path.join("cgroup.procs"))?;
+    let events = match read_bounded_file(&path.join("cgroup.events")) {
+        Ok(events) => events,
+        Err(error) => return cgroup_read_failure(path, error),
+    };
+    let procs = match read_bounded_file(&path.join("cgroup.procs")) {
+        Ok(procs) => procs,
+        Err(error) => return cgroup_read_failure(path, error),
+    };
     if parse_populated(&events) != Some(0) || procs.iter().any(|byte| !byte.is_ascii_whitespace()) {
         return Ok(SupervisorBoundaryState::Populated);
     }
-    for entry in fs::read_dir(path).map_err(|_| SupervisorRecoveryError::InvalidPayloadIdentity)? {
-        let entry = entry.map_err(|_| SupervisorRecoveryError::InvalidPayloadIdentity)?;
+    let entries = match fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(error) => return cgroup_read_failure(path, error),
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => return cgroup_read_failure(path, error),
+        };
         if entry
             .file_type()
             .map_err(|_| SupervisorRecoveryError::InvalidPayloadIdentity)?
@@ -90,14 +116,26 @@ pub(crate) fn read_supervisor_boundary_state_from_path(
     Ok(SupervisorBoundaryState::Empty)
 }
 
-pub(crate) fn read_bounded_file(path: &Path) -> Result<Vec<u8>, SupervisorRecoveryError> {
-    let file = fs::File::open(path).map_err(|_| SupervisorRecoveryError::InvalidPayloadIdentity)?;
+fn cgroup_read_failure(
+    path: &Path,
+    error: std::io::Error,
+) -> Result<SupervisorBoundaryState, SupervisorRecoveryError> {
+    if error.kind() == std::io::ErrorKind::NotFound && !path.exists() {
+        Ok(SupervisorBoundaryState::Absent)
+    } else {
+        Err(SupervisorRecoveryError::InvalidPayloadIdentity)
+    }
+}
+
+pub(crate) fn read_bounded_file(path: &Path) -> std::io::Result<Vec<u8>> {
+    let file = fs::File::open(path)?;
     let mut bytes = Vec::new();
     file.take(MAX_CGROUP_FILE_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|_| SupervisorRecoveryError::InvalidPayloadIdentity)?;
+        .read_to_end(&mut bytes)?;
     if bytes.len() as u64 > MAX_CGROUP_FILE_BYTES {
-        return Err(SupervisorRecoveryError::InvalidPayloadIdentity);
+        return Err(std::io::Error::other(
+            "cgroup file exceeds bounded read limit",
+        ));
     }
     Ok(bytes)
 }
