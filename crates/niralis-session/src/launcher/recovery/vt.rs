@@ -229,12 +229,10 @@ pub(crate) fn restore_default_selinux_context(path: &CStr) -> Result<(), Supervi
         if enabled() == 0 {
             return Ok(());
         }
-        let restore: Symbol<
-            unsafe extern "C" fn(*const libc::c_char, libc::c_uint) -> libc::c_int,
-        > = library
-            .get(b"selinux_restorecon\0")
+        let restore: Symbol<unsafe extern "C" fn(*const libc::c_char) -> libc::c_int> = library
+            .get(b"selinux_lsetfilecon_default\0")
             .map_err(|_| SupervisorRecoveryError::SelinuxRestoreFailed(libc::ENOSYS))?;
-        if restore(path.as_ptr(), 0) < 0 {
+        if restore(path.as_ptr()) < 0 {
             return Err(SupervisorRecoveryError::SelinuxRestoreFailed(last_errno()));
         }
     }
