@@ -10,15 +10,46 @@ impl WorkerSessionLauncher {
         if install_control {
             install_control_request(&mut request, control_path.clone(), worker_id.clone());
         }
+        let mut seat_reservation = if requires_pending_lifecycle {
+            let previous_vt = self.supervisor.reserve_seat(&worker_id)?;
+            Some((
+                SeatReservationGuard {
+                    supervisor: self.supervisor.clone(),
+                    worker_id: worker_id.clone(),
+                    armed: true,
+                },
+                previous_vt,
+            ))
+        } else {
+            None
+        };
         let deadline = Instant::now() + self.timeout;
         let mut attempt =
             WorkerAttempt::spawn(&self.worker_path, &self.worker_environment, request)?;
         let worker_pid = attempt.child_id();
-        let _pending_guard = if requires_pending_lifecycle {
-            self.supervisor.begin_pending(&worker_id, worker_pid)?;
+        let mut pending_guard = if requires_pending_lifecycle {
+            self.supervisor.begin_pending(
+                &worker_id,
+                worker_pid,
+                std::process::id(),
+                expected.clone(),
+                attempt.shared_child(),
+                seat_reservation
+                    .as_ref()
+                    .expect("PAM launch seat reservation")
+                    .1
+                    .clone(),
+            )?;
+            seat_reservation
+                .as_mut()
+                .expect("PAM launch seat reservation")
+                .0
+                .consume();
             Some(PendingSupervisorGuard {
                 supervisor: self.supervisor.clone(),
                 worker_id: worker_id.clone(),
+                expected_clean: false,
+                worker_exit_status: None,
             })
         } else {
             None
@@ -68,7 +99,7 @@ impl WorkerSessionLauncher {
                     }
                     attempt.finish();
                     let supervisor_channel = attempt.take_supervisor_channel();
-                    let child = attempt.take_child();
+                    let child = attempt.shared_child();
                     let runtime_id = self.supervisor.register(
                         child,
                         supervisor_channel,
@@ -81,6 +112,7 @@ impl WorkerSessionLauncher {
                         control_path,
                         control_dir,
                     )?;
+                    attempt.retain_by_supervisor();
                     return Ok((expected, runtime_id));
                 }
                 WorkerResponse::Started { .. } => return Err(SessionError::WorkerProtocolFailed),
@@ -101,12 +133,41 @@ impl WorkerSessionLauncher {
         }
         attempt.finish();
 
+        if response_result.is_err() || status_result.is_err() {
+            if let Some(guard) = pending_guard.take() {
+                let recovery = guard.complete();
+                return Err(if recovery.is_ok() {
+                    SessionError::WorkerDiedAndWasRecovered
+                } else {
+                    SessionError::WorkerRecoveryIncomplete
+                });
+            }
+            return Err(response_result
+                .err()
+                .or_else(|| status_result.err())
+                .unwrap_or(SessionError::WorkerProtocolFailed));
+        }
         if !writer_failed {
-            writer_result?;
+            if let Err(error) = writer_result {
+            if let Some(guard) = pending_guard.take() {
+                return Err(if guard.complete().is_ok() {
+                    error
+                } else {
+                    SessionError::WorkerRecoveryIncomplete
+                });
+            }
+            return Err(error);
+            }
         }
         let response = response_result?;
         let status = status_result?.ok_or(SessionError::WorkerProtocolFailed)?;
         debug!(?status, "session worker exited");
+        if let Some(guard) = pending_guard.as_mut() {
+            guard.mark_expected_clean(status);
+        }
+        if let Some(guard) = pending_guard.take() {
+            guard.complete()?;
+        }
         map_response(response, status, expected)
             .map(|session| (session, RuntimeSessionId::new("completed".to_owned())))
     }

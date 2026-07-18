@@ -26,20 +26,39 @@ pub struct WorkerSessionLauncher {
     worker_environment: Vec<(String, String)>,
     supervisor: Arc<WorkerSupervisor>,
     release_verifier: Arc<dyn crate::PayloadScopeReleaseVerifier>,
+    #[cfg(any(feature = "integration-test-control", feature = "supervisor-test-fixtures"))]
+    fixture_recovery_provider: Option<Arc<SupervisorFixtureRecoveryProvider>>,
 }
 
 #[derive(Debug)]
 enum WorkerSupervisorMessage {
+    ReserveSeat {
+        worker_id: String,
+        result: mpsc::Sender<Result<PreviousVtIdentity, SessionError>>,
+    },
+    CancelSeatReservation {
+        worker_id: String,
+    },
     BeginPending {
         worker_id: String,
         worker_pid: u32,
+        launcher_pid: u32,
+        session: StartedSession,
+        child: Arc<Mutex<Child>>,
+        previous_vt: PreviousVtIdentity,
         result: mpsc::Sender<Result<(), SessionError>>,
     },
     RecordPreparedScope {
         worker_id: String,
         worker_pid: u32,
+        session_pid: u32,
         identity: crate::PayloadScopeIdentity,
         registration_nonce: String,
+        result: mpsc::Sender<Result<(), SessionError>>,
+    },
+    MarkPayloadRegistered {
+        worker_id: String,
+        worker_pid: u32,
         result: mpsc::Sender<Result<(), SessionError>>,
     },
     BeginRelease {
@@ -53,10 +72,12 @@ enum WorkerSupervisorMessage {
     },
     AbortPending {
         worker_id: String,
+        expected_clean: bool,
+        worker_exit_status: Option<ExitStatus>,
+        result: mpsc::Sender<Result<(), SessionError>>,
     },
     Register {
         runtime_id: RuntimeSessionId,
-        child: Child,
         supervisor_channel: UnixStream,
         session: StartedSession,
         session_pid: u32,
@@ -83,8 +104,8 @@ struct WorkerSupervisor {
 }
 
 struct SupervisedWorker {
-    ownership: RuntimeOwnership,
-    child: Child,
+    record: SupervisorSessionRecoveryRecord,
+    child: Arc<Mutex<Child>>,
     _supervisor_channel: UnixStream,
     session: StartedSession,
     session_pid: u32,
@@ -94,22 +115,19 @@ struct SupervisedWorker {
     _control_dir: TempDir,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct RuntimeOwnership {
-    runtime_id: RuntimeSessionId,
-    logind_session_id: crate::LogindSessionId,
-    payload_scope: crate::PayloadScopeIdentity,
+struct PendingWorkerLifecycle {
+    record: SupervisorSessionRecoveryRecord,
+    child: Arc<Mutex<Child>>,
+    release: PendingReleaseState,
+    generation: u64,
+    terminal_before_started: bool,
 }
 
-struct PendingWorkerLifecycle {
-    worker_id: String,
-    worker_pid: u32,
-    payload_scope: Option<crate::PayloadScopeIdentity>,
-    registration_nonce: Option<String>,
-    release_nonce: Option<String>,
-    generation: u64,
-    recovery_required: Option<crate::PayloadScopeRecoveryReason>,
-    terminal_before_started: bool,
+#[derive(Debug)]
+enum PendingReleaseState {
+    NotRequested,
+    Requested { nonce: String },
+    RecoveryRequired(crate::PayloadScopeRecoveryReason),
 }
 
 #[derive(Debug, Clone)]
@@ -144,11 +162,59 @@ enum PendingLaunchPhase {
 struct PendingSupervisorGuard {
     supervisor: Arc<WorkerSupervisor>,
     worker_id: String,
+    expected_clean: bool,
+    worker_exit_status: Option<ExitStatus>,
+}
+
+struct SeatReservationGuard {
+    supervisor: Arc<WorkerSupervisor>,
+    worker_id: String,
+    armed: bool,
+}
+
+impl SeatReservationGuard {
+    fn consume(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for SeatReservationGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.supervisor.cancel_seat_reservation(&self.worker_id);
+        }
+    }
 }
 
 impl Drop for PendingSupervisorGuard {
     fn drop(&mut self) {
-        self.supervisor.abort_pending(&self.worker_id);
+        if !self.worker_id.is_empty() {
+            let _ = self
+                .supervisor
+                .abort_pending(
+                    &self.worker_id,
+                    self.expected_clean,
+                    self.worker_exit_status,
+                );
+        }
     }
 }
 
+impl PendingSupervisorGuard {
+    fn mark_expected_clean(&mut self, status: ExitStatus) {
+        self.expected_clean = true;
+        self.worker_exit_status = Some(status);
+    }
+
+    fn complete(mut self) -> Result<(), SessionError> {
+        let result = self
+            .supervisor
+            .abort_pending(
+                &self.worker_id,
+                self.expected_clean,
+                self.worker_exit_status,
+            );
+        self.worker_id.clear();
+        result
+    }
+}

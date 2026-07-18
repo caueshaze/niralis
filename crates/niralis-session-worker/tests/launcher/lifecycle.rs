@@ -68,14 +68,16 @@ fn started_without_registered_payload_scope_is_rejected() {
 }
 
 fn controlled_launcher(bin: &str) -> WorkerSessionLauncher {
-    WorkerSessionLauncher::new(
+    let mut launcher = WorkerSessionLauncher::new(
         PathBuf::from(bin),
         PathBuf::from("/usr/libexec/niralis-session-child"),
         PathBuf::from("/usr/libexec/niralis-session-probe"),
         Duration::from_secs(2),
         Vec::new(),
     )
-    .expect("controlled launcher should build")
+    .expect("controlled launcher should build");
+    launcher.use_supervisor_test_fixture_for_test();
+    launcher
 }
 
 #[test]

@@ -4,6 +4,7 @@ use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver};
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -15,7 +16,8 @@ use crate::{
 };
 
 pub(crate) struct WorkerAttempt {
-    child: Option<Child>,
+    child: Arc<Mutex<Child>>,
+    retained_by_supervisor: bool,
     supervisor_channel: Option<UnixStream>,
     writer: Option<JoinHandle<()>>,
     writer_rx: Receiver<Result<(), SessionError>>,
@@ -25,20 +27,23 @@ pub(crate) struct WorkerAttempt {
 
 impl WorkerAttempt {
     pub(crate) fn child_id(&self) -> u32 {
-        self.child.as_ref().expect("worker child exists").id()
+        self.child.lock().expect("worker child lock").id()
     }
     pub(crate) fn is_alive(&mut self) -> Result<bool, SessionError> {
         Ok(self
             .child
-            .as_mut()
-            .expect("worker child exists")
+            .lock()
+            .map_err(|_| SessionError::WorkerIoFailed)?
             .try_wait()
             .map_err(|_| SessionError::WorkerIoFailed)?
             .is_none())
     }
 
-    pub(crate) fn take_child(&mut self) -> Child {
-        self.child.take().expect("worker child ownership exists")
+    pub(crate) fn shared_child(&self) -> Arc<Mutex<Child>> {
+        Arc::clone(&self.child)
+    }
+    pub(crate) fn retain_by_supervisor(&mut self) {
+        self.retained_by_supervisor = true;
     }
     pub(crate) fn supervisor_channel_mut(&mut self) -> &mut UnixStream {
         self.supervisor_channel
@@ -62,7 +67,8 @@ impl WorkerAttempt {
         let (reader, reader_rx) = spawn_reader(stdout);
 
         Ok(Self {
-            child: Some(child),
+            child: Arc::new(Mutex::new(child)),
+            retained_by_supervisor: false,
             supervisor_channel: Some(supervisor_channel),
             writer: Some(writer),
             writer_rx,
@@ -75,7 +81,7 @@ impl WorkerAttempt {
         wait_thread_result(
             &self.writer_rx,
             deadline,
-            self.child.as_mut().expect("worker child exists"),
+            &self.child,
         )
     }
 
@@ -86,7 +92,7 @@ impl WorkerAttempt {
         wait_thread_result(
             &self.reader_rx,
             deadline,
-            self.child.as_mut().expect("worker child exists"),
+            &self.child,
         )
     }
 
@@ -94,13 +100,11 @@ impl WorkerAttempt {
         &mut self,
         deadline: Instant,
     ) -> Result<Option<ExitStatus>, SessionError> {
-        wait_for_exit(self.child.as_mut().expect("worker child exists"), deadline).map(Some)
+        wait_for_exit(&self.child, deadline).map(Some)
     }
 
     pub(crate) fn kill_and_reap(&mut self) {
-        if let Some(child) = self.child.as_mut() {
-            kill_and_reap(child);
-        }
+        kill_and_reap(&self.child);
     }
 
     pub(crate) fn finish(&mut self) {
@@ -115,7 +119,9 @@ impl WorkerAttempt {
 
 impl Drop for WorkerAttempt {
     fn drop(&mut self) {
-        self.kill_and_reap();
+        if !self.retained_by_supervisor {
+            self.kill_and_reap();
+        }
         self.finish();
     }
 }

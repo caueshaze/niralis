@@ -6,9 +6,11 @@ version.workspace = true
 
 [features]
 integration-test-control = []
+supervisor-test-fixtures = ["integration-test-control"]
 
 [dependencies]
 libc.workspace = true
+libloading.workspace = true
 niralis-protocol.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -20,3 +22,13 @@ zbus.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+
+[[bin]]
+name = "fixture-supervisor-worker"
+path = "src/bin/fixture-supervisor-worker.rs"
+required-features = ["supervisor-test-fixtures"]
+
+[[test]]
+name = "supervisor_full_process"
+path = "tests/supervisor_full_process.rs"
+required-features = ["supervisor-test-fixtures"]

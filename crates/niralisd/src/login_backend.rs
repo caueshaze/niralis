@@ -30,6 +30,12 @@ pub enum LoginBackendError {
     AuthenticatedSessionFailed,
     #[error("login infrastructure failed")]
     InfrastructureFailed,
+    #[error("session seat is unavailable")]
+    SeatUnavailable,
+    #[error("session worker died and was recovered")]
+    WorkerDiedAndWasRecovered,
+    #[error("session worker recovery is incomplete")]
+    WorkerRecoveryIncomplete,
 }
 
 pub trait LoginBackend: Send + Sync {
@@ -79,6 +85,13 @@ pub(crate) fn map_session_error(error: niralis_session::SessionError) -> LoginBa
         niralis_session::SessionError::AuthenticatedSessionFailed
         | niralis_session::SessionError::StartFailed => {
             LoginBackendError::AuthenticatedSessionFailed
+        }
+        niralis_session::SessionError::SessionSeatUnavailable => LoginBackendError::SeatUnavailable,
+        niralis_session::SessionError::WorkerDiedAndWasRecovered => {
+            LoginBackendError::WorkerDiedAndWasRecovered
+        }
+        niralis_session::SessionError::WorkerRecoveryIncomplete => {
+            LoginBackendError::WorkerRecoveryIncomplete
         }
         _ => LoginBackendError::InfrastructureFailed,
     }

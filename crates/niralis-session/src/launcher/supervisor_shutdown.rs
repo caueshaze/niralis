@@ -6,7 +6,7 @@ fn shutdown_workers(children: &mut Vec<SupervisedWorker>) {
                     &mut control,
                     WorkerControlRequest::Terminate {
                         worker_id: worker.worker_id.clone(),
-                        expected_worker_pid: worker.child.id(),
+                        expected_worker_pid: worker.record.worker_pid,
                         expected_session_pid: worker.session_pid,
                         expected_session_pgid: worker.session_pgid,
                     },
@@ -19,15 +19,21 @@ fn shutdown_workers(children: &mut Vec<SupervisedWorker>) {
     }
     let deadline = Instant::now() + Duration::from_secs(6);
     while !children.is_empty() && Instant::now() < deadline {
-        children.retain_mut(|worker| worker.child.try_wait().ok().flatten().is_none());
+        children.retain_mut(|worker| {
+            worker
+                .child
+                .lock()
+                .ok()
+                .and_then(|mut child| child.try_wait().ok())
+                .flatten()
+                .is_none()
+        });
         if !children.is_empty() {
             thread::sleep(Duration::from_millis(25));
         }
     }
     for worker in children {
-        let _ = terminate_group(worker.session_pgid, libc::SIGKILL);
-        let _ = worker.child.kill();
-        let _ = worker.child.wait();
+        kill_shared_worker(&worker.child);
     }
 }
 
@@ -38,6 +44,8 @@ fn request_worker_termination(worker: &mut SupervisedWorker) -> Result<(), Sessi
 
     if worker
         .child
+        .lock()
+        .map_err(|_| SessionError::WorkerIoFailed)?
         .try_wait()
         .map_err(|_| SessionError::WorkerIoFailed)?
         .is_some()
@@ -50,6 +58,8 @@ fn request_worker_termination(worker: &mut SupervisedWorker) -> Result<(), Sessi
         Err(_) => {
             return if worker
                 .child
+                .lock()
+                .map_err(|_| SessionError::WorkerIoFailed)?
                 .try_wait()
                 .map_err(|_| SessionError::WorkerIoFailed)?
                 .is_some()
@@ -65,7 +75,7 @@ fn request_worker_termination(worker: &mut SupervisedWorker) -> Result<(), Sessi
         &mut control,
         WorkerControlRequest::Terminate {
             worker_id: worker.worker_id.clone(),
-            expected_worker_pid: worker.child.id(),
+            expected_worker_pid: worker.record.worker_pid,
             expected_session_pid: worker.session_pid,
             expected_session_pgid: worker.session_pgid,
         },
@@ -77,6 +87,8 @@ fn request_worker_termination(worker: &mut SupervisedWorker) -> Result<(), Sessi
 
     if worker
         .child
+        .lock()
+        .map_err(|_| SessionError::WorkerIoFailed)?
         .try_wait()
         .map_err(|_| SessionError::WorkerIoFailed)?
         .is_some()
@@ -97,4 +109,3 @@ impl Drop for WorkerSupervisor {
         }
     }
 }
-

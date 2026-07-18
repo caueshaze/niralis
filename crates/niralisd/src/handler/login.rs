@@ -61,6 +61,15 @@ where
         Err(LoginBackendError::InfrastructureFailed) => NiralisResponse::Error {
             message: "failed to start session".to_owned(),
         },
+        Err(LoginBackendError::SeatUnavailable) => NiralisResponse::Error {
+            message: "session seat is busy recovering or quarantined".to_owned(),
+        },
+        Err(LoginBackendError::WorkerDiedAndWasRecovered) => NiralisResponse::Error {
+            message: "session worker died and the session was recovered".to_owned(),
+        },
+        Err(LoginBackendError::WorkerRecoveryIncomplete) => NiralisResponse::Error {
+            message: "session worker died and recovery is incomplete".to_owned(),
+        },
     }
 }
 

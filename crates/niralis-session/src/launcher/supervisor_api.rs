@@ -1,10 +1,43 @@
 impl WorkerSupervisor {
-    fn begin_pending(&self, worker_id: &str, worker_pid: u32) -> Result<(), SessionError> {
+    fn reserve_seat(&self, worker_id: &str) -> Result<PreviousVtIdentity, SessionError> {
+        let (result, receiver) = mpsc::channel();
+        self.sender
+            .send(WorkerSupervisorMessage::ReserveSeat {
+                worker_id: worker_id.to_owned(),
+                result,
+            })
+            .map_err(|_| SessionError::WorkerIoFailed)?;
+        receiver
+            .recv_timeout(Duration::from_secs(1))
+            .map_err(|_| SessionError::WorkerIoFailed)?
+    }
+
+    fn cancel_seat_reservation(&self, worker_id: &str) {
+        let _ = self
+            .sender
+            .send(WorkerSupervisorMessage::CancelSeatReservation {
+                worker_id: worker_id.to_owned(),
+            });
+    }
+
+    fn begin_pending(
+        &self,
+        worker_id: &str,
+        worker_pid: u32,
+        launcher_pid: u32,
+        session: StartedSession,
+        child: Arc<Mutex<Child>>,
+        previous_vt: PreviousVtIdentity,
+    ) -> Result<(), SessionError> {
         let (result, receiver) = mpsc::channel();
         self.sender
             .send(WorkerSupervisorMessage::BeginPending {
                 worker_id: worker_id.to_owned(),
                 worker_pid,
+                launcher_pid,
+                session,
+                child,
+                previous_vt,
                 result,
             })
             .map_err(|_| SessionError::WorkerIoFailed)?;
@@ -17,6 +50,7 @@ impl WorkerSupervisor {
         &self,
         worker_id: &str,
         worker_pid: u32,
+        session_pid: u32,
         identity: crate::PayloadScopeIdentity,
         registration_nonce: String,
     ) -> Result<(), SessionError> {
@@ -25,8 +59,27 @@ impl WorkerSupervisor {
             .send(WorkerSupervisorMessage::RecordPreparedScope {
                 worker_id: worker_id.to_owned(),
                 worker_pid,
+                session_pid,
                 identity,
                 registration_nonce,
+                result,
+            })
+            .map_err(|_| SessionError::WorkerIoFailed)?;
+        receiver
+            .recv_timeout(Duration::from_secs(1))
+            .map_err(|_| SessionError::WorkerIoFailed)?
+    }
+
+    fn mark_payload_registered(
+        &self,
+        worker_id: &str,
+        worker_pid: u32,
+    ) -> Result<(), SessionError> {
+        let (result, receiver) = mpsc::channel();
+        self.sender
+            .send(WorkerSupervisorMessage::MarkPayloadRegistered {
+                worker_id: worker_id.to_owned(),
+                worker_pid,
                 result,
             })
             .map_err(|_| SessionError::WorkerIoFailed)?;
@@ -63,16 +116,30 @@ impl WorkerSupervisor {
             .map_err(|_| SessionError::WorkerIoFailed)?
     }
 
-    fn abort_pending(&self, worker_id: &str) {
-        let _ = self.sender.send(WorkerSupervisorMessage::AbortPending {
-            worker_id: worker_id.to_owned(),
-        });
+    fn abort_pending(
+        &self,
+        worker_id: &str,
+        expected_clean: bool,
+        worker_exit_status: Option<ExitStatus>,
+    ) -> Result<(), SessionError> {
+        let (result, receiver) = mpsc::channel();
+        self.sender
+            .send(WorkerSupervisorMessage::AbortPending {
+                worker_id: worker_id.to_owned(),
+                expected_clean,
+                worker_exit_status,
+                result,
+            })
+            .map_err(|_| SessionError::WorkerIoFailed)?;
+        receiver
+            .recv_timeout(Duration::from_secs(7))
+            .map_err(|_| SessionError::WorkerIoFailed)?
     }
 
     #[allow(clippy::too_many_arguments)]
     fn register(
         &self,
-        child: Child,
+        child: Arc<Mutex<Child>>,
         supervisor_channel: UnixStream,
         session: StartedSession,
         session_pid: u32,
@@ -83,8 +150,9 @@ impl WorkerSupervisor {
         control_path: PathBuf,
         control_dir: TempDir,
     ) -> Result<RuntimeSessionId, SessionError> {
-        let mut child = child;
         if child
+            .lock()
+            .map_err(|_| SessionError::WorkerIoFailed)?
             .try_wait()
             .map_err(|_| SessionError::WorkerIoFailed)?
             .is_some()
@@ -95,7 +163,6 @@ impl WorkerSupervisor {
         let (result, receiver) = mpsc::channel();
         match self.sender.send(WorkerSupervisorMessage::Register {
             runtime_id: runtime_id.clone(),
-            child,
             supervisor_channel,
             session,
             session_pid,
@@ -113,13 +180,7 @@ impl WorkerSupervisor {
                     .map_err(|_| SessionError::WorkerIoFailed)??;
                 Ok(runtime_id)
             }
-            Err(error) => {
-                if let WorkerSupervisorMessage::Register { mut child, .. } = error.0 {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                }
-                Err(SessionError::WorkerIoFailed)
-            }
+            Err(_) => Err(SessionError::WorkerIoFailed),
         }
     }
 

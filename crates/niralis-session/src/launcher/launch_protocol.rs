@@ -37,7 +37,7 @@ impl WorkerSessionLauncher {
                         WorkerResponse::PayloadScopePrepared {
                             worker_id: event_worker_id,
                             expected_worker_pid,
-                            session_pid: _,
+                            session_pid,
                             registration_nonce,
                             scope_identity,
                         },
@@ -46,6 +46,7 @@ impl WorkerSessionLauncher {
                     if !matches!(phase, PendingLaunchPhase::Preparing)
                         || event_worker_id != worker_id
                         || expected_worker_pid != worker_pid
+                        || session_pid == 0
                         || registration_nonce.is_empty()
                         || registration_nonce.len() > 128
                         || !scope_identity.validate()
@@ -55,6 +56,7 @@ impl WorkerSessionLauncher {
                     self.supervisor.record_prepared_scope(
                         &worker_id,
                         worker_pid,
+                        session_pid,
                         scope_identity.clone(),
                         registration_nonce.clone(),
                     )?;
@@ -76,6 +78,8 @@ impl WorkerSessionLauncher {
                     {
                         break Err(SessionError::WorkerIoFailed);
                     }
+                    self.supervisor
+                        .mark_payload_registered(&worker_id, worker_pid)?;
                 }
                 Ok(WorkerEnvelope {
                     message:

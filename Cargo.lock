@@ -643,6 +643,7 @@ name = "niralis-session"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "libloading",
  "niralis-protocol",
  "serde",
  "serde_json",

@@ -11,6 +11,13 @@ mod worker_attempt;
 mod worker_io;
 
 pub use error::SessionError;
+#[cfg(any(
+    feature = "integration-test-control",
+    feature = "supervisor-test-fixtures"
+))]
+pub use launcher::SupervisorFixtureBoundaryMode;
+#[cfg(feature = "supervisor-test-fixtures")]
+pub use launcher::SupervisorFixtureSnapshot;
 pub use launcher::WorkerSessionLauncher;
 pub use mock::MockSessionLauncher;
 pub use protocol::{

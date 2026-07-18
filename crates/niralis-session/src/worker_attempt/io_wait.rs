@@ -30,7 +30,7 @@ fn spawn_reader(
 fn wait_thread_result<T>(
     receiver: &Receiver<Result<T, SessionError>>,
     deadline: Instant,
-    child: &mut Child,
+    child: &Arc<Mutex<Child>>,
 ) -> Result<T, SessionError> {
     let timeout = match deadline.checked_duration_since(Instant::now()) {
         Some(timeout) => timeout,
@@ -47,15 +47,23 @@ fn wait_thread_result<T>(
             Err(SessionError::WorkerTimedOut)
         }
         Err(mpsc::RecvTimeoutError::Disconnected) => {
-            let _ = reap_child(child);
+            let _ = child
+                .lock()
+                .map_err(|_| SessionError::WorkerIoFailed)
+                .and_then(|mut child| reap_child(&mut child));
             Err(SessionError::WorkerIoFailed)
         }
     }
 }
 
-fn wait_for_exit(child: &mut Child, deadline: Instant) -> Result<ExitStatus, SessionError> {
+fn wait_for_exit(child: &Arc<Mutex<Child>>, deadline: Instant) -> Result<ExitStatus, SessionError> {
     loop {
-        if let Some(status) = child.try_wait().map_err(|_| SessionError::WorkerIoFailed)? {
+        if let Some(status) = child
+            .lock()
+            .map_err(|_| SessionError::WorkerIoFailed)?
+            .try_wait()
+            .map_err(|_| SessionError::WorkerIoFailed)?
+        {
             return Ok(status);
         }
         if Instant::now() >= deadline {
@@ -66,14 +74,16 @@ fn wait_for_exit(child: &mut Child, deadline: Instant) -> Result<ExitStatus, Ses
     }
 }
 
-fn kill_and_reap(child: &mut Child) {
-    match child.try_wait() {
-        Ok(Some(_)) => return,
-        Ok(None) | Err(_) => {}
+fn kill_and_reap(child: &Arc<Mutex<Child>>) {
+    let Ok(mut child) = child.lock() else {
+        return;
+    };
+    if let Ok(Some(_)) = child.try_wait() {
+        return;
     }
 
     let _ = child.kill();
-    let _ = reap_child(child);
+    let _ = reap_child(&mut child);
 }
 
 fn reap_child(child: &mut Child) -> Result<(), SessionError> {

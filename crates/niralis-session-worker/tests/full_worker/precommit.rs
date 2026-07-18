@@ -1,6 +1,6 @@
 #[test]
 fn real_launcher_stdin_eof_is_benign_and_dedicated_ack_allows_commit() {
-    let launcher = WorkerSessionLauncher::new(
+    let mut launcher = WorkerSessionLauncher::new(
         env!("CARGO_BIN_EXE_fixture-full-worker").into(),
         "/fixture/session-child".into(),
         "/fixture/session-probe".into(),
@@ -11,6 +11,7 @@ fn real_launcher_stdin_eof_is_benign_and_dedicated_ack_allows_commit() {
         )],
     )
     .unwrap();
+    launcher.use_supervisor_test_fixture_for_test();
     let request = SessionRequest {
         username: "fixture-user".into(),
         session: SessionInfo {

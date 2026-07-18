@@ -1,0 +1,128 @@
+use super::*;
+
+pub(crate) const EMERGENCY_BOUNDARY_TIMEOUT: Duration = Duration::from_secs(5);
+pub(crate) const LOGIND_REMOVAL_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WorkerExitClassification {
+    CleanFinalization,
+    FailedAfterBoundaryCleanup,
+    UnexpectedExitBeforeStarted,
+    UnexpectedExitRunning,
+    KilledBySignal(i32),
+    RecoveryGateLost,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PamEmergencyCleanupStatus {
+    UnavailableAfterWorkerDeath,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EmergencyRecoveryStage {
+    RecoveryRecordValidation,
+    PayloadIdentityValidation,
+    EmergencyKill,
+    BoundaryObservation,
+    BoundaryProof,
+    SupervisorUnref,
+    LogindCleanup,
+    SelinuxTtyRestore,
+    VtRecovery,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SupervisorLogindCleanupResult {
+    Removed,
+    AlreadyGone,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SupervisorEmergencyBoundaryProof {
+    pub(crate) unit_name: String,
+    pub(crate) invocation_id: String,
+    pub(crate) control_group: String,
+    pub(crate) worker_exit: String,
+    pub(crate) leader_observed_dead: bool,
+    pub(crate) cgroup_observed_empty: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SupervisorEmergencyContainmentProof {
+    PayloadBoundary(SupervisorEmergencyBoundaryProof),
+    NoPayloadScopeWasRegistered { worker_exit: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SupervisorEmergencyRecoveryOutcome {
+    Recovered {
+        containment_proof: SupervisorEmergencyContainmentProof,
+        logind_result: SupervisorLogindCleanupResult,
+        pam_status: PamEmergencyCleanupStatus,
+    },
+    Quarantined {
+        stage: EmergencyRecoveryStage,
+        reason: SupervisorRecoveryError,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SupervisorRecoveryError {
+    InvalidRecord,
+    InvalidPayloadIdentity,
+    BoundaryIdentityChanged,
+    BusUnavailable,
+    BusDeliveryIndeterminate,
+    LeaderPidfdUnavailable,
+    LeaderAlreadyDead,
+    LeaderStillAlive,
+    BoundaryStillPopulated,
+    BoundaryObserverUnavailable,
+    BoundaryTimedOut,
+    SupervisorUnrefFailed,
+    LogindUnavailable,
+    LogindIdentityChanged,
+    LogindRemovalTimedOut,
+    VtIdentityChanged,
+    VtOpenFailed(i32),
+    VtKernelRestoreFailed(i32),
+    SelinuxRestoreFailed(i32),
+    VtActivationFailed(i32),
+    VtDisallocateBusy,
+    VtDisallocateFailed(i32),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PreviousVtIdentity {
+    pub(crate) number: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SupervisorLogindSessionIdentity {
+    pub(crate) id: crate::LogindSessionId,
+    pub(crate) object_path: String,
+    pub(crate) uid: u32,
+    pub(crate) username: String,
+    pub(crate) leader: u32,
+    pub(crate) seat: String,
+    pub(crate) vt_number: u32,
+    pub(crate) session_type: String,
+    pub(crate) class: String,
+    pub(crate) desktop: String,
+    pub(crate) state: String,
+    pub(crate) scope: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SupervisorVtIdentity {
+    pub(crate) seat: String,
+    pub(crate) number: u32,
+    pub(crate) previous: PreviousVtIdentity,
+    pub(crate) device_major: u32,
+    pub(crate) device_minor: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SupervisorPrePayloadRecoveryResult {
+    pub(crate) logind_result: SupervisorLogindCleanupResult,
+}

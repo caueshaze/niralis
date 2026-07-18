@@ -22,131 +22,11 @@ fn expected_started_session(request: &SessionRequest) -> StartedSession {
 mod ownership_tests {
     use super::*;
 
-    fn ownership(runtime: &str, logind: &str) -> RuntimeOwnership {
-        RuntimeOwnership {
-            runtime_id: RuntimeSessionId::new(runtime.to_owned()),
-            logind_session_id: crate::LogindSessionId::new(logind.to_owned()).unwrap(),
-            payload_scope: crate::PayloadScopeIdentity {
-                unit_name: format!("niralis-payload-{runtime}.scope"),
-                invocation_id: "0123456789abcdef0123456789abcdef".into(),
-                expected_uid: 1000,
-                logind_session_id: crate::LogindSessionId::new(logind.to_owned()).unwrap(),
-            },
-        }
-    }
-
     #[test]
-    fn swap_remove_removes_only_the_matching_runtime_logind_pair() {
-        let a = ownership("runtime-a", "c1");
-        let b = ownership("runtime-b", "c2");
-        let mut active = vec![a.clone(), b.clone()];
-        let index = active
-            .iter()
-            .position(|value| value.runtime_id == a.runtime_id)
-            .unwrap();
-        let removed = active.swap_remove(index);
-        assert_eq!(removed, a);
-        assert_eq!(active, vec![b]);
-    }
-
-    #[test]
-    fn expired_runtime_id_cannot_match_a_future_ownership() {
-        let expired = ownership("runtime-a", "c1");
-        let future = ownership("runtime-b", "c2");
-        assert_ne!(expired.runtime_id, future.runtime_id);
-        assert_ne!(expired.logind_session_id, future.logind_session_id);
-    }
-
-    fn identity() -> crate::PayloadScopeIdentity {
-        crate::PayloadScopeIdentity {
-            unit_name: "niralis-payload-release-test.scope".into(),
-            invocation_id: "0123456789abcdef0123456789abcdef".into(),
-            expected_uid: 1000,
-            logind_session_id: crate::LogindSessionId::new("c1".into()).unwrap(),
-        }
-    }
-
-    fn registered_supervisor() -> (WorkerSupervisor, crate::PayloadScopeIdentity) {
-        let supervisor = WorkerSupervisor::new();
-        supervisor.begin_pending("worker-release", 4242).unwrap();
-        let scope = identity();
-        supervisor
-            .record_prepared_scope("worker-release", 4242, scope.clone(), "reg-1".into())
-            .unwrap();
-        (supervisor, scope)
-    }
-
-    #[test]
-    fn release_verification_removes_only_matching_registered_lifecycle() {
-        let (supervisor, scope) = registered_supervisor();
-        let token = supervisor
-            .begin_release(ReleaseRequest {
-                worker_id: "worker-release".into(),
-                worker_pid: 4242,
-                registration_nonce: "reg-1".into(),
-                release_nonce: "release-1".into(),
-                identity: scope,
-            })
-            .unwrap();
-        supervisor
-            .complete_release(token, crate::ScopeReleaseVerification::Released)
-            .unwrap();
-        assert!(supervisor
-            .begin_release(ReleaseRequest {
-                worker_id: "worker-release".into(),
-                worker_pid: 4242,
-                registration_nonce: "reg-1".into(),
-                release_nonce: "release-1".into(),
-                identity: identity(),
-            })
-            .is_err());
-    }
-
-    #[test]
-    fn failed_release_verification_retains_recovery_state() {
-        let (supervisor, scope) = registered_supervisor();
-        let token = supervisor
-            .begin_release(ReleaseRequest {
-                worker_id: "worker-release".into(),
-                worker_pid: 4242,
-                registration_nonce: "reg-1".into(),
-                release_nonce: "release-1".into(),
-                identity: scope,
-            })
-            .unwrap();
-        supervisor
-            .complete_release(
-                token,
-                crate::ScopeReleaseVerification::RecoveryRequired(
-                    crate::PayloadScopeRecoveryReason::MembershipNotEmpty,
-                ),
-            )
-            .unwrap();
-        assert!(supervisor
-            .begin_release(ReleaseRequest {
-                worker_id: "worker-release".into(),
-                worker_pid: 4242,
-                registration_nonce: "reg-1".into(),
-                release_nonce: "release-1".into(),
-                identity: identity(),
-            })
-            .is_err());
-    }
-
-    #[test]
-    fn divergent_release_identity_is_rejected() {
-        let (supervisor, _) = registered_supervisor();
-        let mut other = identity();
-        other.invocation_id = "fedcba9876543210fedcba9876543210".into();
-        assert!(supervisor
-            .begin_release(ReleaseRequest {
-                worker_id: "worker-release".into(),
-                worker_pid: 4242,
-                registration_nonce: "reg-1".into(),
-                release_nonce: "release-1".into(),
-                identity: other,
-            })
-            .is_err());
+    fn expired_runtime_id_cannot_match_a_future_lifecycle() {
+        let expired = RuntimeSessionId::new("runtime-a".to_owned());
+        let future = RuntimeSessionId::new("runtime-b".to_owned());
+        assert_ne!(expired, future);
     }
 }
 
@@ -194,18 +74,6 @@ fn install_control_request(request: &mut WorkerRequest, path: PathBuf, worker_id
         *control = path;
         *id = worker_id;
         *launcher_pid = std::process::id();
-    }
-}
-
-fn terminate_group(pgid: u32, signal: i32) -> Result<(), SessionError> {
-    if pgid == 0 || pgid > i32::MAX as u32 {
-        return Err(SessionError::WorkerIoFailed);
-    }
-    let result = unsafe { libc::kill(-(pgid as libc::pid_t), signal) };
-    if result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
-        Ok(())
-    } else {
-        Err(SessionError::WorkerIoFailed)
     }
 }
 

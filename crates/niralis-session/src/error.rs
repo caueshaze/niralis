@@ -22,4 +22,10 @@ pub enum SessionError {
     StartFailed,
     #[error("worker exited after reporting startup")]
     WorkerExitedAfterStart,
+    #[error("session seat is active, recovering, or quarantined")]
+    SessionSeatUnavailable,
+    #[error("session worker died and supervisor recovery is incomplete")]
+    WorkerRecoveryIncomplete,
+    #[error("session worker died and was recovered by the supervisor")]
+    WorkerDiedAndWasRecovered,
 }
