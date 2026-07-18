@@ -138,6 +138,12 @@ allow unconfined_t niralis_t:process sigchld;
 # /proc/<pid>/cgroup and PID 1's cgroup to resolve the namespace root.
 read_files_pattern(niralis_t, niralis_t, niralis_t)
 init_read_state(niralis_t)
+# A3.4 emergency recovery proves only its invocation-pinned payload boundary
+# empty. That proof reads cgroup.events/cgroup.procs and lists child cgroups;
+# it never writes, creates, or moves any cgroup. Use the reference-policy
+# read/list interfaces rather than a hand-written broad cgroup allow.
+fs_list_cgroup_dirs(niralis_t)
+fs_read_cgroup_files(niralis_t)
 
 term_use_console(niralis_t)
 term_use_unallocated_ttys(niralis_t)
