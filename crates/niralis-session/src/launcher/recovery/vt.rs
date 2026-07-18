@@ -35,6 +35,7 @@ pub(crate) fn recover_virtual_terminal(
     }
     info!(
         vt = identity.number,
+        previous_vt = identity.previous.number,
         "restoring session VT from supervisor recovery"
     );
     const KDSETMODE: libc::c_ulong = 0x4B3A;
@@ -88,6 +89,11 @@ pub(crate) fn recover_virtual_terminal(
         return Err(SupervisorRecoveryError::VtActivationFailed(last_errno()));
     }
     wait_for_previous_vt_activation(console_fd.as_raw_fd(), identity.previous.number)?;
+    info!(
+        expected_previous_vt = identity.previous.number,
+        active_vt = active_vt_number(console_fd.as_raw_fd())?,
+        "supervisor confirmed VT activation before disallocation"
+    );
     if unsafe {
         libc::ioctl(
             console_fd.as_raw_fd(),
@@ -97,6 +103,13 @@ pub(crate) fn recover_virtual_terminal(
     } < 0
     {
         let errno = last_errno();
+        warn!(
+            vt = identity.number,
+            expected_previous_vt = identity.previous.number,
+            active_vt = ?active_vt_number(console_fd.as_raw_fd()).ok(),
+            errno,
+            "supervisor VT disallocation failed"
+        );
         return if errno == libc::EBUSY {
             Err(SupervisorRecoveryError::VtDisallocateBusy)
         } else {
@@ -183,6 +196,26 @@ pub(crate) fn wait_for_previous_vt_activation(
                 )
             };
         }
+    }
+}
+
+fn active_vt_number(console_fd: RawFd) -> Result<u32, SupervisorRecoveryError> {
+    const VT_GETSTATE: libc::c_ulong = 0x5603;
+    #[repr(C)]
+    struct VtState {
+        active: libc::c_ushort,
+        signal: libc::c_ushort,
+        state: libc::c_ushort,
+    }
+    let mut state = VtState {
+        active: 0,
+        signal: 0,
+        state: 0,
+    };
+    if unsafe { libc::ioctl(console_fd, VT_GETSTATE, &mut state) } < 0 {
+        Err(SupervisorRecoveryError::VtActivationFailed(last_errno()))
+    } else {
+        Ok(u32::from(state.active))
     }
 }
 
