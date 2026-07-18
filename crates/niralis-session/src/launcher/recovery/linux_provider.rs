@@ -38,7 +38,7 @@ impl SupervisorRecoveryProvider for LinuxSupervisorRecoveryProvider {
             launcher_pid,
             &leader,
         )?;
-        let logind = resolve_logind_identity(identity, authoritative_leader_pid)?;
+        let logind = resolve_logind_identity(identity)?;
         if logind.uid != identity.expected_uid
             || logind.id != identity.logind_session_id
             || logind.leader != worker_pid

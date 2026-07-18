@@ -2,7 +2,6 @@ use super::*;
 
 pub(crate) fn resolve_logind_identity(
     payload_identity: &crate::PayloadScopeIdentity,
-    payload_leader: u32,
 ) -> Result<SupervisorLogindSessionIdentity, SupervisorRecoveryError> {
     let connection = zbus::blocking::connection::Builder::system()
         .map_err(|_| SupervisorRecoveryError::LogindUnavailable)?
@@ -26,7 +25,6 @@ pub(crate) fn resolve_logind_identity(
         &connection,
         &path,
         payload_identity.logind_session_id.clone(),
-        Some(payload_leader),
     )
 }
 
@@ -67,7 +65,7 @@ pub(crate) fn resolve_logind_identity_by_leader(
         if leader != worker_pid {
             continue;
         }
-        let identity = read_logind_identity(&connection, &path, id, None)?;
+        let identity = read_logind_identity(&connection, &path, id)?;
         if identity.uid != listed_uid
             || identity.seat != listed_seat
             || identity.seat != "seat0"
@@ -85,7 +83,6 @@ pub(crate) fn read_logind_identity(
     connection: &zbus::blocking::Connection,
     path: &OwnedObjectPath,
     id: crate::LogindSessionId,
-    payload_leader: Option<u32>,
 ) -> Result<SupervisorLogindSessionIdentity, SupervisorRecoveryError> {
     let session = zbus::blocking::Proxy::new(
         connection,
@@ -151,21 +148,6 @@ pub(crate) fn read_logind_identity(
         );
         return Err(SupervisorRecoveryError::LogindIdentityChanged);
     }
-    // The logind leader is normally the PAM worker while the authoritative
-    // graphical leader is a member of the same session. Require that relation
-    // explicitly instead of pretending the two PIDs have the same role.
-    if let Some(payload_leader) = payload_leader {
-        let leader_session = read_pid_session(payload_leader)?;
-        if leader_session.as_deref() != Some(id.as_str()) {
-            warn!(
-                expected_session_id = %id.as_str(),
-                payload_leader_pid = payload_leader,
-                observed_payload_leader_session = ?leader_session,
-                "supervisor payload leader is not bound to expected logind session"
-            );
-            return Err(SupervisorRecoveryError::LogindIdentityChanged);
-        }
-    }
     Ok(SupervisorLogindSessionIdentity {
         id,
         object_path: path.to_string(),
@@ -180,31 +162,4 @@ pub(crate) fn read_logind_identity(
         state,
         scope,
     })
-}
-
-pub(crate) fn read_pid_session(pid: u32) -> Result<Option<String>, SupervisorRecoveryError> {
-    let library = unsafe { Library::new("libsystemd.so.0") }
-        .map_err(|_| SupervisorRecoveryError::LogindUnavailable)?;
-    unsafe {
-        let function: Symbol<
-            unsafe extern "C" fn(libc::pid_t, *mut *mut libc::c_char) -> libc::c_int,
-        > = library
-            .get(b"sd_pid_get_session\0")
-            .map_err(|_| SupervisorRecoveryError::LogindUnavailable)?;
-        let mut raw = std::ptr::null_mut();
-        let result = function(pid as libc::pid_t, &mut raw);
-        if matches!(result, value if value == -libc::ENODATA || value == -libc::ENXIO || value == -libc::ENOENT)
-        {
-            return Ok(None);
-        }
-        if result < 0 || raw.is_null() {
-            return Err(SupervisorRecoveryError::LogindUnavailable);
-        }
-        let value = CStr::from_ptr(raw)
-            .to_str()
-            .map_err(|_| SupervisorRecoveryError::LogindUnavailable)?
-            .to_owned();
-        libc::free(raw.cast());
-        Ok(Some(value))
-    }
 }

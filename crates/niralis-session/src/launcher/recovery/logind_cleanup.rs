@@ -30,7 +30,7 @@ pub(crate) fn cleanup_logind_session(
     if path.as_str() != identity.object_path {
         return Err(SupervisorRecoveryError::LogindIdentityChanged);
     }
-    let observed = read_logind_identity(&connection, &path, identity.id.clone(), None)?;
+    let observed = read_logind_identity(&connection, &path, identity.id.clone())?;
     if &observed != identity {
         return Err(SupervisorRecoveryError::LogindIdentityChanged);
     }
