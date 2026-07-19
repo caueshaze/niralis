@@ -24,6 +24,11 @@ pub enum SupervisorFixtureBoundaryMode {
     LogindOwnerBeforeTerminate,
     LogindOwnerDuringCleanup,
     LogindOwnerBeforeAbsence,
+    RealSystemdOwnerChange,
+    RealLogindOwnerChange,
+    RealDbusPayloadRecovery,
+    RealDbusLogindCleanup,
+    RealDbusLogindOwnerChange,
 }
 #[derive(Debug, Default)]
 pub(crate) struct SupervisorFixtureCounters {

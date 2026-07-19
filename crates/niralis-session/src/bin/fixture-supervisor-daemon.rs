@@ -42,6 +42,11 @@ fn main() {
         }
         Some("logind-during-cleanup") => SupervisorFixtureBoundaryMode::LogindOwnerDuringCleanup,
         Some("logind-before-absence") => SupervisorFixtureBoundaryMode::LogindOwnerBeforeAbsence,
+        Some("real-systemd-owner") => SupervisorFixtureBoundaryMode::RealSystemdOwnerChange,
+        Some("real-logind-owner") => SupervisorFixtureBoundaryMode::RealLogindOwnerChange,
+        Some("real-dbus-payload") => SupervisorFixtureBoundaryMode::RealDbusPayloadRecovery,
+        Some("real-dbus-logind") => SupervisorFixtureBoundaryMode::RealDbusLogindCleanup,
+        Some("real-dbus-logind-owner") => SupervisorFixtureBoundaryMode::RealDbusLogindOwnerChange,
         _ => SupervisorFixtureBoundaryMode::PopulatedThenRecovered,
     };
     let launcher = WorkerSessionLauncher::new_persistent_supervisor_fixture_for_test(

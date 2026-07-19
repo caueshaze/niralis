@@ -50,7 +50,19 @@ mod fixture_boundary;
     feature = "integration-test-control",
     feature = "supervisor-test-fixtures"
 ))]
+mod fixture_dbus;
+#[cfg(any(
+    test,
+    feature = "integration-test-control",
+    feature = "supervisor-test-fixtures"
+))]
 mod fixture_events;
+#[cfg(any(
+    test,
+    feature = "integration-test-control",
+    feature = "supervisor-test-fixtures"
+))]
+mod fixture_logind;
 #[cfg(any(
     test,
     feature = "integration-test-control",
@@ -109,7 +121,19 @@ pub(crate) use fixture_boundary::*;
     feature = "integration-test-control",
     feature = "supervisor-test-fixtures"
 ))]
+pub(crate) use fixture_dbus::*;
+#[cfg(any(
+    test,
+    feature = "integration-test-control",
+    feature = "supervisor-test-fixtures"
+))]
 pub(crate) use fixture_events::*;
+#[cfg(any(
+    test,
+    feature = "integration-test-control",
+    feature = "supervisor-test-fixtures"
+))]
+pub(crate) use fixture_logind::*;
 #[cfg(any(
     test,
     feature = "integration-test-control",

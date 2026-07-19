@@ -17,7 +17,7 @@ pub(crate) fn prepare_fixture_payload(
             identity: identity.clone(),
             object_path: format!(
                 "/org/freedesktop/systemd1/unit/{}",
-                identity.unit_name.replace('.', "_2e")
+                identity.unit_name.replace('.', "_2e").replace('-', "_2d")
             ),
             control_group: fixture_process_cgroup(authoritative_leader_pid),
             slice: format!("/user.slice/user-{}.slice", identity.expected_uid),
@@ -32,7 +32,11 @@ pub(crate) fn prepare_fixture_payload(
             id: identity.logind_session_id.clone(),
             object_path: format!(
                 "/org/freedesktop/login1/session/{}",
-                identity.logind_session_id.as_str()
+                identity
+                    .logind_session_id
+                    .as_str()
+                    .replace('-', "_2d")
+                    .replace('.', "_2e")
             ),
             uid: identity.expected_uid,
             username: "fixture-user".to_owned(),
@@ -89,8 +93,51 @@ pub(crate) fn fixture_owner_failure(
         | SupervisorFixtureBoundaryMode::LogindOwnerBeforeAbsence => {
             Some(StartupRecoveryFailure::LogindOwnerChanged)
         }
+        SupervisorFixtureBoundaryMode::RealSystemdOwnerChange => {
+            Some(StartupRecoveryFailure::SystemdOwnerChanged)
+        }
+        SupervisorFixtureBoundaryMode::RealLogindOwnerChange => {
+            Some(StartupRecoveryFailure::LogindOwnerChanged)
+        }
         _ => None,
     }
+}
+
+pub(crate) fn reconcile_real_owner_change(
+    mode: SupervisorFixtureBoundaryMode,
+    provider: &SupervisorFixtureRecoveryProvider,
+) -> StartupRecoveryOutcome {
+    let Some(address) = std::env::var_os("NIRALIS_FIXTURE_DBUS_ADDRESS") else {
+        return StartupRecoveryOutcome::Quarantined(StartupRecoveryFailure::UnsupportedRehydration);
+    };
+    let Ok((systemd, logind)) = open_recovery_owner_watches_on_address(&address.to_string_lossy())
+    else {
+        return StartupRecoveryOutcome::Quarantined(StartupRecoveryFailure::UnsupportedRehydration);
+    };
+    let destination = if matches!(mode, SupervisorFixtureBoundaryMode::RealSystemdOwnerChange) {
+        SYSTEMD_DESTINATION
+    } else {
+        LOGIND_DESTINATION
+    };
+    let Some(pid) = std::env::var("NIRALIS_FIXTURE_DBUS_OWNER_PID")
+        .ok()
+        .and_then(|value| value.parse::<libc::pid_t>().ok())
+    else {
+        return StartupRecoveryOutcome::Quarantined(StartupRecoveryFailure::UnsupportedRehydration);
+    };
+    if unsafe { libc::kill(pid, libc::SIGKILL) } != 0 {
+        return StartupRecoveryOutcome::Quarantined(StartupRecoveryFailure::UnsupportedRehydration);
+    }
+    let changed = if destination == SYSTEMD_DESTINATION {
+        systemd.stable().is_err()
+    } else {
+        logind.stable().is_err()
+    };
+    if changed {
+        fixture_event(provider, "owner_change:real_name_owner_changed");
+        return StartupRecoveryOutcome::Quarantined(fixture_owner_failure(mode).unwrap());
+    }
+    StartupRecoveryOutcome::Quarantined(StartupRecoveryFailure::UnsupportedRehydration)
 }
 
 pub(crate) fn reconcile_fixture_worker(

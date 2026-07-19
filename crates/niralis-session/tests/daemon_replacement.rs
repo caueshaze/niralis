@@ -20,6 +20,159 @@ struct DaemonFixture {
     operation_log: PathBuf,
 }
 
+struct PrivateBusFixture {
+    bus: Child,
+    owner_children: Vec<Child>,
+    _directory: TempDir,
+    address: String,
+}
+
+impl Drop for PrivateBusFixture {
+    fn drop(&mut self) {
+        for child in &mut self.owner_children {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        let _ = self.bus.kill();
+        let _ = self.bus.wait();
+    }
+}
+
+impl PrivateBusFixture {
+    fn start() -> Self {
+        let directory = tempfile::tempdir().expect("private bus directory");
+        let mut bus = Command::new("dbus-daemon")
+            .args([
+                "--session",
+                "--nofork",
+                "--print-address=1",
+                "--print-pid=1",
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("private dbus-daemon");
+        let stdout = bus.stdout.take().expect("dbus stdout");
+        let mut output = BufReader::new(stdout);
+        let mut address = String::new();
+        output.read_line(&mut address).expect("dbus address");
+        assert!(!address.trim().is_empty(), "dbus address missing");
+        Self {
+            bus,
+            owner_children: Vec::new(),
+            _directory: directory,
+            address: address.trim().to_owned(),
+        }
+    }
+
+    fn start_owner(&mut self, name: &str) -> u32 {
+        let ready_path = self
+            ._directory
+            .path()
+            .join(format!("{}.ready", self.owner_children.len()));
+        let listener = UnixListener::bind(&ready_path).expect("owner ready socket");
+        let child = Command::new(env!("CARGO_BIN_EXE_fixture-dbus-owner"))
+            .arg(&self.address)
+            .arg(name)
+            .arg(&ready_path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("dbus owner service");
+        let pid = child.id();
+        self.owner_children.push(child);
+        let (ready, _) = listener.accept().expect("owner ready");
+        let mut line = String::new();
+        BufReader::new(ready)
+            .read_line(&mut line)
+            .expect("owner ready line");
+        assert!(line.starts_with("ready"), "owner={name} ready={line:?}");
+        pid
+    }
+
+    fn start_systemd_payload(
+        &mut self,
+        record: &serde_json::Value,
+        member_pid: u32,
+        operation_log: &Path,
+    ) {
+        let ready_path = self
+            ._directory
+            .path()
+            .join(format!("systemd-{}.ready", self.owner_children.len()));
+        let listener = UnixListener::bind(&ready_path).expect("systemd ready socket");
+        let leader_pid = record["leader_pid"].as_u64().expect("leader pid") as u32;
+        let leader_starttime = record["leader_starttime"]
+            .as_u64()
+            .expect("leader starttime");
+        let member_starttime = proc_starttime(member_pid).expect("member starttime");
+        let child = Command::new(env!("CARGO_BIN_EXE_fixture-dbus-systemd"))
+            .arg(&self.address)
+            .arg(record["payload_unit"].as_str().expect("unit"))
+            .arg(record["invocation_id"].as_str().expect("invocation"))
+            .arg(record["object_path"].as_str().expect("object path"))
+            .arg(record["control_group"].as_str().expect("control group"))
+            .arg(leader_pid.to_string())
+            .arg(leader_starttime.to_string())
+            .arg(member_pid.to_string())
+            .arg(member_starttime.to_string())
+            .arg(&ready_path)
+            .arg(operation_log)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("systemd payload service");
+        self.owner_children.push(child);
+        let (ready, _) = listener.accept().expect("systemd ready");
+        let mut line = String::new();
+        BufReader::new(ready)
+            .read_line(&mut line)
+            .expect("systemd ready line");
+        assert!(line.starts_with("ready"), "systemd={line:?}");
+    }
+
+    fn start_logind_session(&mut self, record: &serde_json::Value, operation_log: &Path) -> u32 {
+        let ready_path = self
+            ._directory
+            .path()
+            .join(format!("logind-{}.ready", self.owner_children.len()));
+        let listener = UnixListener::bind(&ready_path).expect("logind ready socket");
+        let child = Command::new(env!("CARGO_BIN_EXE_fixture-dbus-logind"))
+            .arg(&self.address)
+            .arg(record["logind_session_id"].as_str().expect("session id"))
+            .arg(record["logind_object_path"].as_str().expect("session path"))
+            .arg(record["uid"].as_u64().expect("uid").to_string())
+            .arg(record["username"].as_str().expect("username"))
+            .arg(
+                record["worker_pid"]
+                    .as_u64()
+                    .expect("worker pid")
+                    .to_string(),
+            )
+            .arg(record["seat"].as_str().expect("seat"))
+            .arg(record["target_vt"].as_u64().expect("target vt").to_string())
+            .arg(record["session_name"].as_str().expect("desktop"))
+            .arg(&ready_path)
+            .arg(operation_log)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("logind session service");
+        let pid = child.id();
+        self.owner_children.push(child);
+        let (ready, _) = listener.accept().expect("logind ready");
+        let mut line = String::new();
+        BufReader::new(ready)
+            .read_line(&mut line)
+            .expect("logind ready line");
+        assert!(line.starts_with("ready"), "logind={line:?}");
+        pid
+    }
+}
+
 impl Drop for DaemonFixture {
     fn drop(&mut self) {
         if self.child.try_wait().ok().flatten().is_none() {
@@ -46,23 +199,51 @@ impl DaemonFixture {
         Self::spawn_with_storage(mode, directory, recovery.to_path_buf(), lock)
     }
 
+    fn spawn_reusing_storage_with_env(
+        mode: &str,
+        recovery: &Path,
+        environment: &[(&str, &str)],
+    ) -> Self {
+        let directory = tempfile::tempdir().expect("fixture socket directory");
+        let lock = recovery
+            .parent()
+            .expect("recovery parent")
+            .join("recovery.lock");
+        Self::spawn_with_storage_and_env(mode, directory, recovery.to_path_buf(), lock, environment)
+    }
+
     fn spawn_with_storage(
         mode: &str,
         directory: TempDir,
         recovery: PathBuf,
         lock: PathBuf,
     ) -> Self {
+        Self::spawn_with_storage_and_env(mode, directory, recovery, lock, &[])
+    }
+
+    fn spawn_with_storage_and_env(
+        mode: &str,
+        directory: TempDir,
+        recovery: PathBuf,
+        lock: PathBuf,
+        environment: &[(&str, &str)],
+    ) -> Self {
         let report_path = directory.path().join("report.sock");
         let barrier_path = directory.path().join("barrier.sock");
         let report = UnixListener::bind(&report_path).expect("report listener");
         let barrier = UnixListener::bind(&barrier_path).expect("barrier listener");
-        let mut child = Command::new(env!("CARGO_BIN_EXE_fixture-supervisor-daemon"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_fixture-supervisor-daemon"));
+        command
             .arg(env!("CARGO_BIN_EXE_fixture-supervisor-worker"))
             .arg(&recovery)
             .arg(&lock)
             .arg(mode)
             .arg(&report_path)
-            .arg(&barrier_path)
+            .arg(&barrier_path);
+        for (key, value) in environment {
+            command.env(key, value);
+        }
+        let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -593,6 +774,244 @@ fn logind_owner_changes_before_absence_quarantine() {
 }
 
 #[test]
+fn real_systemd_owner_change_invalidates_startup_authority() {
+    assert_real_owner_change(
+        "real-systemd-owner",
+        "org.freedesktop.systemd1",
+        "owner_change:real_name_owner_changed\n",
+    );
+}
+
+#[test]
+fn real_logind_owner_change_invalidates_startup_authority() {
+    assert_real_owner_change(
+        "real-logind-owner",
+        "org.freedesktop.login1",
+        "owner_change:real_name_owner_changed\n",
+    );
+}
+
+#[test]
+fn real_dbus_unit_kill_is_invocation_bound_and_single_shot() {
+    let mut daemon_a = DaemonFixture::spawn("restart-reconciles");
+    assert!(daemon_a.receive_barrier().starts_with("ready "));
+    daemon_a.start();
+    let processes = daemon_a.receive_processes();
+    assert!(daemon_a.receive_barrier().starts_with("started "));
+    let worker = pidfd_open(processes[0]);
+    let leader = pidfd_open(processes[1]);
+    let member = pidfd_open(processes[2]);
+    daemon_a.kill_exact();
+    kill_pidfd(&worker);
+
+    let record: serde_json::Value =
+        serde_json::from_slice(&fs::read(record_path(&daemon_a.recovery)).expect("record bytes"))
+            .expect("record json");
+    let mut bus = PrivateBusFixture::start();
+    bus.start_systemd_payload(&record, processes[2], &daemon_a.operation_log);
+    let address = bus.address.clone();
+    let environment = [
+        ("DBUS_SYSTEM_BUS_ADDRESS", address.as_str()),
+        ("NIRALIS_FIXTURE_DBUS_ADDRESS", address.as_str()),
+    ];
+    let mut daemon_b = DaemonFixture::spawn_reusing_storage_with_env(
+        "real-dbus-payload",
+        &daemon_a.recovery,
+        &environment,
+    );
+    assert!(daemon_b.receive_barrier().starts_with("ready "));
+    let events = daemon_b.events();
+    assert!(events.contains("proof:startup_dbus"), "events={events:?}");
+    assert_eq!(
+        events
+            .lines()
+            .filter(|line| line.starts_with("dbus_unit_kill "))
+            .count(),
+        1,
+        "events={events:?}"
+    );
+    assert_eq!(
+        events
+            .lines()
+            .filter(|line| line.starts_with("dbus_unit_ref "))
+            .count(),
+        1,
+        "events={events:?}"
+    );
+    assert_eq!(
+        events
+            .lines()
+            .filter(|line| line.starts_with("dbus_unit_unref "))
+            .count(),
+        1,
+        "events={events:?}"
+    );
+    assert!(!fs::read_dir(&daemon_a.recovery)
+        .expect("recovery directory")
+        .any(|entry| entry
+            .expect("record entry")
+            .path()
+            .extension()
+            .and_then(|v| v.to_str())
+            == Some("json")));
+    wait_pidfd(&leader);
+    wait_pidfd(&member);
+    daemon_b.kill_exact();
+}
+
+#[test]
+fn real_dbus_logind_terminate_is_identity_bound_and_confirmed() {
+    let mut daemon_a = DaemonFixture::spawn("restart-reconciles");
+    assert!(daemon_a.receive_barrier().starts_with("ready "));
+    daemon_a.start();
+    let processes = daemon_a.receive_processes();
+    assert!(daemon_a.receive_barrier().starts_with("started "));
+    let worker = pidfd_open(processes[0]);
+    let leader = pidfd_open(processes[1]);
+    let member = pidfd_open(processes[2]);
+    daemon_a.kill_exact();
+
+    let record: serde_json::Value =
+        serde_json::from_slice(&fs::read(record_path(&daemon_a.recovery)).expect("record bytes"))
+            .expect("record json");
+    let mut bus = PrivateBusFixture::start();
+    let _systemd_owner = bus.start_owner("org.freedesktop.systemd1");
+    bus.start_logind_session(&record, &daemon_a.operation_log);
+    let address = bus.address.clone();
+    let environment = [
+        ("DBUS_SYSTEM_BUS_ADDRESS", address.as_str()),
+        ("NIRALIS_FIXTURE_DBUS_ADDRESS", address.as_str()),
+    ];
+    let mut daemon_b = DaemonFixture::spawn_reusing_storage_with_env(
+        "real-dbus-logind",
+        &daemon_a.recovery,
+        &environment,
+    );
+    assert!(daemon_b.receive_barrier().starts_with("ready "));
+    let events = daemon_b.events();
+    assert!(
+        events.contains("logind_dbus_terminate_confirmed"),
+        "events={events:?}"
+    );
+    assert_eq!(
+        events
+            .lines()
+            .filter(|line| line.starts_with("dbus_logind_terminate "))
+            .count(),
+        1,
+        "events={events:?}"
+    );
+    assert!(!fs::read_dir(&daemon_a.recovery)
+        .expect("recovery directory")
+        .any(|entry| entry
+            .expect("record entry")
+            .path()
+            .extension()
+            .and_then(|v| v.to_str())
+            == Some("json")));
+    kill_pidfd(&worker);
+    kill_pidfd(&leader);
+    kill_pidfd(&member);
+    daemon_b.kill_exact();
+}
+
+#[test]
+fn real_dbus_logind_owner_change_blocks_terminate() {
+    let mut daemon_a = DaemonFixture::spawn("restart-reconciles");
+    assert!(daemon_a.receive_barrier().starts_with("ready "));
+    daemon_a.start();
+    let processes = daemon_a.receive_processes();
+    assert!(daemon_a.receive_barrier().starts_with("started "));
+    let worker = pidfd_open(processes[0]);
+    let leader = pidfd_open(processes[1]);
+    let member = pidfd_open(processes[2]);
+    daemon_a.kill_exact();
+    let record: serde_json::Value =
+        serde_json::from_slice(&fs::read(record_path(&daemon_a.recovery)).expect("record bytes"))
+            .expect("record json");
+    let mut bus = PrivateBusFixture::start();
+    let _systemd_owner = bus.start_owner("org.freedesktop.systemd1");
+    let logind_pid = bus.start_logind_session(&record, &daemon_a.operation_log);
+    let address = bus.address.clone();
+    let owner_pid = logind_pid.to_string();
+    let environment = [
+        ("DBUS_SYSTEM_BUS_ADDRESS", address.as_str()),
+        ("NIRALIS_FIXTURE_DBUS_ADDRESS", address.as_str()),
+        ("NIRALIS_FIXTURE_DBUS_OWNER_PID", owner_pid.as_str()),
+    ];
+    let mut daemon_b = DaemonFixture::spawn_reusing_storage_with_env(
+        "real-dbus-logind-owner",
+        &daemon_a.recovery,
+        &environment,
+    );
+    assert!(daemon_b.receive_barrier().starts_with("ready "));
+    let events = daemon_b.events();
+    assert!(
+        events.contains("owner_change:real_logind_before_terminate"),
+        "events={events:?}"
+    );
+    assert!(
+        !events.contains("dbus_logind_terminate "),
+        "events={events:?}"
+    );
+    assert!(fs::read_dir(&daemon_a.recovery)
+        .expect("recovery directory")
+        .any(|entry| entry
+            .expect("record entry")
+            .path()
+            .extension()
+            .and_then(|v| v.to_str())
+            == Some("json")));
+    kill_pidfd(&worker);
+    kill_pidfd(&leader);
+    kill_pidfd(&member);
+    daemon_b.kill_exact();
+}
+
+fn assert_real_owner_change(mode: &str, replaced_name: &str, expected_event: &str) {
+    let mut bus = PrivateBusFixture::start();
+    let owner_pid = bus.start_owner(replaced_name);
+    let other_name = if replaced_name == "org.freedesktop.systemd1" {
+        "org.freedesktop.login1"
+    } else {
+        "org.freedesktop.systemd1"
+    };
+    let _other_pid = bus.start_owner(other_name);
+
+    let mut daemon_a = DaemonFixture::spawn("restart-reconciles");
+    assert!(daemon_a.receive_barrier().starts_with("ready "));
+    daemon_a.start();
+    let processes = daemon_a.receive_processes();
+    assert!(daemon_a.receive_barrier().starts_with("started "));
+    let worker = pidfd_open(processes[0]);
+    let leader = pidfd_open(processes[1]);
+    let member = pidfd_open(processes[2]);
+    daemon_a.kill_exact();
+
+    let address = bus.address.clone();
+    let owner_pid = owner_pid.to_string();
+    let environment = [
+        ("DBUS_SYSTEM_BUS_ADDRESS", address.as_str()),
+        ("NIRALIS_FIXTURE_DBUS_ADDRESS", address.as_str()),
+        ("NIRALIS_FIXTURE_DBUS_OWNER_PID", owner_pid.as_str()),
+    ];
+    let mut daemon_b =
+        DaemonFixture::spawn_reusing_storage_with_env(mode, &daemon_a.recovery, &environment);
+    assert!(daemon_b.receive_barrier().starts_with("ready "));
+    assert!(daemon_b.events().contains(expected_event));
+    assert!(!daemon_b.events().contains("payload_kill "));
+    assert!(fs::read_dir(&daemon_a.recovery)
+        .expect("preserved recovery directory")
+        .next()
+        .is_some());
+
+    kill_pidfd(&worker);
+    kill_pidfd(&leader);
+    kill_pidfd(&member);
+    daemon_b.kill_exact();
+}
+
+#[test]
 fn unknown_scope_with_known_seat_is_non_destructive() {
     assert_startup_quarantine_mode("unknown-known-seat", "quarantine:unknown_scope\n");
 }
@@ -604,6 +1023,17 @@ fn scope_record_conflict_is_non_destructive() {
 
 fn proc_exists(pid: u32) -> bool {
     Path::new(&format!("/proc/{pid}")).exists()
+}
+
+fn proc_starttime(pid: u32) -> Option<u64> {
+    let value = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    value
+        .rsplit_once(") ")?
+        .1
+        .split_whitespace()
+        .nth(19)?
+        .parse()
+        .ok()
 }
 
 fn pidfd_open(pid: u32) -> OwnedFd {

@@ -33,6 +33,21 @@ name = "fixture-supervisor-daemon"
 path = "src/bin/fixture-supervisor-daemon.rs"
 required-features = ["supervisor-test-fixtures"]
 
+[[bin]]
+name = "fixture-dbus-owner"
+path = "src/bin/fixture-dbus-owner.rs"
+required-features = ["supervisor-test-fixtures"]
+
+[[bin]]
+name = "fixture-dbus-systemd"
+path = "src/bin/fixture-dbus-systemd.rs"
+required-features = ["supervisor-test-fixtures"]
+
+[[bin]]
+name = "fixture-dbus-logind"
+path = "src/bin/fixture-dbus-logind.rs"
+required-features = ["supervisor-test-fixtures"]
+
 [[test]]
 name = "supervisor_full_process"
 path = "tests/supervisor_full_process.rs"

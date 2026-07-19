@@ -10,6 +10,7 @@ pub(crate) struct OwnerWatch {
     initial_owner: String,
     changed: Arc<AtomicBool>,
     event: OwnedFd,
+    address: Option<String>,
 }
 
 impl OwnerWatch {
@@ -21,6 +22,7 @@ impl OwnerWatch {
             initial_owner: "test.owner".to_owned(),
             changed: Arc::new(AtomicBool::new(false)),
             event: unsafe { OwnedFd::from_raw_fd(event) },
+            address: None,
         }
     }
 
@@ -33,6 +35,14 @@ impl OwnerWatch {
         destination: &str,
         initial_owner: String,
     ) -> Result<Self, SupervisorRecoveryError> {
+        Self::open_on_address(destination, initial_owner, None)
+    }
+
+    pub(crate) fn open_on_address(
+        destination: &str,
+        initial_owner: String,
+        address: Option<String>,
+    ) -> Result<Self, SupervisorRecoveryError> {
         let event = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
         if event < 0 {
             return Err(SupervisorRecoveryError::BusUnavailable);
@@ -41,6 +51,7 @@ impl OwnerWatch {
         let changed = Arc::new(AtomicBool::new(false));
         let thread_changed = Arc::clone(&changed);
         let name = destination.to_owned();
+        let thread_address = address.clone();
         let thread_event = unsafe { libc::dup(event.as_raw_fd()) };
         if thread_event < 0 {
             return Err(SupervisorRecoveryError::BusUnavailable);
@@ -49,9 +60,11 @@ impl OwnerWatch {
         std::thread::Builder::new()
             .name("niralis-owner-watch".to_owned())
             .spawn(move || {
-                let Ok(connection) = zbus::blocking::connection::Builder::system()
-                    .and_then(|builder| builder.build())
-                else {
+                let builder = match thread_address {
+                    Some(address) => zbus::blocking::connection::Builder::address(address.as_str()),
+                    None => zbus::blocking::connection::Builder::system(),
+                };
+                let Ok(connection) = builder.and_then(|builder| builder.build()) else {
                     return;
                 };
                 let Ok(proxy) = zbus::blocking::Proxy::new(
@@ -81,6 +94,7 @@ impl OwnerWatch {
             initial_owner,
             changed,
             event,
+            address,
         })
     }
 
@@ -101,7 +115,11 @@ impl OwnerWatch {
     }
 
     fn current_owner(&self) -> Result<String, SupervisorRecoveryError> {
-        let connection = zbus::blocking::connection::Builder::system()
+        let builder = match &self.address {
+            Some(address) => zbus::blocking::connection::Builder::address(address.as_str()),
+            None => zbus::blocking::connection::Builder::system(),
+        };
+        let connection = builder
             .map_err(|_| SupervisorRecoveryError::BusUnavailable)?
             .method_timeout(Duration::from_secs(2))
             .build()
@@ -112,18 +130,6 @@ impl OwnerWatch {
         proxy
             .call("GetNameOwner", &(self.destination.as_str(),))
             .map_err(|_| SupervisorRecoveryError::BusUnavailable)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn owner_change_invalidates_authority_before_runtime_lookup() {
-        let watch = OwnerWatch::scripted();
-        watch.invalidate_for_test();
-        assert!(watch.stable().is_err());
     }
 }
 
@@ -141,4 +147,49 @@ pub(crate) fn open_recovery_owner_watches(
         OwnerWatch::open(SYSTEMD_DESTINATION, systemd)?,
         OwnerWatch::open(LOGIND_DESTINATION, logind)?,
     ))
+}
+
+#[cfg(any(
+    test,
+    feature = "integration-test-control",
+    feature = "supervisor-test-fixtures"
+))]
+pub(crate) fn open_recovery_owner_watches_on_address(
+    address: &str,
+) -> Result<(OwnerWatch, OwnerWatch), SupervisorRecoveryError> {
+    let connection = zbus::blocking::connection::Builder::address(address)
+        .map_err(|_| SupervisorRecoveryError::BusUnavailable)?
+        .method_timeout(Duration::from_secs(2))
+        .build()
+        .map_err(|_| SupervisorRecoveryError::BusUnavailable)?;
+    let dbus = zbus::blocking::Proxy::new(&connection, DBUS_DESTINATION, DBUS_PATH, DBUS_INTERFACE)
+        .map_err(|_| SupervisorRecoveryError::BusUnavailable)?;
+    let owner = |name: &str| {
+        dbus.call::<_, _, String>("GetNameOwner", &(name,))
+            .map_err(|_| SupervisorRecoveryError::BusUnavailable)
+    };
+    Ok((
+        OwnerWatch::open_on_address(
+            SYSTEMD_DESTINATION,
+            owner(SYSTEMD_DESTINATION)?,
+            Some(address.to_owned()),
+        )?,
+        OwnerWatch::open_on_address(
+            LOGIND_DESTINATION,
+            owner(LOGIND_DESTINATION)?,
+            Some(address.to_owned()),
+        )?,
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn owner_change_invalidates_authority_before_runtime_lookup() {
+        let watch = OwnerWatch::scripted();
+        watch.invalidate_for_test();
+        assert!(watch.stable().is_err());
+    }
 }

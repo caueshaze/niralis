@@ -93,6 +93,16 @@ impl SupervisorRecoveryProvider for SupervisorFixtureRecoveryProvider {
                         _ => "mode:other",
                     },
                 );
+                if matches!(
+                    self.mode,
+                    SupervisorFixtureBoundaryMode::RealSystemdOwnerChange
+                        | SupervisorFixtureBoundaryMode::RealLogindOwnerChange
+                ) {
+                    return reconcile_real_owner_change(self.mode, self);
+                }
+                if let Some(outcome) = reconcile_fixture_dbus(self.mode, record, ledger, self) {
+                    return outcome;
+                }
                 if let Some(failure) = fixture_owner_failure(self.mode) {
                     let watch = OwnerWatch::scripted();
                     watch.invalidate_for_test();

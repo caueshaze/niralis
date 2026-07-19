@@ -91,6 +91,11 @@ impl SupervisorPayloadBoundary for SupervisorFixtureBoundary {
             | SupervisorFixtureBoundaryMode::LogindOwnerBeforeTerminate
             | SupervisorFixtureBoundaryMode::LogindOwnerDuringCleanup
             | SupervisorFixtureBoundaryMode::LogindOwnerBeforeAbsence => {}
+            SupervisorFixtureBoundaryMode::RealSystemdOwnerChange
+            | SupervisorFixtureBoundaryMode::RealLogindOwnerChange
+            | SupervisorFixtureBoundaryMode::RealDbusPayloadRecovery
+            | SupervisorFixtureBoundaryMode::RealDbusLogindCleanup
+            | SupervisorFixtureBoundaryMode::RealDbusLogindOwnerChange => {}
         }
         self.counters.proofs.fetch_add(1, Ordering::SeqCst);
         Ok(fixture_boundary_proof(&self.identity, worker_exit))
@@ -127,6 +132,11 @@ impl SupervisorPayloadBoundary for SupervisorFixtureBoundary {
             | SupervisorFixtureBoundaryMode::LogindOwnerBeforeTerminate
             | SupervisorFixtureBoundaryMode::LogindOwnerDuringCleanup
             | SupervisorFixtureBoundaryMode::LogindOwnerBeforeAbsence => {}
+            SupervisorFixtureBoundaryMode::RealSystemdOwnerChange
+            | SupervisorFixtureBoundaryMode::RealLogindOwnerChange
+            | SupervisorFixtureBoundaryMode::RealDbusPayloadRecovery
+            | SupervisorFixtureBoundaryMode::RealDbusLogindCleanup
+            | SupervisorFixtureBoundaryMode::RealDbusLogindOwnerChange => {}
         }
         self.counters.proofs.fetch_add(1, Ordering::SeqCst);
         Ok(fixture_boundary_proof(&self.identity, worker_exit))
