@@ -121,4 +121,13 @@ mod tests {
     fn accepts_root_owned_non_writable_worker_in_trust_policy() {
         assert!(has_trusted_owner_and_permissions(0, 0o755));
     }
+
+    #[test]
+    fn reports_persistent_ledger_failure_without_claiming_worker_path_is_invalid() {
+        let error = map_worker_launcher_error(
+            niralis_session::SessionError::PersistentRecoveryUnavailable,
+            Path::new("/usr/libexec/niralis-session-worker"),
+        );
+        assert!(matches!(error, NiralisdError::PersistentRecoveryUnavailable));
+    }
 }

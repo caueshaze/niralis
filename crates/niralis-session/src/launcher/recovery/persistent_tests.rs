@@ -57,6 +57,38 @@ fn durable_transition_reloads_with_monotonic_sequence() {
 }
 
 #[test]
+fn durable_quarantine_records_reason_and_monotonic_sequence() {
+    let dir = tempdir().unwrap();
+    let records = dir.path().join("records");
+    let lock = dir.path().join("lock");
+    {
+        let mut ledger = PersistentRecoveryLedger::open(&records, &lock).unwrap();
+        ledger.create(record("lifecycle-quarantine")).unwrap();
+        ledger
+            .quarantine(
+                "lifecycle-quarantine",
+                StartupRecoveryFailure::PersistentRecordConflict,
+            )
+            .unwrap();
+    }
+    let ledger = PersistentRecoveryLedger::open(&records, &lock).unwrap();
+    let item = ledger.records().next().unwrap();
+    assert_eq!(item.sequence, 2);
+    assert_eq!(item.state, "quarantined");
+    assert_eq!(
+        item.quarantine_reason.as_deref(),
+        Some("persistent_record_conflict")
+    );
+    assert_eq!(
+        SupervisorRecoveryError::from_persistent_quarantine(
+            item.quarantine_reason.as_deref(),
+            &item.state,
+        ),
+        SupervisorRecoveryError::PersistentRecordConflict,
+    );
+}
+
+#[test]
 fn resolved_record_is_durable_before_unlink() {
     let dir = tempdir().unwrap();
     let records = dir.path().join("records");
@@ -100,13 +132,38 @@ fn startup_conflict_never_selects_a_record_heuristically() {
     let dir = tempdir().unwrap();
     let records = dir.path().join("records");
     let mut ledger = PersistentRecoveryLedger::open(&records, dir.path().join("lock")).unwrap();
-    ledger.create(record("lifecycle-one")).unwrap();
-    ledger.create(record("lifecycle-two")).unwrap();
+    let mut first = record("lifecycle-one");
+    first.created_boot_id = current_boot_id().unwrap();
+    first.last_updated_boot_id = first.created_boot_id.clone();
+    let mut second = record("lifecycle-two");
+    second.created_boot_id = first.created_boot_id.clone();
+    second.last_updated_boot_id = second.created_boot_id.clone();
+    ledger.create(first).unwrap();
+    ledger.create(second).unwrap();
     let provider = SupervisorFixtureRecoveryProvider::successful();
     let summary = StartupRecoveryCoordinator::new(&provider).reconcile(&mut ledger);
     assert_eq!(summary.free, 0);
     assert_eq!(summary.quarantined, 2);
     assert_eq!(ledger.records().count(), 2);
+    assert!(ledger.records().all(|record| {
+        record.state == "quarantined"
+            && record.quarantine_reason.as_deref() == Some("persistent_record_conflict")
+    }));
+}
+
+#[cfg(any(test, feature = "supervisor-test-fixtures"))]
+#[test]
+fn previous_boot_duplicate_records_clear_after_non_destructive_validation() {
+    let dir = tempdir().unwrap();
+    let records = dir.path().join("records");
+    let mut ledger = PersistentRecoveryLedger::open(&records, dir.path().join("lock")).unwrap();
+    ledger.create(record("lifecycle-old-one")).unwrap();
+    ledger.create(record("lifecycle-old-two")).unwrap();
+    let provider = SupervisorFixtureRecoveryProvider::successful();
+    let summary = StartupRecoveryCoordinator::new(&provider).reconcile(&mut ledger);
+    assert_eq!(summary.free, 2);
+    assert_eq!(summary.quarantined, 0);
+    assert_eq!(ledger.records().count(), 0);
 }
 
 #[test]

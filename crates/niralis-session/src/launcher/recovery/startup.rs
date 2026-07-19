@@ -45,14 +45,42 @@ impl<'a> StartupRecoveryCoordinator<'a> {
         let mut summary = StartupReconciliationSummary::default();
         for record in records {
             if blocked_seats.contains(&record.seat) {
-                summary.quarantined += 1;
-                continue;
-            }
-            if conflicts.contains(&record.lifecycle_id) {
-                summary.quarantined += 1;
+                quarantine_record(
+                    ledger,
+                    &record.lifecycle_id,
+                    StartupRecoveryFailure::UnknownPayloadScope,
+                    &mut summary,
+                );
                 continue;
             }
             let relation = PersistentRecoveryLedger::boot_relation(&record);
+            if matches!(
+                record.state.as_str(),
+                "record_resolved" | "cleared_by_boot_boundary"
+            ) {
+                if ledger.remove_resolved(&record.lifecycle_id).is_ok() {
+                    summary.free += 1;
+                } else {
+                    quarantine_record(
+                        ledger,
+                        &record.lifecycle_id,
+                        StartupRecoveryFailure::UnsupportedRehydration,
+                        &mut summary,
+                    );
+                }
+                continue;
+            }
+            if relation == RecoveryBootRelation::SameBoot
+                && conflicts.contains(&record.lifecycle_id)
+            {
+                quarantine_record(
+                    ledger,
+                    &record.lifecycle_id,
+                    StartupRecoveryFailure::PersistentRecordConflict,
+                    &mut summary,
+                );
+                continue;
+            }
             if relation == RecoveryBootRelation::SameBoot
                 && matches!(
                     persisted_decision(&record),
@@ -80,7 +108,12 @@ impl<'a> StartupRecoveryCoordinator<'a> {
                     if ledger.resolve_and_remove(&record.lifecycle_id).is_ok() {
                         summary.free += 1;
                     } else {
-                        summary.quarantined += 1;
+                        quarantine_record(
+                            ledger,
+                            &record.lifecycle_id,
+                            StartupRecoveryFailure::UnsupportedRehydration,
+                            &mut summary,
+                        );
                     }
                 }
                 StartupRecoveryDecision::ClearPreviousBootRecord => {
@@ -90,11 +123,23 @@ impl<'a> StartupRecoveryCoordinator<'a> {
                     {
                         summary.free += 1;
                     } else {
-                        summary.quarantined += 1;
+                        quarantine_record(
+                            ledger,
+                            &record.lifecycle_id,
+                            StartupRecoveryFailure::PreviousBootConflict,
+                            &mut summary,
+                        );
                     }
                 }
-                StartupRecoveryDecision::Quarantine(_) => summary.quarantined += 1,
-                _ => summary.quarantined += 1,
+                StartupRecoveryDecision::Quarantine(reason) => {
+                    quarantine_record(ledger, &record.lifecycle_id, reason, &mut summary)
+                }
+                _ => quarantine_record(
+                    ledger,
+                    &record.lifecycle_id,
+                    StartupRecoveryFailure::UnsupportedRehydration,
+                    &mut summary,
+                ),
             }
         }
         info!(
@@ -104,6 +149,29 @@ impl<'a> StartupRecoveryCoordinator<'a> {
         );
         summary
     }
+}
+
+fn quarantine_record(
+    ledger: &mut PersistentRecoveryLedger,
+    lifecycle_id: &str,
+    reason: StartupRecoveryFailure,
+    summary: &mut StartupReconciliationSummary,
+) {
+    if ledger.quarantine(lifecycle_id, reason).is_err() {
+        ledger.mark_startup_quarantine();
+        warn!(
+            lifecycle_id,
+            reason = reason.persistent_reason(),
+            "failed to persist startup quarantine"
+        );
+    } else {
+        info!(
+            lifecycle_id,
+            reason = reason.persistent_reason(),
+            "startup quarantine persisted"
+        );
+    }
+    summary.quarantined += 1;
 }
 
 fn persisted_decision(record: &PersistentRecoveryRecord) -> StartupRecoveryDecision {
@@ -122,7 +190,7 @@ fn persisted_decision(record: &PersistentRecoveryRecord) -> StartupRecoveryDecis
     }
 }
 
-fn startup_failure_catalog() -> [StartupRecoveryFailure; 9] {
+fn startup_failure_catalog() -> [StartupRecoveryFailure; 11] {
     [
         StartupRecoveryFailure::PersistentRecordConflict,
         StartupRecoveryFailure::BoundaryIdentityChanged,
@@ -133,6 +201,8 @@ fn startup_failure_catalog() -> [StartupRecoveryFailure; 9] {
         StartupRecoveryFailure::UnknownPayloadScope,
         StartupRecoveryFailure::SystemdOwnerChanged,
         StartupRecoveryFailure::PreviousBootConflict,
+        StartupRecoveryFailure::UnsupportedRehydration,
+        StartupRecoveryFailure::VtDisallocateBusy,
     ]
 }
 
@@ -160,44 +230,4 @@ fn conflicts(records: &[PersistentRecoveryRecord]) -> BTreeSet<String> {
         }
     }
     conflicted
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::os::unix::fs::MetadataExt;
-
-    fn current_identity() -> (u32, u64, (u64, u64), String) {
-        let pid = std::process::id();
-        let stat = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
-        let starttime = stat
-            .rsplit_once(") ")
-            .unwrap()
-            .1
-            .split_whitespace()
-            .nth(19)
-            .unwrap()
-            .parse()
-            .unwrap();
-        let executable = fs::metadata(format!("/proc/{pid}/exe")).unwrap();
-        let cgroup = fs::read_to_string(format!("/proc/{pid}/cgroup"))
-            .unwrap()
-            .lines()
-            .find_map(|line| line.strip_prefix("0::").map(str::to_owned))
-            .unwrap();
-        (pid, starttime, (executable.dev(), executable.ino()), cgroup)
-    }
-
-    #[test]
-    fn current_process_rehydrates_only_with_all_identity_fields() {
-        let (pid, starttime, executable, cgroup) = current_identity();
-        assert!(matches!(
-            rehydrate_process_identity(pid, Some(starttime), Some(executable), Some(&cgroup)),
-            PersistedProcessIdentity::OriginalStillAlive { .. }
-        ));
-        assert!(matches!(
-            rehydrate_process_identity(pid, Some(starttime + 1), Some(executable), Some(&cgroup)),
-            PersistedProcessIdentity::PidReused
-        ));
-    }
 }

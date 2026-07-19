@@ -97,6 +97,8 @@ mod startup_process;
 mod startup_same_boot;
 mod startup_same_boot_logind;
 mod startup_same_boot_support;
+#[cfg(test)]
+mod startup_tests;
 mod systemd_dbus;
 mod systemd_pin;
 mod systemd_rehydrate;

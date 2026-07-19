@@ -29,7 +29,19 @@ pub fn build_worker_session_launcher(config: &Config) -> Result<WorkerSessionLau
         Duration::from_secs(config.session.worker_timeout_seconds),
         real_graphical_gate_environment(),
     )
-    .map_err(|_| NiralisdError::InvalidWorkerPath(config.session.worker_path.clone()))
+    .map_err(|error| map_worker_launcher_error(error, &config.session.worker_path))
+}
+
+fn map_worker_launcher_error(
+    error: niralis_session::SessionError,
+    worker_path: &Path,
+) -> NiralisdError {
+    match error {
+        niralis_session::SessionError::PersistentRecoveryUnavailable => {
+            NiralisdError::PersistentRecoveryUnavailable
+        }
+        _ => NiralisdError::InvalidWorkerPath(worker_path.to_path_buf()),
+    }
 }
 
 #[cfg(test)]

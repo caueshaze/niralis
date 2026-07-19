@@ -27,6 +27,25 @@ pub(crate) enum StartupRecoveryFailure {
     LogindIdentityChanged,
     PreviousBootConflict,
     UnknownPayloadScope,
+    VtDisallocateBusy,
+}
+
+impl StartupRecoveryFailure {
+    pub(crate) const fn persistent_reason(self) -> &'static str {
+        match self {
+            Self::UnsupportedRehydration => "unsupported_rehydration",
+            Self::PersistentRecordConflict => "persistent_record_conflict",
+            Self::BoundaryIdentityChanged => "boundary_identity_changed",
+            Self::WorkerIdentityIndeterminate => "worker_identity_indeterminate",
+            Self::LeaderIdentityIndeterminate => "leader_identity_indeterminate",
+            Self::SystemdOwnerChanged => "systemd_owner_changed",
+            Self::LogindOwnerChanged => "logind_owner_changed",
+            Self::LogindIdentityChanged => "logind_identity_changed",
+            Self::PreviousBootConflict => "previous_boot_conflict",
+            Self::UnknownPayloadScope => "unknown_payload_scope",
+            Self::VtDisallocateBusy => "vt_disallocate_busy",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,6 +141,34 @@ pub(crate) enum SupervisorRecoveryError {
     VtActivationFailed(i32),
     VtDisallocateBusy,
     VtDisallocateFailed(i32),
+    PersistentRecordConflict,
+    WorkerIdentityIndeterminate,
+    LeaderIdentityIndeterminate,
+    SystemdOwnerChanged,
+    LogindOwnerChanged,
+    PreviousBootConflict,
+    UnknownPayloadScope,
+    UnsupportedStartupRecovery,
+}
+
+impl SupervisorRecoveryError {
+    pub(crate) fn from_persistent_quarantine(reason: Option<&str>, state: &str) -> Self {
+        match reason {
+            Some("persistent_record_conflict") => Self::PersistentRecordConflict,
+            Some("boundary_identity_changed") => Self::BoundaryIdentityChanged,
+            Some("worker_identity_indeterminate") => Self::WorkerIdentityIndeterminate,
+            Some("leader_identity_indeterminate") => Self::LeaderIdentityIndeterminate,
+            Some("systemd_owner_changed") => Self::SystemdOwnerChanged,
+            Some("logind_owner_changed") => Self::LogindOwnerChanged,
+            Some("logind_identity_changed") => Self::LogindIdentityChanged,
+            Some("previous_boot_conflict") => Self::PreviousBootConflict,
+            Some("unknown_payload_scope") => Self::UnknownPayloadScope,
+            Some("vt_disallocate_busy") | None if state == "vt_disallocate_failed_busy" => {
+                Self::VtDisallocateBusy
+            }
+            _ => Self::UnsupportedStartupRecovery,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

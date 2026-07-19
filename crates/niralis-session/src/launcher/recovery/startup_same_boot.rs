@@ -71,10 +71,7 @@ pub(crate) fn reconcile_same_boot_record(
             )
         }
     };
-    if matches!(
-        leader,
-        PersistedProcessIdentity::PidReused | PersistedProcessIdentity::Indeterminate
-    ) {
+    if matches!(leader, PersistedProcessIdentity::Indeterminate) {
         return StartupRecoveryOutcome::Quarantined(
             StartupRecoveryFailure::LeaderIdentityIndeterminate,
         );
@@ -150,8 +147,8 @@ pub(crate) fn reconcile_same_boot_record(
     {
         return StartupRecoveryOutcome::Quarantined(StartupRecoveryFailure::UnsupportedRehydration);
     }
-    if reconcile_logind_and_vt(record, ledger, &logind_watch).is_err() {
-        return StartupRecoveryOutcome::Quarantined(StartupRecoveryFailure::LogindIdentityChanged);
+    if let Err(reason) = reconcile_logind_and_vt(record, ledger, &logind_watch) {
+        return StartupRecoveryOutcome::Quarantined(reason);
     }
     StartupRecoveryOutcome::Free
 }

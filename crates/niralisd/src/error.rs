@@ -37,6 +37,8 @@ pub enum NiralisdError {
     InvalidWorkerPath(PathBuf),
     #[error("invalid worker timeout: {0}")]
     InvalidWorkerTimeout(u64),
+    #[error("persistent recovery ledger is unavailable")]
+    PersistentRecoveryUnavailable,
     #[error("worker binary is unavailable: {0}")]
     WorkerUnavailable(PathBuf),
     #[error("worker binary is untrusted: {0}")]

@@ -74,6 +74,7 @@ impl SupervisorLoopState {
             runtime_id,
         };
         self.persist_transition(&worker_id, "started")?;
+        info!(worker_id, "worker reached durable started state");
         self.children.push(SupervisedWorker {
             record: entry.record,
             child: entry.child,

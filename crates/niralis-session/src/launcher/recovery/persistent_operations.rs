@@ -28,6 +28,23 @@ impl PersistentRecoveryLedger {
         )
     }
 
+    pub(crate) fn operation_failed(
+        &mut self,
+        id: &str,
+        operation: &str,
+        attempt_id: u64,
+        failure_class: i32,
+    ) -> io::Result<()> {
+        self.update_operation(
+            id,
+            operation,
+            DurableOperationState::Failed {
+                attempt_id,
+                failure_class,
+            },
+        )
+    }
+
     fn update_operation(
         &mut self,
         id: &str,

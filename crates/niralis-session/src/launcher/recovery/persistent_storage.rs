@@ -1,7 +1,7 @@
 use super::*;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 #[derive(Debug)]
@@ -100,6 +100,21 @@ impl PersistentRecoveryLedger {
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         self.commit(next)
     }
+    pub(crate) fn quarantine(
+        &mut self,
+        id: &str,
+        reason: StartupRecoveryFailure,
+    ) -> io::Result<()> {
+        let mut next = self
+            .records
+            .get(id)
+            .cloned()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "recovery record"))?;
+        next.transition("quarantined")
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        next.quarantine_reason = Some(reason.persistent_reason().to_owned());
+        self.commit(next)
+    }
     pub(crate) fn resolve_and_remove(&mut self, id: &str) -> io::Result<()> {
         self.resolve_state_and_remove(id, "record_resolved")
     }
@@ -115,6 +130,22 @@ impl PersistentRecoveryLedger {
         next.transition(state)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         self.commit(next)?;
+        self.remove_resolved(id)
+    }
+    pub(crate) fn remove_resolved(&mut self, id: &str) -> io::Result<()> {
+        let record = self
+            .records
+            .get(id)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "recovery record"))?;
+        if !matches!(
+            record.state.as_str(),
+            "record_resolved" | "cleared_by_boot_boundary"
+        ) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "recovery record is not resolved",
+            ));
+        }
         fs::remove_file(self.record_path(id)?)?;
         sync_directory(&self.directory)?;
         self.records.remove(id);
@@ -143,6 +174,12 @@ impl PersistentRecoveryLedger {
         drop(file);
         fs::rename(&tmp, &path)?;
         sync_directory(&self.directory)?;
+        info!(
+            lifecycle_id = %record.lifecycle_id,
+            sequence = record.sequence,
+            state = %record.state,
+            "durable recovery transition committed"
+        );
         self.records.insert(record.lifecycle_id.clone(), record);
         Ok(())
     }
@@ -150,101 +187,4 @@ impl PersistentRecoveryLedger {
         validate_lifecycle_id(id)?;
         Ok(self.directory.join(format!("{id}.json")))
     }
-}
-fn create_secure_directory(path: &Path) -> io::Result<()> {
-    fs::create_dir_all(path)?;
-    let metadata = fs::symlink_metadata(path)?;
-    if !metadata.is_dir()
-        || metadata.uid() != 0 && !allow_non_root_test_storage()
-        || metadata.permissions().mode() & 0o077 != 0 && !allow_non_root_test_storage()
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "recovery directory is not secure",
-        ));
-    }
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
-}
-fn create_lock_parent(path: &Path) -> io::Result<()> {
-    if !path.exists() {
-        fs::create_dir_all(path)?;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
-    }
-    let metadata = fs::symlink_metadata(path)?;
-    if !metadata.is_dir() || metadata.uid() != 0 && !allow_non_root_test_storage() {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "recovery lock parent is not secure",
-        ));
-    }
-    Ok(())
-}
-fn load_records(
-    directory: &Path,
-) -> io::Result<(BTreeMap<String, PersistentRecoveryRecord>, bool)> {
-    let mut result = BTreeMap::new();
-    let mut quarantined = false;
-    for entry in fs::read_dir(directory)? {
-        let entry = entry?;
-        let ty = entry.file_type()?;
-        let name = entry.file_name();
-        if !name.to_string_lossy().ends_with(".json") {
-            continue;
-        }
-        if !ty.is_file() {
-            quarantined = true;
-            continue;
-        }
-        let metadata = entry.metadata()?;
-        if metadata.uid() != 0 && !allow_non_root_test_storage()
-            || metadata.permissions().mode() & 0o077 != 0
-        {
-            quarantined = true;
-            continue;
-        }
-        if metadata.len() > MAX_RECOVERY_RECORD_BYTES {
-            quarantined = true;
-            continue;
-        }
-        let mut file = File::open(entry.path())?;
-        let mut bytes = Vec::with_capacity(metadata.len() as usize);
-        file.read_to_end(&mut bytes)?;
-        let Ok(record) = serde_json::from_slice::<PersistentRecoveryRecord>(&bytes) else {
-            quarantined = true;
-            continue;
-        };
-        if validate_record(&record).is_err() {
-            quarantined = true;
-            continue;
-        }
-        if result.insert(record.lifecycle_id.clone(), record).is_some() {
-            quarantined = true;
-        }
-    }
-    let too_many = result.len() > MAX_RECOVERY_RECORDS;
-    Ok((result, quarantined || too_many))
-}
-fn validate_record(record: &PersistentRecoveryRecord) -> io::Result<()> {
-    if record.format_version != RECOVERY_FORMAT_VERSION
-        || record.lifecycle_id.is_empty()
-        || record.sequence == 0
-        || record.created_boot_id.is_empty()
-        || record.state.is_empty()
-        || record.seat.is_empty()
-        || record.worker_pid == 0
-        || record.launcher_pid == 0
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "invalid recovery record",
-        ));
-    }
-    validate_lifecycle_id(&record.lifecycle_id)
-}
-fn sync_directory(path: &Path) -> io::Result<()> {
-    File::open(path)?.sync_all()
-}
-
-fn allow_non_root_test_storage() -> bool {
-    cfg!(test) || cfg!(feature = "supervisor-test-fixtures")
 }

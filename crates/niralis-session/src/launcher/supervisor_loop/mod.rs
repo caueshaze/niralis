@@ -52,7 +52,10 @@ impl SupervisorLoopState {
                         SeatLifecycle::Quarantined {
                             lifecycle_id: record.lifecycle_id.clone(),
                             stage: EmergencyRecoveryStage::RecoveryRecordValidation,
-                            reason: SupervisorRecoveryError::InvalidRecord,
+                            reason: SupervisorRecoveryError::from_persistent_quarantine(
+                                record.quarantine_reason.as_deref(),
+                                &record.state,
+                            ),
                         }
                     })
                     .or_else(|| {
@@ -61,15 +64,15 @@ impl SupervisorLoopState {
                             .then(|| SeatLifecycle::Quarantined {
                                 lifecycle_id: "startup-quarantine".to_owned(),
                                 stage: EmergencyRecoveryStage::RecoveryRecordValidation,
-                                reason: SupervisorRecoveryError::InvalidRecord,
+                                reason: SupervisorRecoveryError::UnknownPayloadScope,
                             })
                             .or_else(|| {
                                 ledger
                                     .seat_startup_quarantined("seat0")
                                     .then(|| SeatLifecycle::Quarantined {
-                                        lifecycle_id: "unknown-payload-seat0".to_owned(),
-                                        stage: EmergencyRecoveryStage::RecoveryRecordValidation,
-                                        reason: SupervisorRecoveryError::InvalidRecord,
+                                    lifecycle_id: "unknown-payload-seat0".to_owned(),
+                                    stage: EmergencyRecoveryStage::RecoveryRecordValidation,
+                                    reason: SupervisorRecoveryError::UnknownPayloadScope,
                                     })
                             })
                     })

@@ -197,9 +197,13 @@ if "$install_selinux"; then
         [[ -e "$daemon_path" ]] && relabel_paths+=("$daemon_path")
     done
     "${root[@]}" restorecon -Rv "${relabel_paths[@]}"
+    "${root[@]}" matchpathcon -V /var/lib/niralis /var/lib/niralis/recovery
 else
     printf '%s\n' 'SELinux installation skipped (--no-selinux/default).'
 fi
+
+ledger_metadata="$("${root[@]}" stat -c '%U:%G %a' /var/lib/niralis/recovery)"
+[[ "$ledger_metadata" == "root:root 700" ]] || die "unexpected ledger ownership or mode: $ledger_metadata"
 
 "${root[@]}" systemctl daemon-reload
 
@@ -214,11 +218,16 @@ if "$restart"; then
     fi
     "${root[@]}" systemctl reset-failed niralisd.service
     "${root[@]}" systemctl restart niralisd.service
+    if ! "${root[@]}" systemctl is-active --quiet niralisd.service; then
+        "${root[@]}" systemctl status niralisd.service --no-pager -l || true
+        die "niralisd did not become active after restart"
+    fi
 fi
 
 printf 'Niralis installation complete.\n'
 printf 'Installed worker: %s\n' /usr/libexec/niralis-session-worker
 printf 'Ledger directory: %s\n' /var/lib/niralis/recovery
+printf 'Ledger ownership/mode: %s\n' "$ledger_metadata"
 printf 'SELinux: %s\n' "$([[ "$install_selinux" == true ]] && printf enabled || printf skipped)"
 if "$restart"; then
     printf '%s\n' 'Service restart requested; inspect with: systemctl status niralisd.service --no-pager -l'
