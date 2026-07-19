@@ -211,13 +211,21 @@ if "$restart"; then
     if [[ ! -f /etc/niralis/niralis.toml ]]; then
         die "not restarting: /etc/niralis/niralis.toml does not exist"
     fi
+    load_state="$("${root[@]}" systemctl show niralisd.service -p LoadState --value 2>/dev/null || true)"
+    [[ "$load_state" == "loaded" ]] || die "niralisd.service is not loaded after daemon-reload (LoadState=${load_state:-unknown})"
     configured_exec="$("${root[@]}" systemctl show niralisd.service -p ExecStart --value)"
     if [[ "$configured_exec" != *"path=/usr/bin/setpriv "* ]] ||
         [[ "$configured_exec" != *"--inh-caps=-all -- /usr/sbin/niralisd --config /etc/niralis/niralis.toml"* ]]; then
         die "not restarting: niralisd.service ExecStart is overridden; inspect with systemctl cat niralisd.service"
     fi
-    "${root[@]}" systemctl reset-failed niralisd.service
-    "${root[@]}" systemctl restart niralisd.service
+    # reset-failed is only cleanup. A disabled unit can still be started
+    # manually, so do not make this optional cleanup block installation.
+    "${root[@]}" systemctl reset-failed niralisd.service || true
+    if "${root[@]}" systemctl is-active --quiet niralisd.service; then
+        "${root[@]}" systemctl restart niralisd.service
+    else
+        "${root[@]}" systemctl start niralisd.service
+    fi
     if ! "${root[@]}" systemctl is-active --quiet niralisd.service; then
         "${root[@]}" systemctl status niralisd.service --no-pager -l || true
         die "niralisd did not become active after restart"
