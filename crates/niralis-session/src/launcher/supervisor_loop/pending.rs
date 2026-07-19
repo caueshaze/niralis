@@ -74,6 +74,7 @@ impl SupervisorLoopState {
         identity: crate::PayloadScopeIdentity,
         registration_nonce: String,
     ) -> Result<(), SessionError> {
+        let ledger = self.ledger.clone();
         let entry = self
             .pending
             .iter_mut()
@@ -101,6 +102,16 @@ impl SupervisorLoopState {
             &previous_vt,
         ) {
             Ok(payload) => {
+                let durable = PersistentRecoveryRecord::prepared(
+                    &entry.record.lifecycle_id,
+                    worker_pid,
+                    entry.record.launcher_pid,
+                    &entry.record.requested_username,
+                    &entry.record.session_name,
+                    &previous_vt,
+                    &payload,
+                );
+                persist_new_record_to(&ledger, durable)?;
                 entry.record.state = SupervisorRecoveryState::PayloadPrepared {
                     payload,
                     registration_nonce,
@@ -153,6 +164,7 @@ impl SupervisorLoopState {
                     payload,
                     registration_nonce,
                 };
+                self.persist_transition(worker_id, "payload_registered")?;
                 Ok(())
             }
             state => {
@@ -161,4 +173,46 @@ impl SupervisorLoopState {
             }
         }
     }
+}
+
+impl SupervisorLoopState {
+    pub(super) fn persist_transition(
+        &self,
+        lifecycle_id: &str,
+        state: &str,
+    ) -> Result<(), SessionError> {
+        let Some(ledger) = &self.ledger else {
+            return Ok(());
+        };
+        ledger
+            .lock()
+            .map_err(|_| SessionError::PersistentRecoveryUnavailable)?
+            .transition(lifecycle_id, state)
+            .map_err(|_| SessionError::PersistentRecoveryUnavailable)
+    }
+
+    pub(super) fn persist_resolve(&self, lifecycle_id: &str) -> Result<(), SessionError> {
+        let Some(ledger) = &self.ledger else {
+            return Ok(());
+        };
+        ledger
+            .lock()
+            .map_err(|_| SessionError::PersistentRecoveryUnavailable)?
+            .resolve_and_remove(lifecycle_id)
+            .map_err(|_| SessionError::PersistentRecoveryUnavailable)
+    }
+}
+
+fn persist_new_record_to(
+    ledger: &Option<Arc<Mutex<PersistentRecoveryLedger>>>,
+    record: PersistentRecoveryRecord,
+) -> Result<(), SessionError> {
+    let Some(ledger) = ledger else {
+        return Ok(());
+    };
+    ledger
+        .lock()
+        .map_err(|_| SessionError::PersistentRecoveryUnavailable)?
+        .create(record)
+        .map_err(|_| SessionError::PersistentRecoveryUnavailable)
 }

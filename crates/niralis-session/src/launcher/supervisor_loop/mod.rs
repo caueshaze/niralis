@@ -6,6 +6,7 @@ mod running;
 pub(super) mod support;
 use running::RunningRegistration;
 use support::*;
+use tracing::info;
 
 pub(super) struct SupervisorLoopState {
     children: Vec<SupervisedWorker>,
@@ -13,16 +14,74 @@ pub(super) struct SupervisorLoopState {
     quarantined: Vec<SupervisorSessionRecoveryRecord>,
     seat: SeatLifecycle,
     recovery_provider: Arc<dyn SupervisorRecoveryProvider>,
+    ledger: Option<Arc<Mutex<PersistentRecoveryLedger>>>,
 }
 
 impl SupervisorLoopState {
-    fn new(recovery_provider: Arc<dyn SupervisorRecoveryProvider>) -> Self {
+    fn new(
+        recovery_provider: Arc<dyn SupervisorRecoveryProvider>,
+        ledger: Option<Arc<Mutex<PersistentRecoveryLedger>>>,
+    ) -> Self {
+        if let Some(record) = ledger
+            .as_ref()
+            .and_then(|value| value.lock().ok())
+            .and_then(|value| value.records().next().cloned())
+        {
+            let reconciling = SeatLifecycle::Reconciling {
+                lifecycle_id: record.lifecycle_id,
+                stage: "startup_reconciliation",
+            };
+            info!(?reconciling, "seat entered startup reconciliation");
+        }
+        let seat = ledger
+            .as_ref()
+            .and_then(|ledger| ledger.lock().ok())
+            .and_then(|ledger| {
+                ledger
+                    .records()
+                    .next()
+                    .map(|record| {
+                        match PersistentRecoveryLedger::boot_relation(record) {
+                            RecoveryBootRelation::SameBoot => {
+                                info!(lifecycle_id = %record.lifecycle_id, "recovery record belongs to current boot");
+                            }
+                            RecoveryBootRelation::PreviousBoot => {
+                                info!(lifecycle_id = %record.lifecycle_id, "recovery record belongs to previous boot");
+                            }
+                        }
+                        SeatLifecycle::Quarantined {
+                            lifecycle_id: record.lifecycle_id.clone(),
+                            stage: EmergencyRecoveryStage::RecoveryRecordValidation,
+                            reason: SupervisorRecoveryError::InvalidRecord,
+                        }
+                    })
+                    .or_else(|| {
+                        ledger
+                            .startup_quarantined()
+                            .then(|| SeatLifecycle::Quarantined {
+                                lifecycle_id: "startup-quarantine".to_owned(),
+                                stage: EmergencyRecoveryStage::RecoveryRecordValidation,
+                                reason: SupervisorRecoveryError::InvalidRecord,
+                            })
+                            .or_else(|| {
+                                ledger
+                                    .seat_startup_quarantined("seat0")
+                                    .then(|| SeatLifecycle::Quarantined {
+                                        lifecycle_id: "unknown-payload-seat0".to_owned(),
+                                        stage: EmergencyRecoveryStage::RecoveryRecordValidation,
+                                        reason: SupervisorRecoveryError::InvalidRecord,
+                                    })
+                            })
+                    })
+            })
+            .unwrap_or(SeatLifecycle::Free);
         Self {
             children: Vec::new(),
             pending: Vec::new(),
             quarantined: Vec::new(),
-            seat: SeatLifecycle::Free,
+            seat,
             recovery_provider,
+            ledger,
         }
     }
 
@@ -160,7 +219,24 @@ impl WorkerSupervisor {
         recovery_provider: Arc<dyn SupervisorRecoveryProvider>,
     ) -> Self {
         let (sender, receiver) = mpsc::channel();
-        let join = thread::spawn(move || SupervisorLoopState::new(recovery_provider).run(receiver));
+        let join =
+            thread::spawn(move || SupervisorLoopState::new(recovery_provider, None).run(receiver));
+        Self {
+            sender,
+            join: Mutex::new(Some(join)),
+        }
+    }
+
+    pub(super) fn new_with_persistent_ledger(
+        recovery_provider: Arc<dyn SupervisorRecoveryProvider>,
+        mut ledger: PersistentRecoveryLedger,
+    ) -> Self {
+        StartupRecoveryCoordinator::new(recovery_provider.as_ref()).reconcile(&mut ledger);
+        let (sender, receiver) = mpsc::channel();
+        let ledger = Arc::new(Mutex::new(ledger));
+        let join = thread::spawn(move || {
+            SupervisorLoopState::new(recovery_provider, Some(ledger)).run(receiver)
+        });
         Self {
             sender,
             join: Mutex::new(Some(join)),

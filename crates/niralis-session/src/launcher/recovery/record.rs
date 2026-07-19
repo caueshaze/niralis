@@ -180,6 +180,10 @@ impl SupervisorSessionRecoveryRecord {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SeatLifecycle {
     Free,
+    Reconciling {
+        lifecycle_id: String,
+        stage: &'static str,
+    },
     Active {
         lifecycle_id: String,
     },

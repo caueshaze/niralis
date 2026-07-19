@@ -64,6 +64,7 @@ impl SupervisorLoopState {
                     }
                 };
                 entry.record.state = SupervisorRecoveryState::PayloadReleased { payload };
+                self.persist_transition(&token.worker_id, "payload_boundary_proven_empty")?;
                 Ok(())
             }
             crate::ScopeReleaseVerification::RecoveryRequired(reason) => {
@@ -109,6 +110,7 @@ impl SupervisorLoopState {
                 .is_ok()
             };
         if expected_cleanup_verified {
+            let _ = self.persist_resolve(&worker_id);
             self.seat = SeatLifecycle::Free;
             return Ok(());
         }
@@ -126,6 +128,7 @@ impl SupervisorLoopState {
         status: ExitStatus,
     ) -> Result<(), SessionError> {
         let classification = mark_worker_exited_unexpectedly(&mut entry.record, status);
+        let _ = self.persist_transition(&entry.record.lifecycle_id, "emergency_recovery_started");
         self.seat = SeatLifecycle::Recovering {
             lifecycle_id: entry.record.lifecycle_id.clone(),
             phase: entry.record.phase_name(),
@@ -136,10 +139,17 @@ impl SupervisorLoopState {
         {
             outcome @ SupervisorEmergencyRecoveryOutcome::Recovered { .. } => {
                 entry.record.state = SupervisorRecoveryState::Recovered { outcome };
+                self.persist_resolve(&entry.record.lifecycle_id)?;
                 self.seat = SeatLifecycle::Free;
                 Ok(())
             }
             SupervisorEmergencyRecoveryOutcome::Quarantined { stage, reason } => {
+                if matches!(reason, SupervisorRecoveryError::VtDisallocateBusy) {
+                    let _ = self.persist_transition(
+                        &entry.record.lifecycle_id,
+                        "vt_disallocate_failed_busy",
+                    );
+                }
                 entry.record.quarantine(stage, reason.clone());
                 self.seat = SeatLifecycle::Quarantined {
                     lifecycle_id: entry.record.lifecycle_id.clone(),

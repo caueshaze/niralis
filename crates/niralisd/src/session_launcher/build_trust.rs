@@ -22,7 +22,7 @@ pub fn build_worker_session_launcher(config: &Config) -> Result<WorkerSessionLau
         validate_trusted_executable(&config.session.child_path, ExecutableRole::SessionChild)?;
         validate_trusted_executable(&config.session.probe_path, ExecutableRole::SessionProbe)?;
     }
-    WorkerSessionLauncher::new(
+    new_worker_launcher(
         config.session.worker_path.clone(),
         config.session.child_path.clone(),
         config.session.probe_path.clone(),
@@ -30,6 +30,28 @@ pub fn build_worker_session_launcher(config: &Config) -> Result<WorkerSessionLau
         real_graphical_gate_environment(),
     )
     .map_err(|_| NiralisdError::InvalidWorkerPath(config.session.worker_path.clone()))
+}
+
+#[cfg(test)]
+fn new_worker_launcher(
+    worker_path: std::path::PathBuf,
+    child_path: std::path::PathBuf,
+    probe_path: std::path::PathBuf,
+    timeout: Duration,
+    environment: Vec<(String, String)>,
+) -> std::result::Result<WorkerSessionLauncher, niralis_session::SessionError> {
+    WorkerSessionLauncher::new(worker_path, child_path, probe_path, timeout, environment)
+}
+
+#[cfg(not(test))]
+fn new_worker_launcher(
+    worker_path: std::path::PathBuf,
+    child_path: std::path::PathBuf,
+    probe_path: std::path::PathBuf,
+    timeout: Duration,
+    environment: Vec<(String, String)>,
+) -> std::result::Result<WorkerSessionLauncher, niralis_session::SessionError> {
+    WorkerSessionLauncher::new_persistent(worker_path, child_path, probe_path, timeout, environment)
 }
 
 fn real_graphical_gate_environment() -> Vec<(String, String)> {

@@ -6,10 +6,24 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SupervisorFixtureBoundaryMode {
     AlreadyEmpty,
+    EmptyBoundary,
+    RestartReconciles,
+    WorkerAliveHandoff,
+    PayloadRecovered,
+    EbusyQuarantine,
     PopulatedThenRecovered,
     Replacement,
     BusLoss,
     Timeout,
+    UnknownScope,
+    UnknownScopeKnownSeat,
+    ScopeRecordConflict,
+    SystemdOwnerBeforeKill,
+    SystemdOwnerDuringKill,
+    SystemdOwnerBeforeProof,
+    LogindOwnerBeforeTerminate,
+    LogindOwnerDuringCleanup,
+    LogindOwnerBeforeAbsence,
 }
 #[derive(Debug, Default)]
 pub(crate) struct SupervisorFixtureCounters {

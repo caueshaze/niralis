@@ -28,4 +28,6 @@ pub enum SessionError {
     WorkerRecoveryIncomplete,
     #[error("session worker died and was recovered by the supervisor")]
     WorkerDiedAndWasRecovered,
+    #[error("persistent recovery ledger is unavailable")]
+    PersistentRecoveryUnavailable,
 }

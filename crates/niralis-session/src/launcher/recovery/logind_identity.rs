@@ -28,6 +28,45 @@ pub(crate) fn resolve_logind_identity(
     )
 }
 
+pub(crate) fn logind_session_exists(id: &str) -> Result<bool, SupervisorRecoveryError> {
+    let connection = zbus::blocking::connection::Builder::system()
+        .map_err(|_| SupervisorRecoveryError::LogindUnavailable)?
+        .method_timeout(Duration::from_secs(2))
+        .build()
+        .map_err(|_| SupervisorRecoveryError::LogindUnavailable)?;
+    let manager = zbus::blocking::Proxy::new(
+        &connection,
+        LOGIND_DESTINATION,
+        LOGIND_MANAGER_PATH,
+        LOGIND_MANAGER_INTERFACE,
+    )
+    .map_err(|_| SupervisorRecoveryError::LogindUnavailable)?;
+    match manager.call::<_, _, OwnedObjectPath>("GetSession", &(id,)) {
+        Ok(_) => Ok(true),
+        Err(zbus::Error::MethodError(name, _, _))
+            if matches!(
+                name.as_str(),
+                "org.freedesktop.login1.NoSuchSession" | "org.freedesktop.DBus.Error.UnknownObject"
+            ) =>
+        {
+            Ok(false)
+        }
+        Err(_) => Err(SupervisorRecoveryError::LogindUnavailable),
+    }
+}
+
+pub(crate) fn logind_owner() -> Result<String, SupervisorRecoveryError> {
+    let connection = zbus::blocking::connection::Builder::system()
+        .map_err(|_| SupervisorRecoveryError::LogindUnavailable)?
+        .method_timeout(Duration::from_secs(2))
+        .build()
+        .map_err(|_| SupervisorRecoveryError::LogindUnavailable)?;
+    let dbus = zbus::blocking::Proxy::new(&connection, DBUS_DESTINATION, DBUS_PATH, DBUS_INTERFACE)
+        .map_err(|_| SupervisorRecoveryError::LogindUnavailable)?;
+    dbus.call("GetNameOwner", &(LOGIND_DESTINATION,))
+        .map_err(|_| SupervisorRecoveryError::LogindUnavailable)
+}
+
 pub(crate) fn resolve_logind_identity_by_leader(
     worker_pid: u32,
     expected_desktop: &str,

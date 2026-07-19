@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::BTreeSet;
 
 #[cfg(any(
     test,
@@ -15,6 +16,7 @@ pub(crate) struct SupervisorFixtureRecoveryProvider {
     pub(crate) completion_event: Arc<OwnedFd>,
     pub(crate) prepare_gate_enabled: std::sync::atomic::AtomicBool,
     pub(crate) prepare_gate: Arc<OwnedFd>,
+    pub(crate) operation_log: Option<std::path::PathBuf>,
 }
 
 #[cfg(any(
@@ -35,6 +37,7 @@ impl SupervisorFixtureRecoveryProvider {
             completion_event: Arc::new(completion_event),
             prepare_gate_enabled: std::sync::atomic::AtomicBool::new(false),
             prepare_gate: Arc::new(prepare_gate),
+            operation_log: None,
         }
     }
 }
@@ -45,6 +48,116 @@ impl SupervisorFixtureRecoveryProvider {
     feature = "supervisor-test-fixtures"
 ))]
 impl SupervisorRecoveryProvider for SupervisorFixtureRecoveryProvider {
+    fn inventory_unknown_scopes(
+        &self,
+        _records: &[PersistentRecoveryRecord],
+    ) -> Result<UnknownScopeInventory, StartupRecoveryFailure> {
+        let unknown = matches!(
+            self.mode,
+            SupervisorFixtureBoundaryMode::UnknownScope
+                | SupervisorFixtureBoundaryMode::UnknownScopeKnownSeat
+        );
+        if unknown {
+            fixture_event(self, "quarantine:unknown_scope");
+        }
+        if matches!(
+            self.mode,
+            SupervisorFixtureBoundaryMode::UnknownScopeKnownSeat
+        ) {
+            Ok(UnknownScopeInventory::KnownSeats(BTreeSet::from([
+                "seat0".to_owned()
+            ])))
+        } else if unknown {
+            Ok(UnknownScopeInventory::GlobalQuarantine)
+        } else {
+            Ok(UnknownScopeInventory::None)
+        }
+    }
+
+    fn reconcile_startup(
+        &self,
+        record: &PersistentRecoveryRecord,
+        relation: RecoveryBootRelation,
+        ledger: &mut PersistentRecoveryLedger,
+    ) -> StartupRecoveryOutcome {
+        match relation {
+            RecoveryBootRelation::PreviousBoot => StartupRecoveryOutcome::Free,
+            RecoveryBootRelation::SameBoot => {
+                fixture_event(self, "startup:same_boot");
+                fixture_event(
+                    self,
+                    match self.mode {
+                        SupervisorFixtureBoundaryMode::PayloadRecovered => "mode:payload_recovered",
+                        SupervisorFixtureBoundaryMode::WorkerAliveHandoff => "mode:worker_alive",
+                        SupervisorFixtureBoundaryMode::Replacement => "mode:replacement",
+                        _ => "mode:other",
+                    },
+                );
+                if let Some(failure) = fixture_owner_failure(self.mode) {
+                    let watch = OwnerWatch::scripted();
+                    watch.invalidate_for_test();
+                    if watch.stable().is_err() {
+                        fixture_event(self, "owner_change:invalidated");
+                    }
+                    return StartupRecoveryOutcome::Quarantined(failure);
+                }
+                if matches!(
+                    record.operation_ledger.payload_kill,
+                    DurableOperationState::IntentPersisted { .. }
+                        | DurableOperationState::Indeterminate { .. }
+                ) && !matches!(self.mode, SupervisorFixtureBoundaryMode::EmptyBoundary)
+                {
+                    fixture_event(self, "quarantine:indeterminate_payload_kill");
+                    return StartupRecoveryOutcome::Quarantined(
+                        StartupRecoveryFailure::BoundaryIdentityChanged,
+                    );
+                }
+                match self.mode {
+                    SupervisorFixtureBoundaryMode::Replacement => {
+                        fixture_event(self, "quarantine:replacement");
+                        StartupRecoveryOutcome::Quarantined(
+                            StartupRecoveryFailure::BoundaryIdentityChanged,
+                        )
+                    }
+                    SupervisorFixtureBoundaryMode::ScopeRecordConflict => {
+                        fixture_event(self, "quarantine:scope_record_conflict");
+                        StartupRecoveryOutcome::Quarantined(
+                            StartupRecoveryFailure::PersistentRecordConflict,
+                        )
+                    }
+                    SupervisorFixtureBoundaryMode::EbusyQuarantine => {
+                        fixture_event(self, "quarantine:vt_ebusy");
+                        StartupRecoveryOutcome::Quarantined(
+                            StartupRecoveryFailure::UnsupportedRehydration,
+                        )
+                    }
+                    SupervisorFixtureBoundaryMode::WorkerAliveHandoff => {
+                        reconcile_fixture_worker(self, record, ledger);
+                        StartupRecoveryOutcome::Free
+                    }
+                    SupervisorFixtureBoundaryMode::PayloadRecovered => {
+                        if reconcile_fixture_payload(self, record, ledger) {
+                            StartupRecoveryOutcome::Free
+                        } else {
+                            StartupRecoveryOutcome::Quarantined(
+                                StartupRecoveryFailure::LeaderIdentityIndeterminate,
+                            )
+                        }
+                    }
+                    SupervisorFixtureBoundaryMode::AlreadyEmpty
+                    | SupervisorFixtureBoundaryMode::EmptyBoundary
+                    | SupervisorFixtureBoundaryMode::RestartReconciles => {
+                        fixture_event(self, "proof:empty_boundary");
+                        StartupRecoveryOutcome::Free
+                    }
+                    _ => StartupRecoveryOutcome::Quarantined(
+                        StartupRecoveryFailure::UnsupportedRehydration,
+                    ),
+                }
+            }
+        }
+    }
+
     fn capture_previous_vt(
         &self,
         seat: &str,
@@ -64,47 +177,7 @@ impl SupervisorRecoveryProvider for SupervisorFixtureRecoveryProvider {
         _launcher_pid: u32,
         previous_vt: &PreviousVtIdentity,
     ) -> Result<SupervisorPreparedPayload, SupervisorRecoveryError> {
-        use std::sync::atomic::Ordering;
-        if self.prepare_gate_enabled.load(Ordering::SeqCst) {
-            wait_fixture_event(&self.prepare_gate)?;
-        }
-        self.counters.prepares.fetch_add(1, Ordering::SeqCst);
-        Ok(SupervisorPreparedPayload {
-            boundary: Box::new(SupervisorFixtureBoundary {
-                identity: identity.clone(),
-                leader_pid: authoritative_leader_pid,
-                mode: self.mode,
-                counters: Arc::clone(&self.counters),
-                payload_members: Arc::clone(&self.payload_members),
-                completion_event: Arc::clone(&self.completion_event),
-                released: false,
-            }),
-            logind: SupervisorLogindSessionIdentity {
-                id: identity.logind_session_id.clone(),
-                object_path: format!(
-                    "/org/freedesktop/login1/session/{}",
-                    identity.logind_session_id.as_str()
-                ),
-                uid: identity.expected_uid,
-                username: "fixture-user".to_owned(),
-                leader: authoritative_leader_pid,
-                seat: "seat0".to_owned(),
-                vt_number: 2,
-                session_type: "wayland".to_owned(),
-                class: "user".to_owned(),
-                desktop: "niri".to_owned(),
-                state: "active".to_owned(),
-                scope: "session-fixture.scope".to_owned(),
-            },
-            vt: SupervisorVtIdentity {
-                seat: "seat0".to_owned(),
-                number: 2,
-                previous: previous_vt.clone(),
-                device_major: 4,
-                device_minor: 2,
-            },
-            target_gid: 1000,
-        })
+        prepare_fixture_payload(self, identity, authoritative_leader_pid, previous_vt)
     }
 
     fn recover_pre_payload(
@@ -119,15 +192,26 @@ impl SupervisorRecoveryProvider for SupervisorFixtureRecoveryProvider {
 
     fn cleanup_logind(
         &self,
-        _identity: &SupervisorLogindSessionIdentity,
+        identity: &SupervisorLogindSessionIdentity,
     ) -> Result<SupervisorLogindCleanupResult, SupervisorRecoveryError> {
         use std::sync::atomic::Ordering;
         if self.logind_already_gone {
+            fixture_event(self, "logind_already_gone");
             Ok(SupervisorLogindCleanupResult::AlreadyGone)
         } else {
             self.counters
                 .logind_terminations
                 .fetch_add(1, Ordering::SeqCst);
+            fixture_event(
+                self,
+                &format!(
+                    "logind_terminate id={} object_path={} seat={} vt={}",
+                    identity.id.as_str(),
+                    identity.object_path,
+                    identity.seat,
+                    identity.vt_number
+                ),
+            );
             Ok(SupervisorLogindCleanupResult::Removed)
         }
     }
@@ -142,6 +226,7 @@ impl SupervisorRecoveryProvider for SupervisorFixtureRecoveryProvider {
     fn recover_vt(&self, _identity: &SupervisorVtIdentity) -> Result<(), SupervisorRecoveryError> {
         use std::sync::atomic::Ordering;
         self.counters.vt_recoveries.fetch_add(1, Ordering::SeqCst);
+        fixture_event(self, "vt_recovery");
         let result = self.vt_result.clone();
         signal_fixture_completion(&self.completion_event);
         result

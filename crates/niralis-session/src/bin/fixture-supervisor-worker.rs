@@ -17,7 +17,7 @@ fn main() {
 
 fn run() -> Result<(), ()> {
     let request: WorkerEnvelope<WorkerRequest> =
-        read_envelope(&mut std::io::stdin().lock()).map_err(|_| ())?;
+        read_envelope(&mut std::io::stdin().lock()).map_err(|_| fail("request"))?;
     let WorkerRequest::PamSession {
         request,
         control_path,
@@ -27,10 +27,11 @@ fn run() -> Result<(), ()> {
     else {
         return Err(());
     };
-    let listener = UnixListener::bind(&control_path).map_err(|_| ())?;
-    let mut leader = spawn_payload()?;
-    let mut remaining_member = spawn_payload()?;
-    let logind_session_id = LogindSessionId::new("fixture-c1".to_owned()).ok_or(())?;
+    let listener = UnixListener::bind(&control_path).map_err(|_| fail("control-bind"))?;
+    let mut leader = spawn_payload().map_err(|_| fail("leader-spawn"))?;
+    let mut remaining_member = spawn_payload().map_err(|_| fail("member-spawn"))?;
+    let logind_session_id =
+        LogindSessionId::new("fixture-c1".to_owned()).ok_or_else(|| fail("logind-id"))?;
     let identity = PayloadScopeIdentity {
         unit_name: "niralis-payload-0123456789abcdef0123456789abcdef.scope".to_owned(),
         invocation_id: "0123456789abcdef0123456789abcdef".to_owned(),
@@ -44,7 +45,7 @@ fn run() -> Result<(), ()> {
             worker_id: worker_id.clone(),
         },
     )
-    .map_err(|_| ())?;
+    .map_err(|_| fail("preparing"))?;
     write_envelope(
         &mut stdout,
         WorkerResponse::PayloadScopePrepared {
@@ -55,11 +56,12 @@ fn run() -> Result<(), ()> {
             scope_identity: identity,
         },
     )
-    .map_err(|_| ())?;
-    stdout.flush().map_err(|_| ())?;
-    let mut report = report_processes(leader.id(), remaining_member.id())?;
+    .map_err(|_| fail("prepared"))?;
+    stdout.flush().map_err(|_| fail("prepared-flush"))?;
+    let mut report =
+        report_processes(leader.id(), remaining_member.id()).map_err(|_| fail("report"))?;
     let mut supervisor = unsafe { UnixStream::from_raw_fd(3) };
-    let ack = read_control_request(&mut supervisor).map_err(|_| ())?;
+    let ack = read_control_request(&mut supervisor).map_err(|_| fail("ack-read"))?;
     if ack.version != WORKER_CONTROL_PROTOCOL_VERSION
         || !matches!(
             ack.message,
@@ -70,12 +72,14 @@ fn run() -> Result<(), ()> {
             } if ack_worker_id == &worker_id && expected_worker_pid == std::process::id()
         )
     {
-        return Err(());
+        return Err(fail("ack-invalid"));
     }
-    writeln!(report, "ack").map_err(|_| ())?;
+    writeln!(report, "ack").map_err(|_| fail("ack-report"))?;
     if std::env::var_os("NIRALIS_SUPERVISOR_FIXTURE_POST_ACK_BARRIER").is_some() {
         let mut release = [0u8; 1];
-        report.read_exact(&mut release).map_err(|_| ())?;
+        report
+            .read_exact(&mut release)
+            .map_err(|_| fail("post-ack-release"))?;
     }
     write_envelope(
         &mut stdout,
@@ -91,11 +95,11 @@ fn run() -> Result<(), ()> {
             logind_session_id,
         },
     )
-    .map_err(|_| ())?;
-    stdout.flush().map_err(|_| ())?;
+    .map_err(|_| fail("started"))?;
+    stdout.flush().map_err(|_| fail("started-flush"))?;
     loop {
-        let (mut control, _) = listener.accept().map_err(|_| ())?;
-        let request = read_control_request(&mut control).map_err(|_| ())?;
+        let (mut control, _) = listener.accept().map_err(|_| fail("control-accept"))?;
+        let request = read_control_request(&mut control).map_err(|_| fail("terminate-read"))?;
         if request.version == WORKER_CONTROL_PROTOCOL_VERSION
             && matches!(
                 request.message,
@@ -114,9 +118,13 @@ fn run() -> Result<(), ()> {
     }
 }
 
+fn fail(stage: &str) {
+    eprintln!("fixture-worker failure stage={stage}");
+}
+
 fn spawn_payload() -> Result<Child, ()> {
-    Command::new("/bin/sh")
-        .args(["-c", "exec sleep 3600"])
+    Command::new("/bin/sleep")
+        .arg("3600")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())

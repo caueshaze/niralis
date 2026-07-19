@@ -8,6 +8,9 @@ use super::*;
 #[derive(Debug)]
 pub(crate) struct SupervisorFixtureBoundary {
     pub(crate) identity: crate::PayloadScopeIdentity,
+    pub(crate) object_path: String,
+    pub(crate) control_group: String,
+    pub(crate) slice: String,
     pub(crate) leader_pid: u32,
     pub(crate) mode: SupervisorFixtureBoundaryMode,
     pub(crate) counters: Arc<SupervisorFixtureCounters>,
@@ -24,6 +27,18 @@ pub(crate) struct SupervisorFixtureBoundary {
 impl SupervisorPayloadBoundary for SupervisorFixtureBoundary {
     fn identity(&self) -> &crate::PayloadScopeIdentity {
         &self.identity
+    }
+
+    fn object_path(&self) -> Option<&str> {
+        Some(&self.object_path)
+    }
+
+    fn control_group(&self) -> Option<&str> {
+        Some(&self.control_group)
+    }
+
+    fn slice(&self) -> Option<&str> {
+        Some(&self.slice)
     }
 
     fn leader_pid(&self) -> u32 {
@@ -61,7 +76,21 @@ impl SupervisorPayloadBoundary for SupervisorFixtureBoundary {
                     fixture_pidfd_kill(pid)?;
                 }
             }
-            SupervisorFixtureBoundaryMode::AlreadyEmpty => {}
+            SupervisorFixtureBoundaryMode::AlreadyEmpty
+            | SupervisorFixtureBoundaryMode::EmptyBoundary
+            | SupervisorFixtureBoundaryMode::RestartReconciles
+            | SupervisorFixtureBoundaryMode::WorkerAliveHandoff
+            | SupervisorFixtureBoundaryMode::PayloadRecovered
+            | SupervisorFixtureBoundaryMode::EbusyQuarantine
+            | SupervisorFixtureBoundaryMode::UnknownScope
+            | SupervisorFixtureBoundaryMode::UnknownScopeKnownSeat
+            | SupervisorFixtureBoundaryMode::ScopeRecordConflict
+            | SupervisorFixtureBoundaryMode::SystemdOwnerBeforeKill
+            | SupervisorFixtureBoundaryMode::SystemdOwnerDuringKill
+            | SupervisorFixtureBoundaryMode::SystemdOwnerBeforeProof
+            | SupervisorFixtureBoundaryMode::LogindOwnerBeforeTerminate
+            | SupervisorFixtureBoundaryMode::LogindOwnerDuringCleanup
+            | SupervisorFixtureBoundaryMode::LogindOwnerBeforeAbsence => {}
         }
         self.counters.proofs.fetch_add(1, Ordering::SeqCst);
         Ok(fixture_boundary_proof(&self.identity, worker_exit))
@@ -83,7 +112,21 @@ impl SupervisorPayloadBoundary for SupervisorFixtureBoundary {
             | SupervisorFixtureBoundaryMode::PopulatedThenRecovered => {
                 return Err(SupervisorRecoveryError::BoundaryStillPopulated)
             }
-            SupervisorFixtureBoundaryMode::AlreadyEmpty => {}
+            SupervisorFixtureBoundaryMode::AlreadyEmpty
+            | SupervisorFixtureBoundaryMode::EmptyBoundary
+            | SupervisorFixtureBoundaryMode::RestartReconciles
+            | SupervisorFixtureBoundaryMode::WorkerAliveHandoff
+            | SupervisorFixtureBoundaryMode::PayloadRecovered
+            | SupervisorFixtureBoundaryMode::EbusyQuarantine
+            | SupervisorFixtureBoundaryMode::UnknownScope
+            | SupervisorFixtureBoundaryMode::UnknownScopeKnownSeat
+            | SupervisorFixtureBoundaryMode::ScopeRecordConflict
+            | SupervisorFixtureBoundaryMode::SystemdOwnerBeforeKill
+            | SupervisorFixtureBoundaryMode::SystemdOwnerDuringKill
+            | SupervisorFixtureBoundaryMode::SystemdOwnerBeforeProof
+            | SupervisorFixtureBoundaryMode::LogindOwnerBeforeTerminate
+            | SupervisorFixtureBoundaryMode::LogindOwnerDuringCleanup
+            | SupervisorFixtureBoundaryMode::LogindOwnerBeforeAbsence => {}
         }
         self.counters.proofs.fetch_add(1, Ordering::SeqCst);
         Ok(fixture_boundary_proof(&self.identity, worker_exit))

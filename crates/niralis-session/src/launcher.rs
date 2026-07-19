@@ -20,6 +20,8 @@ use supervisor_loop::support::kill_shared_worker;
 include!("launcher/supervisor_api.rs");
 include!("launcher/supervisor_shutdown.rs");
 include!("launcher/public_api.rs");
+#[cfg(feature = "supervisor-test-fixtures")]
+include!("launcher/public_api_fixtures.rs");
 include!("launcher/launch_protocol.rs");
 include!("launcher/launch_completion.rs");
 include!("launcher/interface_tests_helpers.rs");

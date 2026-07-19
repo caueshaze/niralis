@@ -28,7 +28,17 @@ name = "fixture-supervisor-worker"
 path = "src/bin/fixture-supervisor-worker.rs"
 required-features = ["supervisor-test-fixtures"]
 
+[[bin]]
+name = "fixture-supervisor-daemon"
+path = "src/bin/fixture-supervisor-daemon.rs"
+required-features = ["supervisor-test-fixtures"]
+
 [[test]]
 name = "supervisor_full_process"
 path = "tests/supervisor_full_process.rs"
+required-features = ["supervisor-test-fixtures"]
+
+[[test]]
+name = "daemon_replacement"
+path = "tests/daemon_replacement.rs"
 required-features = ["supervisor-test-fixtures"]

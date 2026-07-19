@@ -2,6 +2,15 @@ use super::*;
 
 pub(crate) trait SupervisorPayloadBoundary: Send + fmt::Debug {
     fn identity(&self) -> &crate::PayloadScopeIdentity;
+    fn object_path(&self) -> Option<&str> {
+        None
+    }
+    fn control_group(&self) -> Option<&str> {
+        None
+    }
+    fn slice(&self) -> Option<&str> {
+        None
+    }
     fn leader_pid(&self) -> u32;
     fn recover_emergency(
         &mut self,
@@ -27,6 +36,16 @@ impl SupervisorPayloadBoundary for LinuxSupervisorPayloadBoundary {
 
     fn leader_pid(&self) -> u32 {
         self.leader.pid
+    }
+
+    fn object_path(&self) -> Option<&str> {
+        Some(&self.pin.object_path)
+    }
+    fn control_group(&self) -> Option<&str> {
+        Some(&self.pin.control_group)
+    }
+    fn slice(&self) -> Option<&str> {
+        Some(&self.pin.slice)
     }
 
     fn recover_emergency(

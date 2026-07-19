@@ -4,6 +4,38 @@ pub(crate) const EMERGENCY_BOUNDARY_TIMEOUT: Duration = Duration::from_secs(5);
 pub(crate) const LOGIND_REMOVAL_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StartupRecoveryDecision {
+    ObserveSurvivingWorker,
+    ResumeEmergencyRecovery,
+    ResumeAfterBoundaryProof,
+    ResumeLogindCleanup,
+    ResumeVtRecovery,
+    PreserveQuarantine,
+    ClearPreviousBootRecord,
+    Quarantine(StartupRecoveryFailure),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StartupRecoveryFailure {
+    UnsupportedRehydration,
+    PersistentRecordConflict,
+    BoundaryIdentityChanged,
+    WorkerIdentityIndeterminate,
+    LeaderIdentityIndeterminate,
+    SystemdOwnerChanged,
+    LogindOwnerChanged,
+    LogindIdentityChanged,
+    PreviousBootConflict,
+    UnknownPayloadScope,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StartupRecoveryOutcome {
+    Free,
+    Quarantined(StartupRecoveryFailure),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WorkerExitClassification {
     CleanFinalization,
     FailedAfterBoundaryCleanup,

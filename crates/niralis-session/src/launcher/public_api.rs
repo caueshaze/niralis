@@ -25,6 +25,37 @@ impl WorkerSessionLauncher {
         })
     }
 
+    pub fn new_persistent(
+        worker_path: PathBuf,
+        session_child_path: PathBuf,
+        session_probe_path: PathBuf,
+        timeout: Duration,
+        worker_environment: Vec<(String, String)>,
+    ) -> Result<Self, SessionError> {
+        if !worker_path.is_absolute()
+            || !session_child_path.is_absolute()
+            || !session_probe_path.is_absolute()
+        {
+            return Err(SessionError::InvalidWorkerPath);
+        }
+        let ledger = PersistentRecoveryLedger::open(DEFAULT_RECOVERY_DIR, DEFAULT_RECOVERY_LOCK)
+            .map_err(|_| SessionError::PersistentRecoveryUnavailable)?;
+        Ok(Self {
+            worker_path,
+            session_child_path,
+            session_probe_path,
+            timeout,
+            worker_environment,
+            supervisor: Arc::new(WorkerSupervisor::new_with_persistent_ledger(
+                Arc::new(LinuxSupervisorRecoveryProvider),
+                ledger,
+            )),
+            release_verifier: Arc::new(crate::SystemdPayloadScopeReleaseVerifier),
+            #[cfg(any(feature = "integration-test-control", feature = "supervisor-test-fixtures"))]
+            fixture_recovery_provider: None,
+        })
+    }
+
     #[cfg(any(test, feature = "integration-test-control"))]
     pub fn set_payload_scope_release_verifier_for_test(
         &mut self,

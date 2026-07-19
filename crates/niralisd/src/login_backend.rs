@@ -93,6 +93,9 @@ pub(crate) fn map_session_error(error: niralis_session::SessionError) -> LoginBa
         niralis_session::SessionError::WorkerRecoveryIncomplete => {
             LoginBackendError::WorkerRecoveryIncomplete
         }
+        niralis_session::SessionError::PersistentRecoveryUnavailable => {
+            LoginBackendError::InfrastructureFailed
+        }
         _ => LoginBackendError::InfrastructureFailed,
     }
 }

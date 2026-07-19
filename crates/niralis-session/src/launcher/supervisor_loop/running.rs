@@ -73,6 +73,7 @@ impl SupervisorLoopState {
             payload,
             runtime_id,
         };
+        self.persist_transition(&worker_id, "started")?;
         self.children.push(SupervisedWorker {
             record: entry.record,
             child: entry.child,
@@ -138,6 +139,7 @@ impl SupervisorLoopState {
         }
         warn!(worker_pid = worker.record.worker_pid, status = %exit_status_label(status), phase = worker.record.phase_name(), session = %worker.record.session_name, username = %worker.record.requested_username, "session worker exited unexpectedly");
         let classification = mark_worker_exited_unexpectedly(&mut worker.record, status);
+        let _ = self.persist_transition(&worker.record.lifecycle_id, "worker_exited_unexpectedly");
         self.seat = SeatLifecycle::Recovering {
             lifecycle_id: worker.record.lifecycle_id.clone(),
             phase: worker.record.phase_name(),
@@ -151,6 +153,12 @@ impl SupervisorLoopState {
                 self.seat = SeatLifecycle::Free;
             }
             SupervisorEmergencyRecoveryOutcome::Quarantined { stage, reason } => {
+                if matches!(reason, SupervisorRecoveryError::VtDisallocateBusy) {
+                    let _ = self.persist_transition(
+                        &worker.record.lifecycle_id,
+                        "vt_disallocate_failed_busy",
+                    );
+                }
                 worker.record.quarantine(stage, reason.clone());
                 self.seat = SeatLifecycle::Quarantined {
                     lifecycle_id: worker.record.lifecycle_id.clone(),

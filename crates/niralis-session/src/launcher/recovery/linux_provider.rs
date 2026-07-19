@@ -4,6 +4,22 @@ use super::*;
 pub(crate) struct LinuxSupervisorRecoveryProvider;
 
 impl SupervisorRecoveryProvider for LinuxSupervisorRecoveryProvider {
+    fn inventory_unknown_scopes(
+        &self,
+        records: &[PersistentRecoveryRecord],
+    ) -> Result<UnknownScopeInventory, StartupRecoveryFailure> {
+        inventory_unknown_payload_scopes(records)
+    }
+
+    fn reconcile_startup(
+        &self,
+        record: &PersistentRecoveryRecord,
+        relation: RecoveryBootRelation,
+        ledger: &mut PersistentRecoveryLedger,
+    ) -> StartupRecoveryOutcome {
+        reconcile_linux_startup(record, relation, ledger)
+    }
+
     fn capture_previous_vt(
         &self,
         seat: &str,
@@ -45,19 +61,6 @@ impl SupervisorRecoveryProvider for LinuxSupervisorRecoveryProvider {
             || logind.seat != "seat0"
             || logind.vt_number == previous_vt.number
         {
-            warn!(
-                expected_uid = identity.expected_uid,
-                observed_uid = logind.uid,
-                expected_session_id = %identity.logind_session_id.as_str(),
-                observed_session_id = %logind.id.as_str(),
-                expected_worker_pid = worker_pid,
-                observed_logind_leader_pid = logind.leader,
-                expected_seat = "seat0",
-                observed_seat = %logind.seat,
-                previous_vt = previous_vt.number,
-                observed_session_vt = logind.vt_number,
-                "supervisor logind identity validation failed"
-            );
             return Err(SupervisorRecoveryError::LogindIdentityChanged);
         }
         let (target_uid, target_gid) = read_process_credentials(authoritative_leader_pid)?;
@@ -101,21 +104,18 @@ impl SupervisorRecoveryProvider for LinuxSupervisorRecoveryProvider {
         recover_virtual_terminal(&vt)?;
         Ok(SupervisorPrePayloadRecoveryResult { logind_result })
     }
-
     fn cleanup_logind(
         &self,
         identity: &SupervisorLogindSessionIdentity,
     ) -> Result<SupervisorLogindCleanupResult, SupervisorRecoveryError> {
         cleanup_logind_session(identity)
     }
-
     fn confirm_logind_absent(
         &self,
         identity: &SupervisorLogindSessionIdentity,
     ) -> Result<bool, SupervisorRecoveryError> {
         logind_session_absent(identity)
     }
-
     fn recover_vt(&self, identity: &SupervisorVtIdentity) -> Result<(), SupervisorRecoveryError> {
         recover_virtual_terminal(identity)
     }
@@ -145,7 +145,6 @@ impl SupervisorLeaderPidfd {
         }
         Ok(value)
     }
-
     pub(crate) fn observed_dead(&self) -> Result<bool, SupervisorRecoveryError> {
         let mut descriptor = libc::pollfd {
             fd: self.pidfd.as_raw_fd(),
