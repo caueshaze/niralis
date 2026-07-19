@@ -130,7 +130,7 @@ if "$pull"; then
     if [[ -n "$(git status --porcelain --untracked-files=all)" ]]; then
         die "refusing --pull with a dirty worktree; commit, stash, or remove local changes first"
     fi
-    git pull --ff-only
+    git pull
 fi
 
 if "$run_format_check"; then
