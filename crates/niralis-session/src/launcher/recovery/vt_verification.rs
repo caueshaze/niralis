@@ -1,8 +1,14 @@
 use super::*;
 
-pub(crate) fn verify_recovered_virtual_terminal(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StartupVtRecoveryState {
+    Recovered,
+    NeedsRecovery,
+}
+
+pub(crate) fn inspect_startup_virtual_terminal(
     identity: &SupervisorVtIdentity,
-) -> Result<(), SupervisorRecoveryError> {
+) -> Result<StartupVtRecoveryState, SupervisorRecoveryError> {
     validate_vt_identity(identity)?;
     let path = CString::new(format!("/dev/tty{}", identity.number))
         .map_err(|_| SupervisorRecoveryError::VtIdentityChanged)?;
@@ -30,15 +36,12 @@ pub(crate) fn verify_recovered_virtual_terminal(
     }
     let console_fd = unsafe { OwnedFd::from_raw_fd(console_fd) };
     let state = read_vt_state(console_fd.as_raw_fd())?;
-    if vt_state_proves_target_disallocated(
-        u32::from(state.active),
-        state.state,
-        identity.number,
-        identity.previous.number,
-    ) {
-        Ok(())
-    } else {
+    if u32::from(state.active) != identity.previous.number || !(1..=16).contains(&identity.number) {
         Err(SupervisorRecoveryError::VtIdentityChanged)
+    } else if vt_state_proves_target_disallocated(state.state, identity.number) {
+        Ok(StartupVtRecoveryState::Recovered)
+    } else {
+        Ok(StartupVtRecoveryState::NeedsRecovery)
     }
 }
 
@@ -93,17 +96,9 @@ pub(crate) fn validate_tty_device(
     Ok(())
 }
 
-fn vt_state_proves_target_disallocated(
-    active: u32,
-    allocated: u16,
-    target: u32,
-    previous: u32,
-) -> bool {
-    active == previous
-        && (1..=16).contains(&target)
-        && 1u16
-            .checked_shl(target - 1)
-            .is_some_and(|mask| allocated & mask == 0)
+fn vt_state_proves_target_disallocated(allocated: u16, target: u32) -> bool {
+    1u16.checked_shl(target - 1)
+        .is_some_and(|mask| allocated & mask == 0)
 }
 
 #[cfg(test)]
@@ -112,9 +107,8 @@ mod tests {
 
     #[test]
     fn read_only_vt_proof_requires_previous_active_and_target_unallocated() {
-        assert!(vt_state_proves_target_disallocated(3, 0, 2, 3));
-        assert!(!vt_state_proves_target_disallocated(2, 0, 2, 3));
-        assert!(!vt_state_proves_target_disallocated(3, 1 << 1, 2, 3));
-        assert!(!vt_state_proves_target_disallocated(3, 0, 17, 3));
+        assert!(vt_state_proves_target_disallocated(0, 2));
+        assert!(!vt_state_proves_target_disallocated(1 << 1, 2));
+        assert!(!vt_state_proves_target_disallocated(0, 17));
     }
 }

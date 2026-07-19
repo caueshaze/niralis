@@ -33,7 +33,10 @@ pub(crate) fn quarantine_startup_record(
 
 pub(crate) fn can_retry_coherent_absent_boundary(record: &PersistentRecoveryRecord) -> bool {
     record.state == "quarantined"
-        && record.quarantine_reason.as_deref() == Some("boundary_identity_changed")
+        && matches!(
+            record.quarantine_reason.as_deref(),
+            Some("boundary_identity_changed" | "logind_identity_changed")
+        )
         && matches!(
             record.operation_ledger,
             DurableOperationLedger {

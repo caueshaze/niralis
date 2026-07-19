@@ -101,6 +101,7 @@ mod startup_same_boot_logind;
 mod startup_same_boot_support;
 #[cfg(test)]
 mod startup_tests;
+mod startup_vt_recovery;
 mod systemd_dbus;
 mod systemd_pin;
 mod systemd_rehydrate;
@@ -182,6 +183,7 @@ pub(crate) use startup_quarantine::*;
 pub(crate) use startup_same_boot::*;
 pub(crate) use startup_same_boot_logind::*;
 pub(crate) use startup_same_boot_support::*;
+pub(crate) use startup_vt_recovery::*;
 pub(crate) use systemd_dbus::*;
 pub(crate) use systemd_pin::*;
 pub(crate) use unknown_scope::*;

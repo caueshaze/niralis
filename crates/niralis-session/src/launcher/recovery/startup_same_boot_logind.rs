@@ -58,35 +58,7 @@ pub(crate) fn reconcile_logind_and_vt(
     {
         return Err(StartupRecoveryFailure::LogindOwnerChanged);
     }
-    let target = record
-        .target_vt
-        .ok_or(StartupRecoveryFailure::LogindIdentityChanged)?;
-    let previous = record
-        .previous_vt
-        .ok_or(StartupRecoveryFailure::LogindIdentityChanged)?;
-    let attempt = record.sequence.saturating_add(3);
-    ledger
-        .operation_intent(&record.lifecycle_id, "vt_disallocate", attempt)
-        .map_err(|_| StartupRecoveryFailure::UnsupportedRehydration)?;
-    let vt = SupervisorVtIdentity {
-        seat: record.seat.clone(),
-        number: target,
-        previous: PreviousVtIdentity { number: previous },
-        device_major: 4,
-        device_minor: target,
-    };
-    match recover_virtual_terminal(&vt) {
-        Ok(()) => ledger
-            .operation_confirmed(&record.lifecycle_id, "vt_disallocate", attempt)
-            .map_err(|_| StartupRecoveryFailure::UnsupportedRehydration),
-        Err(SupervisorRecoveryError::VtDisallocateBusy) => {
-            ledger
-                .operation_failed(&record.lifecycle_id, "vt_disallocate", attempt, libc::EBUSY)
-                .map_err(|_| StartupRecoveryFailure::UnsupportedRehydration)?;
-            Err(StartupRecoveryFailure::VtDisallocateBusy)
-        }
-        Err(_) => Err(StartupRecoveryFailure::LogindIdentityChanged),
-    }
+    reconcile_startup_vt(record, ledger)
 }
 
 pub(crate) fn confirm_absent_boundary_logind_and_vt(
@@ -109,31 +81,19 @@ pub(crate) fn confirm_absent_boundary_logind_and_vt(
         return Err(StartupRecoveryFailure::LogindOwnerChanged);
     }
     let vt = persisted_vt_identity(record)?;
-    verify_recovered_virtual_terminal(&vt)
-        .map_err(|_| StartupRecoveryFailure::LogindIdentityChanged)?;
-    match record.operation_ledger.selinux_restore {
-        DurableOperationState::NotStarted => {
-            let attempt = record.sequence.saturating_add(1);
-            ledger
-                .operation_intent(&record.lifecycle_id, "selinux_restore", attempt)
-                .map_err(|_| StartupRecoveryFailure::UnsupportedRehydration)?;
-            let path = CString::new(format!("/dev/tty{}", vt.number))
-                .map_err(|_| StartupRecoveryFailure::LogindIdentityChanged)?;
-            restore_default_selinux_context(&path)
-                .map_err(|_| StartupRecoveryFailure::LogindIdentityChanged)?;
-            ledger
-                .operation_confirmed(&record.lifecycle_id, "selinux_restore", attempt)
-                .map_err(|_| StartupRecoveryFailure::UnsupportedRehydration)?;
-        }
-        DurableOperationState::Confirmed { .. } => {}
-        DurableOperationState::IntentPersisted { .. }
-        | DurableOperationState::Failed { .. }
-        | DurableOperationState::Indeterminate { .. } => {
-            return Err(StartupRecoveryFailure::LogindIdentityChanged)
+    match inspect_startup_virtual_terminal(&vt)
+        .map_err(|_| StartupRecoveryFailure::LogindIdentityChanged)?
+    {
+        StartupVtRecoveryState::Recovered => confirm_default_tty_context(record, ledger, &vt)?,
+        StartupVtRecoveryState::NeedsRecovery => {
+            info!(
+                lifecycle_id = %record.lifecycle_id,
+                target_vt = vt.number,
+                "startup absent-boundary VT remains allocated; resuming supervisor VT recovery"
+            );
+            reconcile_startup_vt(record, ledger)?;
         }
     }
-    verify_recovered_virtual_terminal(&vt)
-        .map_err(|_| StartupRecoveryFailure::LogindIdentityChanged)?;
     owner_watch
         .stable()
         .map_err(|_| StartupRecoveryFailure::LogindOwnerChanged)?;
@@ -149,20 +109,30 @@ pub(crate) fn confirm_absent_boundary_logind_and_vt(
     Ok(())
 }
 
-fn persisted_vt_identity(
+fn confirm_default_tty_context(
     record: &PersistentRecoveryRecord,
-) -> Result<SupervisorVtIdentity, StartupRecoveryFailure> {
-    let target = record
-        .target_vt
-        .ok_or(StartupRecoveryFailure::LogindIdentityChanged)?;
-    let previous = record
-        .previous_vt
-        .ok_or(StartupRecoveryFailure::LogindIdentityChanged)?;
-    Ok(SupervisorVtIdentity {
-        seat: record.seat.clone(),
-        number: target,
-        previous: PreviousVtIdentity { number: previous },
-        device_major: 4,
-        device_minor: target,
-    })
+    ledger: &mut PersistentRecoveryLedger,
+    vt: &SupervisorVtIdentity,
+) -> Result<(), StartupRecoveryFailure> {
+    match record.operation_ledger.selinux_restore {
+        DurableOperationState::NotStarted => {
+            let attempt = record.sequence.saturating_add(1);
+            ledger
+                .operation_intent(&record.lifecycle_id, "selinux_restore", attempt)
+                .map_err(|_| StartupRecoveryFailure::UnsupportedRehydration)?;
+            let path = CString::new(format!("/dev/tty{}", vt.number))
+                .map_err(|_| StartupRecoveryFailure::LogindIdentityChanged)?;
+            restore_default_selinux_context(&path)
+                .map_err(|_| StartupRecoveryFailure::LogindIdentityChanged)?;
+            ledger
+                .operation_confirmed(&record.lifecycle_id, "selinux_restore", attempt)
+                .map_err(|_| StartupRecoveryFailure::UnsupportedRehydration)
+        }
+        DurableOperationState::Confirmed { .. } => Ok(()),
+        DurableOperationState::IntentPersisted { .. }
+        | DurableOperationState::Failed { .. }
+        | DurableOperationState::Indeterminate { .. } => {
+            Err(StartupRecoveryFailure::LogindIdentityChanged)
+        }
+    }
 }
