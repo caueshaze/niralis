@@ -220,7 +220,9 @@ if "$restart"; then
     fi
     # reset-failed is only cleanup. A disabled unit can still be started
     # manually, so do not make this optional cleanup block installation.
-    "${root[@]}" systemctl reset-failed niralisd.service || true
+    if ! "${root[@]}" systemctl reset-failed niralisd.service 2>/dev/null; then
+        printf '%s\n' 'niralisd failed-state cleanup skipped; continuing with explicit service start.'
+    fi
     if "${root[@]}" systemctl is-active --quiet niralisd.service; then
         "${root[@]}" systemctl restart niralisd.service
     else
