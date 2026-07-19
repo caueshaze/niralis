@@ -72,6 +72,7 @@ init_stop(niralis_t)
 # unknown Niralis payload scopes can be detected before login is enabled. Use
 # the reference-policy interface for all unit-file labels; this grants status
 # only, never start/stop/reload or unit-file management.
+init_status(niralis_t)
 systemd_status_all_unit_files(niralis_t)
 # pam_systemd registers the session through logind's private runtime socket.
 # This grants only the socket-file write and server connect permissions.
