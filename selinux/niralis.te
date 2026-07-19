@@ -30,6 +30,12 @@ files_config_file(niralis_etc_t)
 type niralis_var_run_t;
 files_pid_file(niralis_var_run_t)
 
+# Persistent supervisor-owned recovery ledger. Keep it distinct from the
+# runtime socket/lock tree so a compromised session cannot inherit a broad
+# writable state label and so reboot-surviving records have an explicit type.
+type niralis_var_lib_t;
+files_type(niralis_var_lib_t)
+
 ########################################
 # Niralis-owned configuration and runtime state
 
@@ -38,6 +44,8 @@ manage_files_pattern(niralis_t, niralis_etc_t, niralis_etc_t)
 manage_dirs_pattern(niralis_t, niralis_var_run_t, niralis_var_run_t)
 manage_files_pattern(niralis_t, niralis_var_run_t, niralis_var_run_t)
 manage_sock_files_pattern(niralis_t, niralis_var_run_t, niralis_var_run_t)
+manage_dirs_pattern(niralis_t, niralis_var_lib_t, niralis_var_lib_t)
+manage_files_pattern(niralis_t, niralis_var_lib_t, niralis_var_lib_t)
 # The launcher and its authenticated worker share niralis_t but use a private,
 # lifecycle-correlated Unix stream socket for the pre-Started acknowledgement.
 # Limit connectto to a server socket owned by the same SELinux domain; pathname

@@ -7,3 +7,4 @@
 /usr/libexec/niralis-session-probe -- gen_context(system_u:object_r:niralis_exec_t,s0)
 /etc/niralis(/.*)? gen_context(system_u:object_r:niralis_etc_t,s0)
 /run/niralis(/.*)? gen_context(system_u:object_r:niralis_var_run_t,s0)
+/var/lib/niralis(/.*)? gen_context(system_u:object_r:niralis_var_lib_t,s0)

@@ -55,6 +55,11 @@ fi
 "${root[@]}" install -Dm0755 target/release/niralis-session-probe /usr/libexec/niralis-session-probe
 "${root[@]}" install -Dm0644 systemd/niralisd.service /etc/systemd/system/niralisd.service
 
+# The persistent ledger tree is provisioned by root before niralisd starts.
+# The SELinux policy below labels it separately from /run/niralis; the daemon
+# manages only records and temporary replacements inside this private tree.
+"${root[@]}" install -d -o root -g root -m 0700 /var/lib/niralis/recovery
+
 if "$install_selinux_policy"; then
     make -C selinux
     "${root[@]}" semodule -i selinux/niralis.pp
@@ -65,6 +70,8 @@ relabel_paths=(
     /usr/libexec/niralis-session-worker
     /usr/libexec/niralis-session-child
     /usr/libexec/niralis-session-probe
+    /var/lib/niralis
+    /var/lib/niralis/recovery
 )
 for daemon_path in /usr/bin/niralisd /usr/sbin/niralisd; do
     [[ -e "$daemon_path" ]] && relabel_paths+=("$daemon_path")
