@@ -1,16 +1,9 @@
 use super::*;
+
 pub(crate) fn recover_virtual_terminal(
     identity: &SupervisorVtIdentity,
 ) -> Result<(), SupervisorRecoveryError> {
-    if identity.seat != "seat0"
-        || !(1..=63).contains(&identity.number)
-        || !(1..=63).contains(&identity.previous.number)
-        || identity.number == identity.previous.number
-        || identity.device_major != 4
-        || identity.device_minor != identity.number
-    {
-        return Err(SupervisorRecoveryError::VtIdentityChanged);
-    }
+    validate_vt_identity(identity)?;
     let path = format!("/dev/tty{}", identity.number);
     let c_path =
         CString::new(path.as_bytes()).map_err(|_| SupervisorRecoveryError::VtIdentityChanged)?;
@@ -24,14 +17,7 @@ pub(crate) fn recover_virtual_terminal(
         return Err(SupervisorRecoveryError::VtOpenFailed(last_errno()));
     }
     let tty_fd = unsafe { OwnedFd::from_raw_fd(tty_fd) };
-    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
-    if unsafe { libc::fstat(tty_fd.as_raw_fd(), &mut stat) } < 0
-        || (stat.st_mode & libc::S_IFMT) != libc::S_IFCHR
-        || libc::major(stat.st_rdev) as u32 != identity.device_major
-        || libc::minor(stat.st_rdev) as u32 != identity.device_minor
-    {
-        return Err(SupervisorRecoveryError::VtIdentityChanged);
-    }
+    validate_tty_device(tty_fd.as_raw_fd(), identity)?;
     info!(
         vt = identity.number,
         previous_vt = identity.previous.number,

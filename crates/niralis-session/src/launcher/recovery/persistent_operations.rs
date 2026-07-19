@@ -60,6 +60,7 @@ impl PersistentRecoveryLedger {
             "payload_kill" => next.operation_ledger.payload_kill = state,
             "supervisor_unref" => next.operation_ledger.supervisor_unref = state,
             "logind_termination" => next.operation_ledger.logind_termination = state,
+            "selinux_restore" => next.operation_ledger.selinux_restore = state,
             "vt_activation" => next.operation_ledger.vt_activation = state,
             "vt_disallocate" => next.operation_ledger.vt_disallocate = state,
             "runtime_release" => next.operation_ledger.runtime_release = state,

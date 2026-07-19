@@ -45,7 +45,7 @@ impl<'a> StartupRecoveryCoordinator<'a> {
         let mut summary = StartupReconciliationSummary::default();
         for record in records {
             if blocked_seats.contains(&record.seat) {
-                quarantine_record(
+                quarantine_startup_record(
                     ledger,
                     &record.lifecycle_id,
                     StartupRecoveryFailure::UnknownPayloadScope,
@@ -61,7 +61,7 @@ impl<'a> StartupRecoveryCoordinator<'a> {
                 if ledger.remove_resolved(&record.lifecycle_id).is_ok() {
                     summary.free += 1;
                 } else {
-                    quarantine_record(
+                    quarantine_startup_record(
                         ledger,
                         &record.lifecycle_id,
                         StartupRecoveryFailure::UnsupportedRehydration,
@@ -73,7 +73,7 @@ impl<'a> StartupRecoveryCoordinator<'a> {
             if relation == RecoveryBootRelation::SameBoot
                 && conflicts.contains(&record.lifecycle_id)
             {
-                quarantine_record(
+                quarantine_startup_record(
                     ledger,
                     &record.lifecycle_id,
                     StartupRecoveryFailure::PersistentRecordConflict,
@@ -86,9 +86,16 @@ impl<'a> StartupRecoveryCoordinator<'a> {
                     persisted_decision(&record),
                     StartupRecoveryDecision::PreserveQuarantine
                 )
+                && !can_retry_coherent_absent_boundary(&record)
             {
                 summary.quarantined += 1;
                 continue;
+            }
+            if can_retry_coherent_absent_boundary(&record) {
+                info!(
+                    lifecycle_id = %record.lifecycle_id,
+                    "retrying coherent absent-boundary proof after startup identity quarantine"
+                );
             }
             let decision = match self.provider.reconcile_startup(&record, relation, ledger) {
                 StartupRecoveryOutcome::Free => match relation {
@@ -108,7 +115,7 @@ impl<'a> StartupRecoveryCoordinator<'a> {
                     if ledger.resolve_and_remove(&record.lifecycle_id).is_ok() {
                         summary.free += 1;
                     } else {
-                        quarantine_record(
+                        quarantine_startup_record(
                             ledger,
                             &record.lifecycle_id,
                             StartupRecoveryFailure::UnsupportedRehydration,
@@ -123,7 +130,7 @@ impl<'a> StartupRecoveryCoordinator<'a> {
                     {
                         summary.free += 1;
                     } else {
-                        quarantine_record(
+                        quarantine_startup_record(
                             ledger,
                             &record.lifecycle_id,
                             StartupRecoveryFailure::PreviousBootConflict,
@@ -132,9 +139,9 @@ impl<'a> StartupRecoveryCoordinator<'a> {
                     }
                 }
                 StartupRecoveryDecision::Quarantine(reason) => {
-                    quarantine_record(ledger, &record.lifecycle_id, reason, &mut summary)
+                    quarantine_startup_record(ledger, &record.lifecycle_id, reason, &mut summary)
                 }
-                _ => quarantine_record(
+                _ => quarantine_startup_record(
                     ledger,
                     &record.lifecycle_id,
                     StartupRecoveryFailure::UnsupportedRehydration,
@@ -149,29 +156,6 @@ impl<'a> StartupRecoveryCoordinator<'a> {
         );
         summary
     }
-}
-
-fn quarantine_record(
-    ledger: &mut PersistentRecoveryLedger,
-    lifecycle_id: &str,
-    reason: StartupRecoveryFailure,
-    summary: &mut StartupReconciliationSummary,
-) {
-    if ledger.quarantine(lifecycle_id, reason).is_err() {
-        ledger.mark_startup_quarantine();
-        warn!(
-            lifecycle_id,
-            reason = reason.persistent_reason(),
-            "failed to persist startup quarantine"
-        );
-    } else {
-        info!(
-            lifecycle_id,
-            reason = reason.persistent_reason(),
-            "startup quarantine persisted"
-        );
-    }
-    summary.quarantined += 1;
 }
 
 fn persisted_decision(record: &PersistentRecoveryRecord) -> StartupRecoveryDecision {

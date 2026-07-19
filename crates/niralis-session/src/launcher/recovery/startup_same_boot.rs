@@ -111,13 +111,26 @@ pub(crate) fn reconcile_same_boot_record(
         }
     };
     let mut pin = match SupervisorPinnedInvocationUnit::rehydrate(
-        identity,
+        identity.clone(),
         record.worker_pid,
         record.launcher_pid,
     ) {
         Ok(pin) => pin,
         Err(SupervisorRecoveryError::BusUnavailable) => {
             return StartupRecoveryOutcome::Quarantined(StartupRecoveryFailure::SystemdOwnerChanged)
+        }
+        Err(SupervisorRecoveryError::BoundaryIdentityChanged) => {
+            if let Err(reason) =
+                prove_startup_absent_boundary(record, &identity, &leader, &systemd_watch)
+            {
+                return StartupRecoveryOutcome::Quarantined(reason);
+            }
+            if let Err(reason) =
+                confirm_absent_boundary_logind_and_vt(record, ledger, &logind_watch)
+            {
+                return StartupRecoveryOutcome::Quarantined(reason);
+            }
+            return StartupRecoveryOutcome::Free;
         }
         Err(_) => {
             return StartupRecoveryOutcome::Quarantined(
