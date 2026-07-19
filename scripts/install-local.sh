@@ -14,7 +14,7 @@ Builds and installs the release workspace:
 
 Options:
   --pull                    Run git pull --ff-only before validation/build.
-                            Refuses a dirty worktree.
+                            Local changes are preserved; Git reports conflicts.
   --selinux                 Build and install the local SELinux policy.
   --no-selinux              Do not build, install, or relabel SELinux policy.
   --install-selinux-policy  Compatibility alias for --selinux.
@@ -127,9 +127,6 @@ fi
 
 if "$pull"; then
     command -v git >/dev/null 2>&1 || die "git is required by --pull"
-    if [[ -n "$(git status --porcelain --untracked-files=all)" ]]; then
-        die "refusing --pull with a dirty worktree; commit, stash, or remove local changes first"
-    fi
     git pull --ff-only
 fi
 
