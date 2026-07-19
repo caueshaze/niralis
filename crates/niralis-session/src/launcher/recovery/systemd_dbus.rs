@@ -25,16 +25,20 @@ pub(crate) fn resolve_invocation(
     .map_err(|_| SupervisorRecoveryError::BusUnavailable)?;
     match manager.call("GetUnitByInvocationID", &(invocation,)) {
         Ok(path) => Ok(Some(path)),
-        Err(zbus::Error::MethodError(name, _, _))
-            if matches!(
-                name.as_str(),
-                "org.freedesktop.systemd1.NoSuchUnit" | "org.freedesktop.DBus.Error.UnknownObject"
-            ) =>
-        {
+        Err(zbus::Error::MethodError(name, _, _)) if is_absent_invocation_error(name.as_str()) => {
             Ok(None)
         }
         Err(_) => Err(SupervisorRecoveryError::BusUnavailable),
     }
+}
+
+pub(crate) fn is_absent_invocation_error(name: &str) -> bool {
+    matches!(
+        name,
+        "org.freedesktop.systemd1.NoSuchUnit"
+            | "org.freedesktop.systemd1.NoUnitForInvocationID"
+            | "org.freedesktop.DBus.Error.UnknownObject"
+    )
 }
 
 pub(crate) fn unit_call<A>(
@@ -141,4 +145,19 @@ pub(crate) fn parse_invocation_id(value: &str) -> Option<Vec<u8>> {
     (0..16)
         .map(|index| u8::from_str_radix(&value[index * 2..index * 2 + 2], 16).ok())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_absent_invocation_error;
+
+    #[test]
+    fn systemd_260_no_unit_for_invocation_id_is_an_absence_proof() {
+        assert!(is_absent_invocation_error(
+            "org.freedesktop.systemd1.NoUnitForInvocationID"
+        ));
+        assert!(!is_absent_invocation_error(
+            "org.freedesktop.DBus.Error.Failed"
+        ));
+    }
 }

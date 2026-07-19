@@ -46,11 +46,7 @@ fn clear_previous_boot_record(
                 None,
             ))
         }
-        Err(zbus::Error::MethodError(name, _, _))
-            if matches!(
-                name.as_str(),
-                "org.freedesktop.systemd1.NoSuchUnit" | "org.freedesktop.DBus.Error.UnknownObject"
-            ) => {}
+        Err(zbus::Error::MethodError(name, _, _)) if is_absent_invocation_error(name.as_str()) => {}
         Err(error) => {
             return Err(previous_boot_conflict(
                 record,
