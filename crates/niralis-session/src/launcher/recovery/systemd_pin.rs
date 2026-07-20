@@ -268,7 +268,7 @@ mod systemd_integration_tests {
             let uid = unsafe { libc::geteuid() };
             let token = format!("{:032x}", rand_token());
             let unit = format!("niralis-payload-{token}.scope");
-            let status = Command::new("/usr/bin/systemd-run")
+            let mut launcher = Command::new("/usr/bin/systemd-run")
                 .args([
                     "--scope",
                     "--no-block",
@@ -278,10 +278,23 @@ mod systemd_integration_tests {
                     "/usr/bin/sleep",
                     "600",
                 ])
-                .status()
+                .spawn()
                 .ok()?;
-            if !status.success() {
-                return None;
+            let launcher_deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                match launcher.try_wait() {
+                    Ok(Some(status)) if status.success() => break,
+                    Ok(Some(_)) | Err(_) => {
+                        abort_fixture_scope(&unit);
+                        return None;
+                    }
+                    Ok(None) if Instant::now() >= launcher_deadline => {
+                        let _ = launcher.kill();
+                        let _ = launcher.wait();
+                        break;
+                    }
+                    Ok(None) => std::thread::yield_now(),
+                }
             }
             let connection = zbus::blocking::connection::Builder::system()
                 .ok()?
@@ -296,8 +309,24 @@ mod systemd_integration_tests {
                     SYSTEMD_MANAGER_INTERFACE,
                 )
                 .ok()?;
-                let path: OwnedObjectPath = manager.call("GetUnit", &(unit.as_str(),)).ok()?;
-                let observation = read_unit_observation(&connection, &path).ok()?;
+                let path: OwnedObjectPath = match manager.call("GetUnit", &(unit.as_str(),)) {
+                    Ok(path) => path,
+                    Err(_) if Instant::now() < deadline => {
+                        std::thread::yield_now();
+                        continue;
+                    }
+                    Err(_) => {
+                        abort_fixture_scope(&unit);
+                        return None;
+                    }
+                };
+                let observation = match read_unit_observation(&connection, &path) {
+                    Ok(observation) => observation,
+                    Err(_) => {
+                        abort_fixture_scope(&unit);
+                        return None;
+                    }
+                };
                 let procs = std::fs::read_to_string(format!(
                     "/sys/fs/cgroup{}/cgroup.procs",
                     observation.control_group
@@ -313,6 +342,7 @@ mod systemd_integration_tests {
                     });
                 }
                 if Instant::now() >= deadline {
+                    abort_fixture_scope(&unit);
                     return None;
                 }
                 std::thread::yield_now();
@@ -346,6 +376,14 @@ mod systemd_integration_tests {
                 return;
             }
             let _ = unit_call(&connection, &path, "Kill", &("all", libc::SIGKILL));
+        }
+    }
+
+    fn abort_fixture_scope(unit: &str) {
+        for action in ["kill", "stop"] {
+            let _ = Command::new("/usr/bin/systemctl")
+                .args([action, "--no-block", unit])
+                .spawn();
         }
     }
 
