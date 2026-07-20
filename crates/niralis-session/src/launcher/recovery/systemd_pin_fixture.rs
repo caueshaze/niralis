@@ -83,12 +83,12 @@ impl SystemdScopeFixture {
                 terminate_fixture_helper(&mut leader);
                 return Err("StartTransientUnit unexpectedly suppressed its reply".to_owned());
             }
-            Err(error) => {
-                terminate_fixture_helper(&mut leader);
-                return Err(format!(
-                        "StartTransientUnit was rejected; grant this user org.freedesktop.systemd1.manage-units for the explicitly requested integration fixture: {error}"
+                Err(error) => {
+                    terminate_fixture_helper(&mut leader);
+                    return Err(format!(
+                        "StartTransientUnit was rejected; run pkttyagent --process $$ in another terminal or grant this user org.freedesktop.systemd1.manage-units for the explicitly requested integration fixture: {error}"
                     ));
-            }
+                }
         }
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
