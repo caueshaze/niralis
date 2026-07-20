@@ -2,6 +2,26 @@ use super::super::*;
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 use zbus::zvariant::Value;
+
+#[zbus::proxy(
+    interface = "org.freedesktop.systemd1.Manager",
+    default_service = "org.freedesktop.systemd1",
+    default_path = "/org/freedesktop/systemd1",
+    gen_async = false
+)]
+trait SystemdManager {
+    #[zbus(name = "StartTransientUnit", allow_interactive_auth)]
+    fn start_transient_unit(
+        &self,
+        unit: &str,
+        mode: &str,
+        properties: Vec<(&str, Value<'_>)>,
+        auxiliary: Vec<(&str, Vec<(&str, Value<'_>)>)>,
+    ) -> zbus::Result<OwnedObjectPath>;
+
+    fn get_unit(&self, unit: &str) -> zbus::Result<OwnedObjectPath>;
+}
+
 pub(super) struct SystemdScopeFixture {
     pub(super) unit: String,
     pub(super) invocation: String,
@@ -49,13 +69,8 @@ impl SystemdScopeFixture {
                 return Err(error);
             }
         };
-        let manager = zbus::blocking::Proxy::new(
-            &connection,
-            SYSTEMD_DESTINATION,
-            SYSTEMD_MANAGER_PATH,
-            SYSTEMD_MANAGER_INTERFACE,
-        )
-        .map_err(|error| format!("creating systemd Manager proxy failed: {error}"));
+        let manager = SystemdManagerProxy::new(&connection)
+            .map_err(|error| format!("creating systemd Manager proxy failed: {error}"));
         let manager = match manager {
             Ok(manager) => manager,
             Err(error) => {
@@ -72,27 +87,20 @@ impl SystemdScopeFixture {
             ("CollectMode", Value::from("inactive-or-failed")),
         ];
         let auxiliary: Vec<(&str, Vec<(&str, Value<'_>)>)> = Vec::new();
-        let start_result: Result<Option<OwnedObjectPath>, _> = manager.call_with_flags(
-            "StartTransientUnit",
-            zbus::proxy::MethodFlags::AllowInteractiveAuth.into(),
-            &(unit.as_str(), "fail", properties, auxiliary),
-        );
+        let start_result =
+            manager.start_transient_unit(unit.as_str(), "fail", properties, auxiliary);
         match start_result {
-            Ok(Some(_)) => {}
-            Ok(None) => {
+            Ok(_) => {}
+            Err(error) => {
                 terminate_fixture_helper(&mut leader);
-                return Err("StartTransientUnit unexpectedly suppressed its reply".to_owned());
+                return Err(format!(
+                    "StartTransientUnit was rejected; run pkttyagent --process $$ in another terminal or grant this user org.freedesktop.systemd1.manage-units for the explicitly requested integration fixture: {error}"
+                ));
             }
-                Err(error) => {
-                    terminate_fixture_helper(&mut leader);
-                    return Err(format!(
-                        "StartTransientUnit was rejected; run pkttyagent --process $$ in another terminal or grant this user org.freedesktop.systemd1.manage-units for the explicitly requested integration fixture: {error}"
-                    ));
-                }
         }
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
-            let path: OwnedObjectPath = match manager.call("GetUnit", &(unit.as_str(),)) {
+            let path: OwnedObjectPath = match manager.get_unit(unit.as_str()) {
                 Ok(path) => path,
                 Err(_) if Instant::now() < deadline => {
                     std::thread::yield_now();
