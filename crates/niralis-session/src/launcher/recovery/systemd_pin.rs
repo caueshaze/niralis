@@ -272,6 +272,12 @@ mod systemd_integration_tests {
                 return Err("the fixture helper /usr/bin/sleep is unavailable".to_owned());
             }
             let uid = unsafe { libc::geteuid() };
+            if uid == 0 {
+                return Err(
+                    "this integration test must run as the non-root fixture user; PayloadScopeIdentity intentionally rejects UID 0. Grant that user org.freedesktop.systemd1.manage-units instead of running cargo through sudo"
+                        .to_owned(),
+                );
+            }
             let token = format!("{:032x}", rand_token()?);
             let unit = format!("niralis-payload-{token}.scope");
             let mut leader = Command::new("/usr/bin/sleep")
@@ -283,7 +289,7 @@ mod systemd_integration_tests {
                 .map_err(|error| format!("opening the system bus failed: {error}"))
                 .and_then(|builder| {
                     builder
-                        .method_timeout(Duration::from_secs(10))
+                        .method_timeout(Duration::from_secs(30))
                         .build()
                         .map_err(|error| format!("connecting to the system bus failed: {error}"))
                 }) {
