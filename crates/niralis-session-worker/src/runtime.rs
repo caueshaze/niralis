@@ -5,5 +5,6 @@ include!("runtime/lifecycle.rs");
 include!("runtime/graceful_tests.rs");
 include!("runtime/supervisor_ack.rs");
 include!("runtime/scope_release.rs");
+include!("runtime/terminal_vt_report.rs");
 include!("runtime/ack_tests.rs");
 include!("runtime/binding_runtime_tests.rs");

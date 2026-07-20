@@ -62,12 +62,14 @@
                             proof,
                         ) => {
                             emit_fixture_event("BoundaryEmptyProofAccepted");
-                            return finalize_session_after_empty_proof(
+                            return finalize_session_after_empty_proof_with_vt_report(
                                 authoritative_scope.as_mut(),
                                 transaction,
                                 &mut terminal,
                                 proof,
                                 false,
+                                &worker_id,
+                                &registration_nonce,
                             );
                         }
                         crate::termination::GracefulFinalizationDecision::NeedsEscalation(
@@ -97,12 +99,14 @@
                                     proof,
                                     ..
                                 } => {
-                                    return finalize_session_after_empty_proof(
+                                    return finalize_session_after_empty_proof_with_vt_report(
                                         authoritative_scope.as_mut(),
                                         transaction,
                                         &mut terminal,
                                         proof,
                                         true,
+                                        &worker_id,
+                                        &registration_nonce,
                                     );
                                 }
                                 forced_outcome => {

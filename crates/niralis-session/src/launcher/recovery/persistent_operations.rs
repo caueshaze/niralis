@@ -2,6 +2,54 @@ use super::*;
 use std::io;
 
 impl PersistentRecoveryLedger {
+    pub(crate) fn worker_vt_cleanup_intent(&mut self, id: &str, attempt_id: u64) -> io::Result<()> {
+        let mut next = self.record_for_operation(id)?;
+        next.pam_status = "closed_by_worker_confirmed".to_owned();
+        next.operation_ledger.vt_disallocate =
+            DurableOperationState::IntentPersisted { attempt_id };
+        self.commit_transition(next, "started")
+    }
+
+    pub(crate) fn worker_vt_cleanup_result(
+        &mut self,
+        id: &str,
+        attempt_id: u64,
+        result: crate::TerminalVtCleanupResult,
+    ) -> io::Result<()> {
+        let mut next = self.record_for_operation(id)?;
+        let state = match result {
+            crate::TerminalVtCleanupResult::Released => {
+                next.operation_ledger.vt_disallocate =
+                    DurableOperationState::Confirmed { attempt_id };
+                "started"
+            }
+            crate::TerminalVtCleanupResult::VtDisallocateBusy => {
+                next.operation_ledger.vt_disallocate = DurableOperationState::Failed {
+                    attempt_id,
+                    failure_class: libc::EBUSY,
+                };
+                "vt_disallocate_failed_busy"
+            }
+        };
+        self.commit_transition(next, state)
+    }
+
+    fn record_for_operation(&self, id: &str) -> io::Result<PersistentRecoveryRecord> {
+        self.records
+            .get(id)
+            .cloned()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "recovery record"))
+    }
+
+    fn commit_transition(
+        &mut self,
+        mut next: PersistentRecoveryRecord,
+        state: &str,
+    ) -> io::Result<()> {
+        next.transition(state)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        self.commit(next)
+    }
     pub(crate) fn operation_intent(
         &mut self,
         id: &str,

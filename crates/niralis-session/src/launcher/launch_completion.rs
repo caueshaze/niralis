@@ -81,7 +81,7 @@ impl WorkerSessionLauncher {
                     && (started_worker_id == worker_id || started_worker_id.is_empty())
                     && session_pgid == session_pid =>
                 {
-                    let payload_scope = if let PendingLaunchPhase::ScopeRegistered {
+                    let (payload_scope, registration_nonce) = if let PendingLaunchPhase::ScopeRegistered {
                         identity,
                         registration_nonce,
                     } = &phase
@@ -90,7 +90,7 @@ impl WorkerSessionLauncher {
                         if identity.logind_session_id != logind_session_id {
                             return Err(SessionError::WorkerProtocolFailed);
                         }
-                        identity.clone()
+                        (identity.clone(), registration_nonce.clone())
                     } else {
                         return Err(SessionError::WorkerProtocolFailed);
                     };
@@ -109,6 +109,7 @@ impl WorkerSessionLauncher {
                         worker_id,
                         logind_session_id,
                         payload_scope,
+                        registration_nonce,
                         control_path,
                         control_dir,
                     )?;

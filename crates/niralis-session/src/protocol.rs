@@ -8,8 +8,8 @@ use crate::{LogindSessionId, SessionRequest, StartedSession, WorkerSecret};
 /// Version 12 adds the post-ack payload-scope release rendezvous event.
 pub const WORKER_PROTOCOL_VERSION: u32 = 12;
 pub const MAX_WORKER_MESSAGE_BYTES: usize = 64 * 1024;
-/// Version 3 adds the authenticated bidirectional payload-scope release round-trip.
-pub const WORKER_CONTROL_PROTOCOL_VERSION: u32 = 3;
+/// Version 4 adds authenticated worker terminal-VT intent/result reporting.
+pub const WORKER_CONTROL_PROTOCOL_VERSION: u32 = 4;
 pub const MAX_WORKER_CONTROL_MESSAGE_BYTES: usize = 4096;
 /// Private inherited descriptor used for supervisor lifecycle traffic. Stdin
 /// remains a one-shot WorkerRequest transport and is expected to reach EOF.
@@ -110,6 +110,38 @@ pub enum WorkerControlRequest {
         expected_session_pid: u32,
         expected_session_pgid: u32,
     },
+    TerminalVtCleanupIntent {
+        worker_id: String,
+        expected_worker_pid: u32,
+        registration_nonce: String,
+        scope_identity: PayloadScopeIdentity,
+    },
+    TerminalVtCleanupIntentAcknowledged {
+        worker_id: String,
+        expected_worker_pid: u32,
+        registration_nonce: String,
+        attempt_id: u64,
+    },
+    TerminalVtCleanupResult {
+        worker_id: String,
+        expected_worker_pid: u32,
+        registration_nonce: String,
+        attempt_id: u64,
+        result: TerminalVtCleanupResult,
+    },
+    TerminalVtCleanupResultAcknowledged {
+        worker_id: String,
+        expected_worker_pid: u32,
+        registration_nonce: String,
+        attempt_id: u64,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalVtCleanupResult {
+    Released,
+    VtDisallocateBusy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

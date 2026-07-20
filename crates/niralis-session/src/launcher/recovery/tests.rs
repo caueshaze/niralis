@@ -70,7 +70,7 @@ mod supervisor_recovery_tests {
         let registered = source.find("mark_payload_registered").unwrap();
         assert!(prepare < ack && ack < registered);
         assert_eq!(crate::WORKER_PROTOCOL_VERSION, 12);
-        assert_eq!(crate::WORKER_CONTROL_PROTOCOL_VERSION, 3);
+        assert_eq!(crate::WORKER_CONTROL_PROTOCOL_VERSION, 4);
     }
 
     #[test]

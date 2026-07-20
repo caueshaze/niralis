@@ -10,8 +10,10 @@ pub(super) struct RunningRegistration {
     pub(super) worker_id: String,
     pub(super) logind_session_id: crate::LogindSessionId,
     pub(super) payload_scope: crate::PayloadScopeIdentity,
+    pub(super) registration_nonce: String,
     pub(super) control_path: PathBuf,
     pub(super) control_dir: TempDir,
+    pub(super) control_sender: mpsc::Sender<WorkerSupervisorMessage>,
 }
 
 impl SupervisorLoopState {
@@ -28,8 +30,10 @@ impl SupervisorLoopState {
             worker_id,
             logind_session_id,
             payload_scope,
+            registration_nonce,
             control_path,
             control_dir,
+            control_sender,
         } = registration;
         let index = self
             .pending
@@ -83,9 +87,19 @@ impl SupervisorLoopState {
             session_pid,
             session_pgid,
             worker_id,
+            registration_nonce,
             control_path,
             _control_dir: control_dir,
+            terminal_vt_reported_busy: false,
         });
+        let reader = self
+            .children
+            .last()
+            .expect("just pushed")
+            ._supervisor_channel
+            .try_clone()
+            .map_err(|_| SessionError::WorkerIoFailed)?;
+        super::running_control::spawn_running_control_reader(reader, control_sender);
         Ok(())
     }
 
@@ -126,6 +140,16 @@ impl SupervisorLoopState {
 
     pub(super) fn finish_exited_worker(&mut self, index: usize, status: ExitStatus) {
         let mut worker = self.children.swap_remove(index);
+        if worker.terminal_vt_reported_busy {
+            info!(worker_id = %worker.worker_id, "worker reported durable VT EBUSY; preserving quarantine without emergency recovery");
+            self.seat = SeatLifecycle::Quarantined {
+                lifecycle_id: worker.record.lifecycle_id.clone(),
+                stage: EmergencyRecoveryStage::VtRecovery,
+                reason: SupervisorRecoveryError::VtDisallocateBusy,
+            };
+            self.quarantined.push(worker.record);
+            return;
+        }
         if status.success()
             && finalize_clean_worker_exit(
                 &mut worker.record,
@@ -133,6 +157,9 @@ impl SupervisorLoopState {
                 self.recovery_provider.as_ref(),
             )
             .is_ok()
+            && self
+                .resolve_clean_worker_record(&worker.record.lifecycle_id)
+                .is_ok()
         {
             debug!(?status, username = %worker.session.username, session_pid = worker.session_pid, "session worker exited and was reaped after verified clean finalization");
             self.seat = SeatLifecycle::Free;

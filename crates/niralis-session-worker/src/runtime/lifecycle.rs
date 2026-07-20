@@ -59,6 +59,7 @@ enum SessionWaitResult {
     Graceful(crate::termination::GracefulTerminationOutcome),
 }
 
+#[cfg(test)]
 fn finalize_session_after_empty_proof(
     scope: &mut dyn crate::payload_scope::AuthoritativePayloadScope,
     mut transaction: Box<dyn niralis_auth::AuthenticatedTransaction>,
@@ -103,6 +104,43 @@ fn finalize_session_after_empty_proof(
     } else {
         Err(SessionError::AuthenticatedSessionFailed)
     }
+}
+
+fn finalize_session_after_empty_proof_with_vt_report(
+    scope: &mut dyn crate::payload_scope::AuthoritativePayloadScope,
+    mut transaction: Box<dyn niralis_auth::AuthenticatedTransaction>,
+    terminal: &mut VirtualTerminalGuard,
+    proof: crate::termination::BoundaryEmptyProof,
+    forced: bool,
+    worker_id: &str,
+    registration_nonce: &str,
+) -> Result<(), SessionError> {
+    info!("releasing pinned systemd unit reference");
+    if let Err(error) = scope.release_pin() { warn!(?error, "pinned unit reference release failed after empty proof"); }
+    info!("closing worker PAM transaction after empty proof");
+    transaction.close_session().map_err(|error| {
+        warn!(?error, "worker PAM close failed after empty proof");
+        SessionError::AuthenticatedSessionFailed
+    })?;
+    drop(transaction);
+    let identity = scope.identity().clone();
+    let (stream, attempt_id) = begin_terminal_vt_cleanup(worker_id, registration_nonce, &identity)?;
+    info!("releasing session VT after durable supervisor intent");
+    match terminal.release() {
+        Ok(()) => complete_terminal_vt_cleanup(stream, worker_id, registration_nonce, attempt_id, niralis_session::TerminalVtCleanupResult::Released)?,
+        Err(crate::vt::VirtualTerminalError::CleanupOperationFailed { stage: "disallocate", errno }) if errno == libc::EBUSY => {
+            warn!(errno, "session VT disallocation is busy; supervisor quarantine is durable");
+            complete_terminal_vt_cleanup(stream, worker_id, registration_nonce, attempt_id, niralis_session::TerminalVtCleanupResult::VtDisallocateBusy)?;
+            emit_fixture_event("WorkerVtBusyAcknowledged");
+            return Ok(());
+        }
+        Err(error) => { warn!(?error, "session VT release failed after durable intent"); return Err(SessionError::AuthenticatedSessionFailed); }
+    }
+    if forced { info!("forced session finalization complete"); } else { info!("cooperative session finalization complete"); }
+    emit_fixture_event("WorkerReturning");
+    if matches!(proof.leader_exit(), crate::termination::LeaderExit::ExitedZero)
+        || (forced && matches!(proof.leader_exit(), crate::termination::LeaderExit::KilledBySignal(libc::SIGKILL))) { Ok(()) }
+    else { Err(SessionError::AuthenticatedSessionFailed) }
 }
 
 struct ForcedWaitContext<'a> {

@@ -147,6 +147,7 @@ impl WorkerSupervisor {
         worker_id: String,
         logind_session_id: crate::LogindSessionId,
         payload_scope: crate::PayloadScopeIdentity,
+        registration_nonce: String,
         control_path: PathBuf,
         control_dir: TempDir,
     ) -> Result<RuntimeSessionId, SessionError> {
@@ -170,8 +171,10 @@ impl WorkerSupervisor {
             worker_id,
             logind_session_id,
             payload_scope,
+            registration_nonce,
             control_path,
             control_dir,
+            control_sender: self.sender.clone(),
             result,
         }) {
             Ok(()) => {

@@ -74,7 +74,7 @@ fn phase_gate_is_not_runtime_selectable() {
     assert!(!runtime.contains("NIRALIS_TEST_PHASE"));
     assert!(!protocol.contains("WorkerLaunchPhase"));
     assert_eq!(niralis_session::WORKER_PROTOCOL_VERSION, 12);
-    assert_eq!(niralis_session::WORKER_CONTROL_PROTOCOL_VERSION, 3);
+    assert_eq!(niralis_session::WORKER_CONTROL_PROTOCOL_VERSION, 4);
     assert_eq!(niralis_session_worker::SESSION_CHILD_PROTOCOL_VERSION, 9);
     assert_eq!(niralis_session_worker::SESSION_EXEC_PROBE_VERSION, 2);
 }

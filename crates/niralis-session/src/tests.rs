@@ -188,6 +188,38 @@ fn payload_scope_release_messages_round_trip_with_identity_and_nonce() {
 }
 
 #[test]
+fn terminal_vt_cleanup_messages_bind_identity_nonce_and_attempt() {
+    let identity = crate::PayloadScopeIdentity {
+        unit_name: "niralis-payload-terminal.scope".into(),
+        invocation_id: "0123456789abcdef0123456789abcdef".into(),
+        expected_uid: 1000,
+        logind_session_id: crate::LogindSessionId::new("c1".into()).unwrap(),
+    };
+    let request = crate::WorkerControlRequest::TerminalVtCleanupResult {
+        worker_id: "worker-terminal-1".into(),
+        expected_worker_pid: 123,
+        registration_nonce: "registration-nonce".into(),
+        attempt_id: 9,
+        result: crate::TerminalVtCleanupResult::VtDisallocateBusy,
+    };
+    let encoded = serde_json::to_string(&crate::WorkerEnvelope {
+        version: crate::WORKER_CONTROL_PROTOCOL_VERSION,
+        message: request.clone(),
+    })
+    .unwrap();
+    let decoded: crate::WorkerEnvelope<crate::WorkerControlRequest> =
+        serde_json::from_str(&encoded).unwrap();
+    assert_eq!(decoded.message, request);
+    let intent = crate::WorkerControlRequest::TerminalVtCleanupIntent {
+        worker_id: "worker-terminal-1".into(),
+        expected_worker_pid: 123,
+        registration_nonce: "registration-nonce".into(),
+        scope_identity: identity,
+    };
+    assert!(serde_json::to_vec(&intent).unwrap().len() < crate::MAX_WORKER_CONTROL_MESSAGE_BYTES);
+}
+
+#[test]
 fn worker_secret_debug_redacts_plaintext() {
     let secret = WorkerSecret::new("secret".to_owned());
     let debug = format!("{secret:?}");

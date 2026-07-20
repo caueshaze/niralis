@@ -85,9 +85,26 @@ enum WorkerSupervisorMessage {
         worker_id: String,
         logind_session_id: crate::LogindSessionId,
         payload_scope: crate::PayloadScopeIdentity,
+        registration_nonce: String,
         control_path: PathBuf,
         control_dir: TempDir,
+        control_sender: mpsc::Sender<WorkerSupervisorMessage>,
         result: mpsc::Sender<Result<(), SessionError>>,
+    },
+    TerminalVtIntent {
+        worker_id: String,
+        worker_pid: u32,
+        registration_nonce: String,
+        identity: crate::PayloadScopeIdentity,
+        result: mpsc::Sender<Result<u64, SessionError>>,
+    },
+    TerminalVtResult {
+        worker_id: String,
+        worker_pid: u32,
+        registration_nonce: String,
+        attempt_id: u64,
+        result: crate::TerminalVtCleanupResult,
+        acknowledged: mpsc::Sender<Result<(), SessionError>>,
     },
     Terminate {
         session: StartedSession,
@@ -111,8 +128,10 @@ struct SupervisedWorker {
     session_pid: u32,
     session_pgid: u32,
     worker_id: String,
+    registration_nonce: String,
     control_path: PathBuf,
     _control_dir: TempDir,
+    terminal_vt_reported_busy: bool,
 }
 
 struct PendingWorkerLifecycle {
