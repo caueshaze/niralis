@@ -21,12 +21,21 @@ pub(crate) fn wait_for_pidfd(fd: i32, timeout_ms: i32) -> Result<bool, ()> {
         Ok(result > 0 && p.revents & libc::POLLIN != 0)
     }
 }
-pub(crate) fn wait_for_boundary_empty(pin: &SupervisorPinnedInvocationUnit) -> Result<(), ()> {
-    let mut observer = CgroupEventsObserver::open(&pin.control_group).map_err(|_| ())?;
-    let timer = MonotonicTimer::arm(EMERGENCY_BOUNDARY_TIMEOUT).map_err(|_| ())?;
+pub(crate) fn wait_for_boundary_empty(
+    pin: &SupervisorPinnedInvocationUnit,
+    owner_watch: &OwnerWatch,
+) -> Result<(), StartupRecoveryFailure> {
+    let mut observer = CgroupEventsObserver::open(&pin.control_group)
+        .map_err(|_| StartupRecoveryFailure::BoundaryIdentityChanged)?;
+    let timer = MonotonicTimer::arm(EMERGENCY_BOUNDARY_TIMEOUT)
+        .map_err(|_| StartupRecoveryFailure::BoundaryIdentityChanged)?;
     loop {
+        owner_watch
+            .stable()
+            .map_err(|_| StartupRecoveryFailure::SystemdOwnerChanged)?;
         if matches!(
-            pin.boundary_state().map_err(|_| ())?,
+            pin.boundary_state()
+                .map_err(|_| StartupRecoveryFailure::BoundaryIdentityChanged)?,
             SupervisorBoundaryState::Empty | SupervisorBoundaryState::Absent
         ) {
             return Ok(());
@@ -42,15 +51,27 @@ pub(crate) fn wait_for_boundary_empty(pin: &SupervisorPinnedInvocationUnit) -> R
                 events: libc::POLLIN,
                 revents: 0,
             },
+            libc::pollfd {
+                fd: owner_watch.event_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            },
         ];
-        if unsafe { libc::poll(descriptors.as_mut_ptr(), 2, -1) } < 0 {
-            return Err(());
+        if unsafe { libc::poll(descriptors.as_mut_ptr(), 3, -1) } < 0 {
+            return Err(StartupRecoveryFailure::BoundaryIdentityChanged);
         }
         if descriptors[1].revents & libc::POLLIN != 0 {
-            return Err(());
+            return Err(StartupRecoveryFailure::BoundaryIdentityChanged);
+        }
+        if descriptors[2].revents & libc::POLLIN != 0 {
+            owner_watch
+                .stable()
+                .map_err(|_| StartupRecoveryFailure::SystemdOwnerChanged)?;
         }
         if descriptors[0].revents & (libc::POLLPRI | libc::POLLERR) != 0 {
-            observer.refresh().map_err(|_| ())?;
+            observer
+                .refresh()
+                .map_err(|_| StartupRecoveryFailure::BoundaryIdentityChanged)?;
         }
     }
 }

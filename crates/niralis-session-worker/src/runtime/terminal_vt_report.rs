@@ -37,3 +37,14 @@ fn complete_terminal_vt_cleanup(
         _ => Err(SessionError::WorkerProtocolFailed),
     }
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TerminalReportDelivery {
+    Delivered,
+    UnavailableAfterSupervisorDisconnect,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TerminalReportExpectation {
+    Required,
+    UnavailableAfterSupervisorDisconnect,
+}

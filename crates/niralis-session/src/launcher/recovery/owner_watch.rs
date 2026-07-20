@@ -1,14 +1,30 @@
 use super::*;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
+    atomic::{AtomicU64, Ordering},
+    Arc, Mutex,
 };
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AuthorityWatchState {
+    Stable {
+        unique_owner: String,
+        generation: u64,
+    },
+    Changed {
+        previous_owner: String,
+        current_owner: String,
+        generation: u64,
+    },
+    Lost {
+        generation: u64,
+    },
+}
 
 #[derive(Debug)]
 pub(crate) struct OwnerWatch {
     destination: String,
-    initial_owner: String,
-    changed: Arc<AtomicBool>,
+    state: Arc<Mutex<AuthorityWatchState>>,
+    generation: Arc<AtomicU64>,
     event: OwnedFd,
     address: Option<String>,
 }
@@ -19,8 +35,11 @@ impl OwnerWatch {
         let event = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
         Self {
             destination: "test.owner".to_owned(),
-            initial_owner: "test.owner".to_owned(),
-            changed: Arc::new(AtomicBool::new(false)),
+            state: Arc::new(Mutex::new(AuthorityWatchState::Stable {
+                unique_owner: "test.owner".to_owned(),
+                generation: 0,
+            })),
+            generation: Arc::new(AtomicU64::new(0)),
             event: unsafe { OwnedFd::from_raw_fd(event) },
             address: None,
         }
@@ -28,7 +47,7 @@ impl OwnerWatch {
 
     #[cfg_attr(not(any(test, feature = "supervisor-test-fixtures")), allow(dead_code))]
     pub(crate) fn invalidate_for_test(&self) {
-        self.changed.store(true, Ordering::Release);
+        self.invalidate("test.owner".to_owned(), "test.owner.replaced".to_owned());
     }
 
     pub(crate) fn open(
@@ -48,8 +67,14 @@ impl OwnerWatch {
             return Err(SupervisorRecoveryError::BusUnavailable);
         }
         let event = unsafe { OwnedFd::from_raw_fd(event) };
-        let changed = Arc::new(AtomicBool::new(false));
-        let thread_changed = Arc::clone(&changed);
+        let state = Arc::new(Mutex::new(AuthorityWatchState::Stable {
+            unique_owner: initial_owner.clone(),
+            generation: 0,
+        }));
+        let generation = Arc::new(AtomicU64::new(0));
+        let thread_state = Arc::clone(&state);
+        let thread_generation = Arc::clone(&generation);
+        let thread_initial_owner = initial_owner.clone();
         let name = destination.to_owned();
         let thread_address = address.clone();
         let thread_event = unsafe { libc::dup(event.as_raw_fd()) };
@@ -60,7 +85,7 @@ impl OwnerWatch {
         std::thread::Builder::new()
             .name("niralis-owner-watch".to_owned())
             .spawn(move || {
-                let builder = match thread_address {
+                let builder = match &thread_address {
                     Some(address) => zbus::blocking::connection::Builder::address(address.as_str()),
                     None => zbus::blocking::connection::Builder::system(),
                 };
@@ -81,7 +106,18 @@ impl OwnerWatch {
                     return;
                 };
                 if signals.next().is_some() {
-                    thread_changed.store(true, Ordering::Release);
+                    let generation = thread_generation.fetch_add(1, Ordering::AcqRel) + 1;
+                    let current_owner = current_owner_on_address(&name, thread_address.as_deref());
+                    if let Ok(mut state) = thread_state.lock() {
+                        *state = match current_owner {
+                            Ok(current_owner) => AuthorityWatchState::Changed {
+                                previous_owner: thread_initial_owner,
+                                current_owner,
+                                generation,
+                            },
+                            Err(()) => AuthorityWatchState::Lost { generation },
+                        };
+                    }
                     let value = 1u64.to_ne_bytes();
                     let _ = unsafe {
                         libc::write(thread_event.as_raw_fd(), value.as_ptr().cast(), value.len())
@@ -91,8 +127,8 @@ impl OwnerWatch {
             .map_err(|_| SupervisorRecoveryError::BusUnavailable)?;
         Ok(Self {
             destination: destination.to_owned(),
-            initial_owner,
-            changed,
+            state,
+            generation,
             event,
             address,
         })
@@ -105,81 +141,77 @@ impl OwnerWatch {
             revents: 0,
         };
         if unsafe { libc::poll(&mut descriptor, 1, 0) } > 0 {
-            self.changed.store(true, Ordering::Release);
+            self.mark_lost();
         }
-        if self.changed.load(Ordering::Acquire) || self.current_owner()? != self.initial_owner {
-            Err(SupervisorRecoveryError::BusUnavailable)
-        } else {
-            Ok(())
+        let state = self
+            .state()
+            .map_err(|_| SupervisorRecoveryError::BusUnavailable)?;
+        let AuthorityWatchState::Stable { unique_owner, .. } = state else {
+            return Err(SupervisorRecoveryError::BusUnavailable);
+        };
+        match self.current_owner() {
+            Ok(current_owner) if current_owner == unique_owner => Ok(()),
+            Ok(current_owner) => {
+                self.invalidate(unique_owner, current_owner);
+                Err(SupervisorRecoveryError::BusUnavailable)
+            }
+            Err(error) => {
+                self.mark_lost();
+                Err(error)
+            }
+        }
+    }
+
+    pub(crate) fn event_fd(&self) -> i32 {
+        self.event.as_raw_fd()
+    }
+
+    pub(crate) fn state(&self) -> Result<AuthorityWatchState, ()> {
+        self.state.lock().map(|state| state.clone()).map_err(|_| ())
+    }
+
+    fn invalidate(&self, previous_owner: String, current_owner: String) {
+        let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
+        if let Ok(mut state) = self.state.lock() {
+            if matches!(*state, AuthorityWatchState::Stable { .. }) {
+                *state = AuthorityWatchState::Changed {
+                    previous_owner,
+                    current_owner,
+                    generation,
+                };
+            }
+        }
+    }
+
+    fn mark_lost(&self) {
+        let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
+        if let Ok(mut state) = self.state.lock() {
+            if matches!(*state, AuthorityWatchState::Stable { .. }) {
+                *state = AuthorityWatchState::Lost { generation };
+            }
         }
     }
 
     fn current_owner(&self) -> Result<String, SupervisorRecoveryError> {
-        let builder = match &self.address {
-            Some(address) => zbus::blocking::connection::Builder::address(address.as_str()),
-            None => zbus::blocking::connection::Builder::system(),
-        };
-        let connection = builder
-            .map_err(|_| SupervisorRecoveryError::BusUnavailable)?
-            .method_timeout(Duration::from_secs(2))
-            .build()
-            .map_err(|_| SupervisorRecoveryError::BusUnavailable)?;
-        let proxy =
-            zbus::blocking::Proxy::new(&connection, DBUS_DESTINATION, DBUS_PATH, DBUS_INTERFACE)
-                .map_err(|_| SupervisorRecoveryError::BusUnavailable)?;
-        proxy
-            .call("GetNameOwner", &(self.destination.as_str(),))
+        current_owner_on_address(&self.destination, self.address.as_deref())
             .map_err(|_| SupervisorRecoveryError::BusUnavailable)
     }
 }
 
-pub(crate) fn open_recovery_owner_watches(
-) -> Result<(OwnerWatch, OwnerWatch), SupervisorRecoveryError> {
-    let systemd = systemd_owner(
-        &zbus::blocking::connection::Builder::system()
-            .map_err(|_| SupervisorRecoveryError::BusUnavailable)?
-            .method_timeout(Duration::from_secs(2))
-            .build()
-            .map_err(|_| SupervisorRecoveryError::BusUnavailable)?,
-    )?;
-    let logind = logind_owner()?;
-    Ok((
-        OwnerWatch::open(SYSTEMD_DESTINATION, systemd)?,
-        OwnerWatch::open(LOGIND_DESTINATION, logind)?,
-    ))
-}
-
-#[cfg(any(
-    test,
-    feature = "integration-test-control",
-    feature = "supervisor-test-fixtures"
-))]
-pub(crate) fn open_recovery_owner_watches_on_address(
-    address: &str,
-) -> Result<(OwnerWatch, OwnerWatch), SupervisorRecoveryError> {
-    let connection = zbus::blocking::connection::Builder::address(address)
-        .map_err(|_| SupervisorRecoveryError::BusUnavailable)?
+fn current_owner_on_address(destination: &str, address: Option<&str>) -> Result<String, ()> {
+    let builder = match address {
+        Some(address) => zbus::blocking::connection::Builder::address(address),
+        None => zbus::blocking::connection::Builder::system(),
+    };
+    let connection = builder
+        .map_err(|_| ())?
         .method_timeout(Duration::from_secs(2))
         .build()
-        .map_err(|_| SupervisorRecoveryError::BusUnavailable)?;
-    let dbus = zbus::blocking::Proxy::new(&connection, DBUS_DESTINATION, DBUS_PATH, DBUS_INTERFACE)
-        .map_err(|_| SupervisorRecoveryError::BusUnavailable)?;
-    let owner = |name: &str| {
-        dbus.call::<_, _, String>("GetNameOwner", &(name,))
-            .map_err(|_| SupervisorRecoveryError::BusUnavailable)
-    };
-    Ok((
-        OwnerWatch::open_on_address(
-            SYSTEMD_DESTINATION,
-            owner(SYSTEMD_DESTINATION)?,
-            Some(address.to_owned()),
-        )?,
-        OwnerWatch::open_on_address(
-            LOGIND_DESTINATION,
-            owner(LOGIND_DESTINATION)?,
-            Some(address.to_owned()),
-        )?,
-    ))
+        .map_err(|_| ())?;
+    let proxy =
+        zbus::blocking::Proxy::new(&connection, DBUS_DESTINATION, DBUS_PATH, DBUS_INTERFACE)
+            .map_err(|_| ())?;
+    proxy.call("GetNameOwner", &(destination,)).map_err(|_| ())
 }
 
 #[cfg(test)]
@@ -191,5 +223,9 @@ mod tests {
         let watch = OwnerWatch::scripted();
         watch.invalidate_for_test();
         assert!(watch.stable().is_err());
+        assert!(matches!(
+            watch.state().unwrap(),
+            AuthorityWatchState::Changed { generation: 1, .. }
+        ));
     }
 }

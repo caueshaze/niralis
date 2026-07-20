@@ -114,6 +114,7 @@ fn finalize_session_after_empty_proof_with_vt_report(
     forced: bool,
     worker_id: &str,
     registration_nonce: &str,
+    report_expectation: TerminalReportExpectation,
 ) -> Result<(), SessionError> {
     info!("releasing pinned systemd unit reference");
     if let Err(error) = scope.release_pin() { warn!(?error, "pinned unit reference release failed after empty proof"); }
@@ -123,11 +124,32 @@ fn finalize_session_after_empty_proof_with_vt_report(
         SessionError::AuthenticatedSessionFailed
     })?;
     drop(transaction);
+    if matches!(
+        report_expectation,
+        TerminalReportExpectation::UnavailableAfterSupervisorDisconnect
+    ) || supervisor_channel_is_closed()
+    {
+        info!("terminal session cleanup completed after supervisor disconnect");
+        let result = terminal.release().map_err(|error| {
+            warn!(?error, "session VT release failed after supervisor disconnect");
+            SessionError::AuthenticatedSessionFailed
+        });
+        let delivery = TerminalReportDelivery::UnavailableAfterSupervisorDisconnect;
+        info!(?delivery, "terminal report unavailable because supervisor channel is closed");
+        result?;
+        info!("worker exiting with locally finalized session state");
+        emit_fixture_event("WorkerReturning");
+        return terminal_local_finalization_result(&proof, forced);
+    }
     let identity = scope.identity().clone();
     let (stream, attempt_id) = begin_terminal_vt_cleanup(worker_id, registration_nonce, &identity)?;
     info!("releasing session VT after durable supervisor intent");
     match terminal.release() {
-        Ok(()) => complete_terminal_vt_cleanup(stream, worker_id, registration_nonce, attempt_id, niralis_session::TerminalVtCleanupResult::Released)?,
+        Ok(()) => {
+            complete_terminal_vt_cleanup(stream, worker_id, registration_nonce, attempt_id, niralis_session::TerminalVtCleanupResult::Released)?;
+            let delivery = TerminalReportDelivery::Delivered;
+            debug!(?delivery, "terminal VT cleanup result delivered to supervisor");
+        }
         Err(crate::vt::VirtualTerminalError::CleanupOperationFailed { stage: "disallocate", errno }) if errno == libc::EBUSY => {
             warn!(errno, "session VT disallocation is busy; supervisor quarantine is durable");
             complete_terminal_vt_cleanup(stream, worker_id, registration_nonce, attempt_id, niralis_session::TerminalVtCleanupResult::VtDisallocateBusy)?;
@@ -138,9 +160,24 @@ fn finalize_session_after_empty_proof_with_vt_report(
     }
     if forced { info!("forced session finalization complete"); } else { info!("cooperative session finalization complete"); }
     emit_fixture_event("WorkerReturning");
+    terminal_local_finalization_result(&proof, forced)
+}
+
+fn terminal_local_finalization_result(
+    proof: &crate::termination::BoundaryEmptyProof,
+    forced: bool,
+) -> Result<(), SessionError> {
     if matches!(proof.leader_exit(), crate::termination::LeaderExit::ExitedZero)
-        || (forced && matches!(proof.leader_exit(), crate::termination::LeaderExit::KilledBySignal(libc::SIGKILL))) { Ok(()) }
-    else { Err(SessionError::AuthenticatedSessionFailed) }
+        || (forced
+            && matches!(
+                proof.leader_exit(),
+                crate::termination::LeaderExit::KilledBySignal(libc::SIGKILL)
+            ))
+    {
+        Ok(())
+    } else {
+        Err(SessionError::AuthenticatedSessionFailed)
+    }
 }
 
 struct ForcedWaitContext<'a> {

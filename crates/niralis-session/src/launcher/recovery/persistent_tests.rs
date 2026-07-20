@@ -57,6 +57,40 @@ fn durable_transition_reloads_with_monotonic_sequence() {
 }
 
 #[test]
+fn worker_vt_cleanup_journal_transitions_preserve_started_state_and_operation_result() {
+    let dir = tempdir().unwrap();
+    let records = dir.path().join("records");
+    let mut ledger = PersistentRecoveryLedger::open(&records, dir.path().join("lock")).unwrap();
+    ledger.create(record("lifecycle-terminal-vt")).unwrap();
+
+    ledger
+        .worker_vt_cleanup_intent("lifecycle-terminal-vt", 2)
+        .unwrap();
+    let item = ledger.records().next().unwrap();
+    assert_eq!(item.state, "started");
+    assert_eq!(item.sequence, 2);
+    assert_eq!(
+        item.operation_ledger.vt_disallocate,
+        DurableOperationState::IntentPersisted { attempt_id: 2 }
+    );
+
+    ledger
+        .worker_vt_cleanup_result(
+            "lifecycle-terminal-vt",
+            2,
+            crate::TerminalVtCleanupResult::Released,
+        )
+        .unwrap();
+    let item = ledger.records().next().unwrap();
+    assert_eq!(item.state, "started");
+    assert_eq!(item.sequence, 3);
+    assert_eq!(
+        item.operation_ledger.vt_disallocate,
+        DurableOperationState::Confirmed { attempt_id: 2 }
+    );
+}
+
+#[test]
 fn durable_quarantine_records_reason_and_monotonic_sequence() {
     let dir = tempdir().unwrap();
     let records = dir.path().join("records");

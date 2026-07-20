@@ -192,3 +192,172 @@ impl SupervisorPinnedInvocationUnit {
         Ok(())
     }
 }
+
+#[cfg(all(test, feature = "systemd-integration-tests"))]
+mod systemd_integration_tests {
+    use super::*;
+    use std::process::Command;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    #[ignore = "requires an explicitly authorized local systemd integration host"]
+    fn real_invocation_bound_unit_kill_empties_scope() {
+        let Some(scope) = SystemdScopeFixture::start() else {
+            eprintln!("SKIP systemd integration preflight failed");
+            return;
+        };
+        let _teardown = scope.teardown();
+        let identity = crate::PayloadScopeIdentity {
+            unit_name: scope.unit.clone(),
+            invocation_id: scope.invocation.clone(),
+            expected_uid: unsafe { libc::geteuid() },
+            logind_session_id: crate::LogindSessionId::new("systemd-integration".to_owned())
+                .expect("fixture logind id"),
+        };
+        let leader = SupervisorLeaderPidfd::open(scope.leader_pid).expect("fixture leader pidfd");
+        let mut pin = SupervisorPinnedInvocationUnit::acquire(
+            identity,
+            scope.leader_pid,
+            std::process::id(),
+            std::process::id(),
+            &leader,
+        )
+        .expect("production invocation-bound Ref and revalidation");
+        assert_eq!(pin.object_path, scope.object_path);
+        assert_eq!(pin.control_group, scope.control_group);
+        pin.request_emergency_kill()
+            .expect("production Unit.Kill(all, SIGKILL)");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !matches!(pin.boundary_state(), Ok(SupervisorBoundaryState::Empty)) {
+            assert!(
+                Instant::now() < deadline,
+                "fixture boundary did not become empty"
+            );
+            std::thread::yield_now();
+        }
+        assert!(leader.observed_dead().expect("fixture leader observation"));
+        assert!(std::fs::read_to_string(format!(
+            "/sys/fs/cgroup{}/cgroup.procs",
+            pin.control_group
+        ))
+        .expect("fixture cgroup procs")
+        .trim()
+        .is_empty());
+        assert!(matches!(
+            pin.request_emergency_kill(),
+            Err(SupervisorRecoveryError::BusDeliveryIndeterminate)
+        ));
+        pin.release().expect("production Unit.Unref");
+    }
+
+    struct SystemdScopeFixture {
+        unit: String,
+        invocation: String,
+        object_path: String,
+        control_group: String,
+        leader_pid: u32,
+    }
+
+    impl SystemdScopeFixture {
+        fn start() -> Option<Self> {
+            if !std::path::Path::new("/sys/fs/cgroup/cgroup.controllers").exists()
+                || !std::path::Path::new("/usr/bin/systemd-run").exists()
+            {
+                return None;
+            }
+            let uid = unsafe { libc::geteuid() };
+            let token = format!("{:032x}", rand_token());
+            let unit = format!("niralis-payload-{token}.scope");
+            let status = Command::new("/usr/bin/systemd-run")
+                .args([
+                    "--scope",
+                    "--no-block",
+                    "--quiet",
+                    &format!("--unit={unit}"),
+                    &format!("--slice=user-{uid}.slice"),
+                    "/usr/bin/sleep",
+                    "600",
+                ])
+                .status()
+                .ok()?;
+            if !status.success() {
+                return None;
+            }
+            let connection = zbus::blocking::connection::Builder::system()
+                .ok()?
+                .build()
+                .ok()?;
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                let manager = zbus::blocking::Proxy::new(
+                    &connection,
+                    SYSTEMD_DESTINATION,
+                    SYSTEMD_MANAGER_PATH,
+                    SYSTEMD_MANAGER_INTERFACE,
+                )
+                .ok()?;
+                let path: OwnedObjectPath = manager.call("GetUnit", &(unit.as_str(),)).ok()?;
+                let observation = read_unit_observation(&connection, &path).ok()?;
+                let procs = std::fs::read_to_string(format!(
+                    "/sys/fs/cgroup{}/cgroup.procs",
+                    observation.control_group
+                ))
+                .ok()?;
+                if let Some(pid) = procs.lines().next().and_then(|value| value.parse().ok()) {
+                    return Some(Self {
+                        unit,
+                        invocation: observation.invocation_id,
+                        object_path: path.to_string(),
+                        control_group: observation.control_group,
+                        leader_pid: pid,
+                    });
+                }
+                if Instant::now() >= deadline {
+                    return None;
+                }
+                std::thread::yield_now();
+            }
+        }
+
+        fn teardown(&self) -> ScopeTeardown<'_> {
+            ScopeTeardown(self)
+        }
+    }
+
+    struct ScopeTeardown<'a>(&'a SystemdScopeFixture);
+    impl Drop for ScopeTeardown<'_> {
+        fn drop(&mut self) {
+            let connection = match zbus::blocking::connection::Builder::system()
+                .and_then(|builder| builder.build())
+            {
+                Ok(connection) => connection,
+                Err(_) => return,
+            };
+            let Ok(Some(path)) = resolve_invocation(&connection, &self.0.invocation) else {
+                return;
+            };
+            if path.as_str() != self.0.object_path {
+                return;
+            }
+            let Ok(observation) = read_unit_observation(&connection, &path) else {
+                return;
+            };
+            if observation.id != self.0.unit || observation.control_group != self.0.control_group {
+                return;
+            }
+            let _ = unit_call(&connection, &path, "Kill", &("all", libc::SIGKILL));
+        }
+    }
+
+    fn rand_token() -> u128 {
+        let mut bytes = [0u8; 16];
+        if std::fs::File::open("/dev/urandom")
+            .and_then(|mut file| std::io::Read::read_exact(&mut file, &mut bytes))
+            .is_ok()
+        {
+            u128::from_ne_bytes(bytes)
+        } else {
+            0
+        }
+    }
+}

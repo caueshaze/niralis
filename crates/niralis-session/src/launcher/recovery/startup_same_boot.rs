@@ -193,8 +193,7 @@ fn reconcile_payload(
             .map_err(|_| StartupRecoveryFailure::UnsupportedRehydration)?;
         pin.request_emergency_kill()
             .map_err(|_| StartupRecoveryFailure::BoundaryIdentityChanged)?;
-        wait_for_boundary_empty(pin)
-            .map_err(|_| StartupRecoveryFailure::BoundaryIdentityChanged)?;
+        wait_for_boundary_empty(pin, owner_watch)?;
         ledger
             .operation_confirmed(&record.lifecycle_id, "payload_kill", attempt)
             .map_err(|_| StartupRecoveryFailure::UnsupportedRehydration)?;

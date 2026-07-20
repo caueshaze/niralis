@@ -67,6 +67,84 @@ impl FullWorker {
         self.supervisor = Some(stream);
     }
 
+    fn acknowledge_terminal_vt_intent(&mut self) -> u64 {
+        let mut stream = self
+            .supervisor
+            .take()
+            .expect("dedicated supervisor channel remains connected");
+        let request = niralis_session::read_control_request(&mut stream)
+            .expect("read terminal VT cleanup intent");
+        let (worker_id, expected_worker_pid, registration_nonce, scope_identity) =
+            match request.message {
+                WorkerControlRequest::TerminalVtCleanupIntent {
+                    worker_id,
+                    expected_worker_pid,
+                    registration_nonce,
+                    scope_identity,
+                } => (worker_id, expected_worker_pid, registration_nonce, scope_identity),
+                request => panic!("expected terminal VT cleanup intent, got {request:?}"),
+            };
+        assert_eq!(request.version, niralis_session::WORKER_CONTROL_PROTOCOL_VERSION);
+        assert_eq!(worker_id, "fixture-worker");
+        assert_eq!(expected_worker_pid, self.child.id());
+        assert!(scope_identity.validate());
+        let attempt_id = 1;
+        niralis_session::write_control_request(
+            &mut stream,
+            WorkerControlRequest::TerminalVtCleanupIntentAcknowledged {
+                worker_id,
+                expected_worker_pid,
+                registration_nonce,
+                attempt_id,
+            },
+        )
+        .expect("acknowledge terminal VT cleanup intent");
+        self.supervisor = Some(stream);
+        attempt_id
+    }
+
+    fn acknowledge_terminal_vt_result(&mut self, expected_attempt_id: u64) {
+        let mut stream = self
+            .supervisor
+            .take()
+            .expect("dedicated supervisor channel remains connected");
+        let request = niralis_session::read_control_request(&mut stream)
+            .expect("read terminal VT cleanup result");
+        let (worker_id, expected_worker_pid, registration_nonce, attempt_id, result) =
+            match request.message {
+                WorkerControlRequest::TerminalVtCleanupResult {
+                    worker_id,
+                    expected_worker_pid,
+                    registration_nonce,
+                    attempt_id,
+                    result,
+                } => (
+                    worker_id,
+                    expected_worker_pid,
+                    registration_nonce,
+                    attempt_id,
+                    result,
+                ),
+                request => panic!("expected terminal VT cleanup result, got {request:?}"),
+            };
+        assert_eq!(request.version, niralis_session::WORKER_CONTROL_PROTOCOL_VERSION);
+        assert_eq!(worker_id, "fixture-worker");
+        assert_eq!(expected_worker_pid, self.child.id());
+        assert_eq!(attempt_id, expected_attempt_id);
+        assert_eq!(result, niralis_session::TerminalVtCleanupResult::Released);
+        niralis_session::write_control_request(
+            &mut stream,
+            WorkerControlRequest::TerminalVtCleanupResultAcknowledged {
+                worker_id,
+                expected_worker_pid,
+                registration_nonce,
+                attempt_id,
+            },
+        )
+        .expect("acknowledge terminal VT cleanup result");
+        self.supervisor = Some(stream);
+    }
+
     fn read_event(&mut self) -> String {
         let mut bytes = Vec::new();
         let count = self
@@ -175,7 +253,14 @@ impl FullWorker {
         self.expect("PamCloseStarted");
         self.expect("PamCloseCompleted");
         self.expect("PamDropped");
+        let terminal_attempt = self
+            .supervisor
+            .is_some()
+            .then(|| self.acknowledge_terminal_vt_intent());
         self.expect("VtReleased");
+        if let Some(attempt_id) = terminal_attempt {
+            self.acknowledge_terminal_vt_result(attempt_id);
+        }
         self.expect("WorkerReturning");
         let status = self.child.wait().expect("reap full worker fixture");
         assert!(
@@ -199,7 +284,14 @@ impl FullWorker {
         self.expect("PamCloseStarted");
         self.expect("PamCloseCompleted");
         self.expect("PamDropped");
+        let terminal_attempt = self
+            .supervisor
+            .is_some()
+            .then(|| self.acknowledge_terminal_vt_intent());
         self.expect("VtReleased");
+        if let Some(attempt_id) = terminal_attempt {
+            self.acknowledge_terminal_vt_result(attempt_id);
+        }
         self.expect("WorkerReturning");
         let status = self.child.wait().expect("reap forced full worker fixture");
         assert!(status.success(), "forced worker returned {status:?}; events={:?}", self.events);

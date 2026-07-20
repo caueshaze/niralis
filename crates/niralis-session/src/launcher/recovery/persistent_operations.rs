@@ -7,7 +7,12 @@ impl PersistentRecoveryLedger {
         next.pam_status = "closed_by_worker_confirmed".to_owned();
         next.operation_ledger.vt_disallocate =
             DurableOperationState::IntentPersisted { attempt_id };
-        self.commit_transition(next, "started")
+        self.commit_transition(next, "started")?;
+        info!(
+            lifecycle_id = id,
+            attempt_id, "worker terminal VT cleanup intent persisted"
+        );
+        Ok(())
     }
 
     pub(crate) fn worker_vt_cleanup_result(
@@ -31,7 +36,14 @@ impl PersistentRecoveryLedger {
                 "vt_disallocate_failed_busy"
             }
         };
-        self.commit_transition(next, state)
+        self.commit_transition(next, state)?;
+        info!(
+            lifecycle_id = id,
+            attempt_id,
+            result = ?result,
+            "worker terminal VT cleanup result persisted"
+        );
+        Ok(())
     }
 
     fn record_for_operation(&self, id: &str) -> io::Result<PersistentRecoveryRecord> {

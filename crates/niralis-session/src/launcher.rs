@@ -7,6 +7,8 @@ pub use recovery::SupervisorFixtureBoundaryMode;
 #[cfg(feature = "supervisor-test-fixtures")]
 pub use recovery::SupervisorFixtureSnapshot;
 use recovery::*;
+#[cfg(feature = "supervisor-test-fixtures")]
+use std::os::fd::AsRawFd;
 include!("launcher/contracts.rs");
 mod supervisor_loop;
 #[cfg(test)]

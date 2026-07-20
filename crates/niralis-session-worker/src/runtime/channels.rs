@@ -30,6 +30,19 @@ fn worker_signal_fd() -> i32 {
 fn supervisor_channel_fd() -> i32 {
     SUPERVISOR_CHANNEL_FD.get()
 }
+fn supervisor_channel_is_closed() -> bool {
+    let fd = supervisor_channel_fd();
+    if fd < 0 {
+        return true;
+    }
+    let mut descriptor = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    (unsafe { libc::poll(&mut descriptor, 1, 0) }) > 0
+        && descriptor.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0
+}
 fn set_worker_signal_fd(fd: i32) -> i32 {
     WORKER_SIGNAL_FD.replace(fd)
 }

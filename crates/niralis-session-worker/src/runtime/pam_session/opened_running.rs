@@ -54,6 +54,13 @@
                 Ok(SessionWaitResult::Legacy(status)) => status,
                 Ok(SessionWaitResult::Graceful(outcome)) => {
                     info!(?outcome, "graceful outcome received");
+                    let report_expectation = match &outcome {
+                        crate::termination::GracefulTerminationOutcome::BoundaryTerminalCandidate {
+                            cause: crate::termination::TerminationCause::SupervisorDisconnected,
+                            ..
+                        } => TerminalReportExpectation::UnavailableAfterSupervisorDisconnect,
+                        _ => TerminalReportExpectation::Required,
+                    };
                     match crate::termination::consume_graceful_outcome(
                         outcome,
                         authoritative_scope.as_ref(),
@@ -70,6 +77,7 @@
                                 false,
                                 &worker_id,
                                 &registration_nonce,
+                                report_expectation,
                             );
                         }
                         crate::termination::GracefulFinalizationDecision::NeedsEscalation(
@@ -107,6 +115,7 @@
                                         true,
                                         &worker_id,
                                         &registration_nonce,
+                                        TerminalReportExpectation::Required,
                                     );
                                 }
                                 forced_outcome => {
