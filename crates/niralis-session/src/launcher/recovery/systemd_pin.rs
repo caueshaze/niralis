@@ -322,15 +322,23 @@ mod systemd_integration_tests {
                 ("CollectMode", Value::from("inactive-or-failed")),
             ];
             let auxiliary: Vec<(&str, Vec<(&str, Value<'_>)>)> = Vec::new();
-            let start_result: Result<OwnedObjectPath, _> = manager.call(
+            let start_result: Result<Option<OwnedObjectPath>, _> = manager.call_with_flags(
                 "StartTransientUnit",
+                zbus::proxy::MethodFlags::AllowInteractiveAuth.into(),
                 &(unit.as_str(), "fail", properties, auxiliary),
             );
-            if let Err(error) = start_result {
-                terminate_fixture_helper(&mut leader);
-                return Err(format!(
-                    "StartTransientUnit was rejected; grant this user org.freedesktop.systemd1.manage-units for the explicitly requested integration fixture: {error}"
-                ));
+            match start_result {
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    terminate_fixture_helper(&mut leader);
+                    return Err("StartTransientUnit unexpectedly suppressed its reply".to_owned());
+                }
+                Err(error) => {
+                    terminate_fixture_helper(&mut leader);
+                    return Err(format!(
+                        "StartTransientUnit was rejected; grant this user org.freedesktop.systemd1.manage-units for the explicitly requested integration fixture: {error}"
+                    ));
+                }
             }
             let deadline = Instant::now() + Duration::from_secs(2);
             loop {
