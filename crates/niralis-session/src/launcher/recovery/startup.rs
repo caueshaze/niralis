@@ -44,6 +44,25 @@ impl<'a> StartupRecoveryCoordinator<'a> {
         let conflicts = conflicts(&records);
         let mut summary = StartupReconciliationSummary::default();
         for record in records {
+            // An administrative intent is evidence of an ioctl whose outcome
+            // was not durably recorded. Startup must never repeat it.
+            if relation_is_same_boot(&record) {
+                if let Some(attempt) = record.vt_recovery_attempts.last() {
+                    if matches!(
+                        attempt.state,
+                        crate::VtRecoveryAttemptState::IntentPersisted
+                    ) {
+                        let _ = ledger.finish_vt_recovery_attempt(
+                            &record.lifecycle_id,
+                            attempt.attempt_id,
+                            crate::VtRecoveryAttemptState::Indeterminate,
+                            None,
+                        );
+                        summary.quarantined += 1;
+                        continue;
+                    }
+                }
+            }
             if blocked_seats.contains(&record.seat) {
                 quarantine_startup_record(
                     ledger,
@@ -156,6 +175,10 @@ impl<'a> StartupRecoveryCoordinator<'a> {
         );
         summary
     }
+}
+
+fn relation_is_same_boot(record: &PersistentRecoveryRecord) -> bool {
+    PersistentRecoveryLedger::boot_relation(record) == RecoveryBootRelation::SameBoot
 }
 
 fn persisted_decision(record: &PersistentRecoveryRecord) -> StartupRecoveryDecision {

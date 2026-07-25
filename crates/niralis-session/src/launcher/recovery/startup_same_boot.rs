@@ -116,7 +116,8 @@ pub(crate) fn reconcile_same_boot_record(
         record.launcher_pid,
     ) {
         Ok(pin) => pin,
-        Err(SupervisorRecoveryError::BusUnavailable) => {
+        Err(SupervisorRecoveryError::BusUnavailable)
+        | Err(SupervisorRecoveryError::AuthorizationDenied { .. }) => {
             return StartupRecoveryOutcome::Quarantined(StartupRecoveryFailure::SystemdOwnerChanged)
         }
         Err(SupervisorRecoveryError::BoundaryIdentityChanged) => {
@@ -177,8 +178,8 @@ fn reconcile_payload(
             .map_err(|_| StartupRecoveryFailure::BoundaryIdentityChanged)?,
         SupervisorBoundaryState::Populated
     ) {
-        owner_watch
-            .stable()
+        let authority = owner_watch
+            .stable_snapshot()
             .map_err(|_| StartupRecoveryFailure::SystemdOwnerChanged)?;
         if matches!(
             record.operation_ledger.payload_kill,
@@ -193,7 +194,13 @@ fn reconcile_payload(
             .map_err(|_| StartupRecoveryFailure::UnsupportedRehydration)?;
         pin.request_emergency_kill()
             .map_err(|_| StartupRecoveryFailure::BoundaryIdentityChanged)?;
-        wait_for_boundary_empty(pin, owner_watch)?;
+        // A successful D-Bus reply is not a proof that the same systemd
+        // authority executed it.  Treat any edge during the call as
+        // indeterminate and deliberately leave the durable intent in place.
+        owner_watch
+            .still_authorizes(&authority)
+            .map_err(|_| StartupRecoveryFailure::SystemdOwnerChanged)?;
+        wait_for_boundary_empty(pin, owner_watch, &authority)?;
         ledger
             .operation_confirmed(&record.lifecycle_id, "payload_kill", attempt)
             .map_err(|_| StartupRecoveryFailure::UnsupportedRehydration)?;
@@ -201,8 +208,8 @@ fn reconcile_payload(
     if matches!(leader, PersistedProcessIdentity::OriginalStillAlive { .. }) {
         return Err(StartupRecoveryFailure::LeaderIdentityIndeterminate);
     }
-    owner_watch
-        .stable()
+    let proof_authority = owner_watch
+        .stable_snapshot()
         .map_err(|_| StartupRecoveryFailure::SystemdOwnerChanged)?;
-    startup_boundary_proof(pin, owner_watch)
+    startup_boundary_proof(pin, owner_watch, &proof_authority)
 }

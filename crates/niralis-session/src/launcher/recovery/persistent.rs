@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::os::unix::fs::MetadataExt;
 
-pub(crate) const RECOVERY_FORMAT_VERSION: u32 = 1;
+pub(crate) const RECOVERY_FORMAT_VERSION: u32 = 2;
 pub(crate) const MAX_RECOVERY_RECORD_BYTES: u64 = 128 * 1024;
 pub(crate) const MAX_RECOVERY_RECORDS: usize = 64;
 pub(crate) const DEFAULT_RECOVERY_DIR: &str = "/var/lib/niralis/recovery";
@@ -70,6 +70,10 @@ pub(crate) struct PersistentRecoveryRecord {
     pub(crate) seat: String,
     pub(crate) worker_pid: u32,
     pub(crate) launcher_pid: u32,
+    #[serde(default)]
+    pub(crate) launcher_starttime: Option<u64>,
+    #[serde(default)]
+    pub(crate) launcher_executable: Option<(u64, u64)>,
     pub(crate) worker_starttime: Option<u64>,
     pub(crate) worker_executable: Option<(u64, u64)>,
     pub(crate) worker_cgroup: Option<String>,
@@ -89,6 +93,10 @@ pub(crate) struct PersistentRecoveryRecord {
     pub(crate) pam_status: String,
     pub(crate) operation_ledger: DurableOperationLedger,
     pub(crate) quarantine_reason: Option<String>,
+    #[serde(default)]
+    pub(crate) vt_busy_provenance: Option<crate::VtBusyProvenance>,
+    #[serde(default)]
+    pub(crate) vt_recovery_attempts: Vec<crate::VtRecoveryAttempt>,
 }
 
 impl PersistentRecoveryRecord {
@@ -118,6 +126,8 @@ impl PersistentRecoveryRecord {
             seat: payload.vt.seat.clone(),
             worker_pid,
             launcher_pid,
+            launcher_starttime: proc_starttime(launcher_pid),
+            launcher_executable: proc_executable(launcher_pid),
             worker_starttime: proc_starttime(worker_pid),
             worker_executable: proc_executable(worker_pid),
             worker_cgroup: proc_cgroup(worker_pid),
@@ -137,6 +147,8 @@ impl PersistentRecoveryRecord {
             pam_status: "opened_by_worker".to_owned(),
             operation_ledger: DurableOperationLedger::default(),
             quarantine_reason: None,
+            vt_busy_provenance: None,
+            vt_recovery_attempts: Vec::new(),
         }
     }
 

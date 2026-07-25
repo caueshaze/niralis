@@ -2,6 +2,7 @@ mod error;
 mod launcher;
 mod mock;
 mod protocol;
+mod recovery_admin;
 mod scope_release;
 mod secret;
 #[cfg(test)]
@@ -26,6 +27,7 @@ pub use protocol::{
     WorkerSessionFailureCode, MAX_WORKER_CONTROL_MESSAGE_BYTES, MAX_WORKER_MESSAGE_BYTES,
     WORKER_CONTROL_PROTOCOL_VERSION, WORKER_PROTOCOL_VERSION, WORKER_SUPERVISOR_FD_ENV,
 };
+pub use recovery_admin::*;
 pub use scope_release::{
     PayloadScopeReleaseVerifier, ScopeReleaseVerification, SystemdPayloadScopeReleaseVerifier,
 };

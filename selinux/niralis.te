@@ -30,6 +30,12 @@ files_config_file(niralis_etc_t)
 type niralis_var_run_t;
 files_pid_file(niralis_var_run_t)
 
+# Root-only recovery control plane.  It is deliberately distinct from the
+# greeter's runtime tree: only niralisd creates the directory and seqpacket
+# socket, and no authenticated session is granted pathname access to it.
+type niralis_recovery_admin_var_run_t;
+files_pid_file(niralis_recovery_admin_var_run_t)
+
 # Persistent supervisor-owned recovery ledger. Keep it distinct from the
 # runtime socket/lock tree so a compromised session cannot inherit a broad
 # writable state label and so reboot-surviving records have an explicit type.
@@ -44,6 +50,20 @@ manage_files_pattern(niralis_t, niralis_etc_t, niralis_etc_t)
 manage_dirs_pattern(niralis_t, niralis_var_run_t, niralis_var_run_t)
 manage_files_pattern(niralis_t, niralis_var_run_t, niralis_var_run_t)
 manage_sock_files_pattern(niralis_t, niralis_var_run_t, niralis_var_run_t)
+manage_dirs_pattern(niralis_t, niralis_recovery_admin_var_run_t, niralis_recovery_admin_var_run_t)
+manage_sock_files_pattern(niralis_t, niralis_recovery_admin_var_run_t, niralis_recovery_admin_var_run_t)
+# The administrative client is still authenticated by SO_PEERCRED uid 0 in
+# the daemon. Permit only the local root shell domain to traverse and connect
+# to this dedicated endpoint; ordinary greeter/session domains receive none.
+gen_require(`
+    type unconfined_t;
+')
+allow unconfined_t niralis_recovery_admin_var_run_t:dir search;
+allow unconfined_t niralis_recovery_admin_var_run_t:sock_file write;
+# SELinux models local Unix stream and seqpacket connect permissions through
+# the unix_stream_socket class; transport framing remains SOCK_SEQPACKET in
+# the daemon implementation.
+allow unconfined_t niralis_t:unix_stream_socket connectto;
 manage_dirs_pattern(niralis_t, niralis_var_lib_t, niralis_var_lib_t)
 manage_files_pattern(niralis_t, niralis_var_lib_t, niralis_var_lib_t)
 # The launcher and its authenticated worker share niralis_t but use a private,
@@ -63,10 +83,12 @@ systemd_dbus_chat_logind(niralis_t)
 # Niralis-owned transient payload scope. This interface limits D-Bus messaging
 # to init_t (PID 1); it does not grant generic access to other system services.
 init_dbus_chat(niralis_t)
-# systemd applies separate SELinux method checks to StartTransientUnit and
-# StopUnit. Grant only those manager operations; no unit-file management,
-# enablement, reboot, reload, or generic service permissions are included.
+# systemd applies a separate service:start check to StartTransientUnit and
+# Unit.Ref.  Grant the reference-policy transient-unit interface in addition
+# to the manager-level start permission; no unit-file management, enablement,
+# reboot, reload, or generic service permissions are included.
 init_start(niralis_t)
+init_start_transient_unit(niralis_t)
 init_stop(niralis_t)
 # The startup inventory asks systemd for read-only status of its unit list so
 # unknown Niralis payload scopes can be detected before login is enabled. Use
@@ -128,7 +150,11 @@ fs_getattr_pidfs(niralis_t)
 # Linux gates cross-UID reads of /proc/<pid>/attr/current through its ptrace
 # access check.  CAP_SYS_PTRACE satisfies that DAC check only; Niralis still
 # receives no SELinux process:ptrace permission.
+# Newer kernels additionally check the user-namespace capability object while
+# resolving another process's /proc/<pid>/fd entry. This is still only the DAC
+# prerequisite for metadata reads; no process:ptrace permission is granted.
 allow niralis_t self:capability sys_ptrace;
+allow niralis_t self:cap_userns sys_ptrace;
 # getpidcon() performs the kernel DAC checks while reading the freshly
 # exec'd process context. Keep these permissions self-directed and limited to
 # the worker domain; they do not grant ptrace or access to arbitrary payload
@@ -155,6 +181,24 @@ init_read_state(niralis_t)
 # read/list interfaces rather than a hand-written broad cgroup allow.
 fs_list_cgroup_dirs(niralis_t)
 fs_read_cgroup_files(niralis_t)
+
+# Administrative VT-busy provenance enumerates procfs only after an EBUSY
+# result. The refpolicy interface covers the per-process state directories,
+# whose SELinux type is the observed process domain rather than proc_t. The
+# Rust collector reads only stat/cgroup and fd/exe metadata; it never reads
+# cmdline, environment, or descriptor contents, and receives no write, signal
+# or ptrace permission from this interface.
+domain_read_all_domains_state(niralis_t)
+# procfs magic-link resolution performs getattr on the referenced object even
+# though the collector only reads the link text. Permit metadata only for the
+# observed PTY multiplexer and process-domain sockets; neither interface grants
+# read, write, connect, ioctl, or socket use.
+term_getattr_ptmx(niralis_t)
+domain_getattr_all_sockets(niralis_t)
+# Listing the proc root itself is separate from traversing /proc/<pid> state.
+allow niralis_t proc_t:dir { getattr search read };
+allow niralis_t proc_t:file { getattr open read };
+allow niralis_t proc_t:lnk_file { getattr read };
 
 term_use_console(niralis_t)
 term_use_unallocated_ttys(niralis_t)

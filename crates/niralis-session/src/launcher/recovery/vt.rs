@@ -63,7 +63,6 @@ pub(crate) fn recover_virtual_terminal(
     }
     let console_fd = unsafe { OwnedFd::from_raw_fd(console_fd) };
     const VT_ACTIVATE: libc::c_ulong = 0x5606;
-    const VT_DISALLOCATE: libc::c_ulong = 0x5608;
     if unsafe {
         libc::ioctl(
             console_fd.as_raw_fd(),
@@ -80,34 +79,47 @@ pub(crate) fn recover_virtual_terminal(
         active_vt = active_vt_number(console_fd.as_raw_fd())?,
         "supervisor confirmed VT activation before disallocation"
     );
+    disallocate_virtual_terminal_with_console(console_fd.as_raw_fd(), identity.number)?;
+    info!("emergency VT recovery complete");
+    Ok(())
+}
+
+pub(crate) fn disallocate_virtual_terminal_once(
+    target_vt: u32,
+) -> Result<(), SupervisorRecoveryError> {
+    let console =
+        CString::new("/dev/tty0").map_err(|_| SupervisorRecoveryError::VtIdentityChanged)?;
+    let raw = unsafe {
+        libc::open(
+            console.as_ptr(),
+            libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC,
+        )
+    };
+    if raw < 0 {
+        return Err(SupervisorRecoveryError::VtOpenFailed(last_errno()));
+    }
+    let console = unsafe { OwnedFd::from_raw_fd(raw) };
+    disallocate_virtual_terminal_with_console(console.as_raw_fd(), target_vt)
+}
+
+fn disallocate_virtual_terminal_with_console(
+    console_fd: RawFd,
+    target_vt: u32,
+) -> Result<(), SupervisorRecoveryError> {
+    const VT_DISALLOCATE: libc::c_ulong = 0x5608;
     info!(
         control_device = "/dev/tty0",
-        target_vt = identity.number,
-        "requesting VT_DISALLOCATE"
+        target_vt, "requesting VT_DISALLOCATE"
     );
-    if unsafe {
-        libc::ioctl(
-            console_fd.as_raw_fd(),
-            VT_DISALLOCATE,
-            identity.number as libc::c_int,
-        )
-    } < 0
-    {
+    if unsafe { libc::ioctl(console_fd, VT_DISALLOCATE, target_vt as libc::c_int) } < 0 {
         let errno = last_errno();
-        warn!(
-            vt = identity.number,
-            expected_previous_vt = identity.previous.number,
-            active_vt = ?active_vt_number(console_fd.as_raw_fd()).ok(),
-            errno,
-            "supervisor VT disallocation failed"
-        );
+        warn!(vt = target_vt, active_vt = ?active_vt_number(console_fd).ok(), errno, "supervisor VT disallocation failed");
         return if errno == libc::EBUSY {
             Err(SupervisorRecoveryError::VtDisallocateBusy)
         } else {
             Err(SupervisorRecoveryError::VtDisallocateFailed(errno))
         };
     }
-    info!("emergency VT recovery complete");
     Ok(())
 }
 pub(crate) fn wait_for_previous_vt_activation(

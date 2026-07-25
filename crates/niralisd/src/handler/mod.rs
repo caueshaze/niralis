@@ -17,6 +17,15 @@ pub trait RequestHandler: Send + Sync {
     fn handle(&self, request: NiralisRequest) -> NiralisResponse;
 }
 
+/// Separate, root-only recovery control plane. It is deliberately not part of
+/// the greeter request protocol.
+pub trait RecoveryAdminHandler: Send + Sync {
+    fn handle_recovery_admin(
+        &self,
+        request: niralis_session::RecoveryAdminRequest,
+    ) -> std::result::Result<niralis_session::RecoveryAdminResponse, String>;
+}
+
 pub struct DaemonHandler<L, U, D> {
     config: Config,
     login_backend: L,
@@ -75,6 +84,22 @@ where
                 message: "not implemented in phase 1".to_owned(),
             },
         }
+    }
+}
+
+impl<L, U, D> RecoveryAdminHandler for DaemonHandler<L, U, D>
+where
+    L: LoginBackend,
+    U: UserDirectory,
+    D: SessionDirectory,
+{
+    fn handle_recovery_admin(
+        &self,
+        request: niralis_session::RecoveryAdminRequest,
+    ) -> std::result::Result<niralis_session::RecoveryAdminResponse, String> {
+        self.login_backend
+            .recovery_admin(request)
+            .map_err(|error| error.to_string())
     }
 }
 

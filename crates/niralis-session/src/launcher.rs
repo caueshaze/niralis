@@ -1,4 +1,5 @@
 mod recovery;
+mod recovery_admin_host;
 #[cfg(any(
     feature = "integration-test-control",
     feature = "supervisor-test-fixtures"
@@ -17,6 +18,7 @@ use supervisor_loop::support::kill_shared_worker;
 include!("launcher/supervisor_api.rs");
 include!("launcher/supervisor_shutdown.rs");
 include!("launcher/public_api.rs");
+include!("launcher/recovery_admin_api.rs");
 #[cfg(feature = "supervisor-test-fixtures")]
 include!("launcher/public_api_fixtures.rs");
 include!("launcher/launch_protocol.rs");

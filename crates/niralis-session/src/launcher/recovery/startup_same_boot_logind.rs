@@ -5,6 +5,9 @@ pub(crate) fn reconcile_logind_and_vt(
     ledger: &mut PersistentRecoveryLedger,
     owner_watch: &OwnerWatch,
 ) -> Result<(), StartupRecoveryFailure> {
+    let authority = owner_watch
+        .stable_snapshot()
+        .map_err(|_| StartupRecoveryFailure::LogindOwnerChanged)?;
     let owner = logind_owner().map_err(|_| StartupRecoveryFailure::LogindOwnerChanged)?;
     let Some(id) = record
         .logind_session_id
@@ -41,7 +44,7 @@ pub(crate) fn reconcile_logind_and_vt(
             return Err(StartupRecoveryFailure::LogindIdentityChanged);
         }
         owner_watch
-            .stable()
+            .still_authorizes(&authority)
             .map_err(|_| StartupRecoveryFailure::LogindOwnerChanged)?;
         let attempt = record.sequence.saturating_add(2);
         ledger
@@ -49,12 +52,18 @@ pub(crate) fn reconcile_logind_and_vt(
             .map_err(|_| StartupRecoveryFailure::UnsupportedRehydration)?;
         cleanup_logind_session(&session)
             .map_err(|_| StartupRecoveryFailure::LogindIdentityChanged)?;
+        // Never classify a call whose owner changed while it was in flight as
+        // removed or already gone.  The durable intent is intentionally left
+        // unconfirmed, so a later daemon cannot repeat it automatically.
+        owner_watch
+            .still_authorizes(&authority)
+            .map_err(|_| StartupRecoveryFailure::LogindOwnerChanged)?;
         ledger
             .operation_confirmed(&record.lifecycle_id, "logind_termination", attempt)
             .map_err(|_| StartupRecoveryFailure::UnsupportedRehydration)?;
     }
     if logind_owner().map_err(|_| StartupRecoveryFailure::LogindOwnerChanged)? != owner
-        || owner_watch.stable().is_err()
+        || owner_watch.still_authorizes(&authority).is_err()
     {
         return Err(StartupRecoveryFailure::LogindOwnerChanged);
     }
@@ -66,6 +75,9 @@ pub(crate) fn confirm_absent_boundary_logind_and_vt(
     ledger: &mut PersistentRecoveryLedger,
     owner_watch: &OwnerWatch,
 ) -> Result<(), StartupRecoveryFailure> {
+    let authority = owner_watch
+        .stable_snapshot()
+        .map_err(|_| StartupRecoveryFailure::LogindOwnerChanged)?;
     let owner = logind_owner().map_err(|_| StartupRecoveryFailure::LogindOwnerChanged)?;
     let id = record
         .logind_session_id
@@ -75,7 +87,7 @@ pub(crate) fn confirm_absent_boundary_logind_and_vt(
         return Err(StartupRecoveryFailure::LogindIdentityChanged);
     }
     owner_watch
-        .stable()
+        .still_authorizes(&authority)
         .map_err(|_| StartupRecoveryFailure::LogindOwnerChanged)?;
     if logind_owner().map_err(|_| StartupRecoveryFailure::LogindOwnerChanged)? != owner {
         return Err(StartupRecoveryFailure::LogindOwnerChanged);
@@ -95,7 +107,7 @@ pub(crate) fn confirm_absent_boundary_logind_and_vt(
         }
     }
     owner_watch
-        .stable()
+        .still_authorizes(&authority)
         .map_err(|_| StartupRecoveryFailure::LogindOwnerChanged)?;
     if logind_owner().map_err(|_| StartupRecoveryFailure::LogindOwnerChanged)? != owner {
         return Err(StartupRecoveryFailure::LogindOwnerChanged);

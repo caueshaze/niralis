@@ -129,24 +129,27 @@ fn finalize_session_after_empty_proof_with_vt_report(
         TerminalReportExpectation::UnavailableAfterSupervisorDisconnect
     ) || supervisor_channel_is_closed()
     {
-        info!("terminal session cleanup completed after supervisor disconnect");
-        let result = terminal.release().map_err(|error| {
-            warn!(?error, "session VT release failed after supervisor disconnect");
-            SessionError::AuthenticatedSessionFailed
-        });
-        let delivery = TerminalReportDelivery::UnavailableAfterSupervisorDisconnect;
-        info!(?delivery, "terminal report unavailable because supervisor channel is closed");
-        result?;
-        info!("worker exiting with locally finalized session state");
-        emit_fixture_event("WorkerReturning");
-        return terminal_local_finalization_result(&proof, forced);
+        return finalize_terminal_after_supervisor_disconnect(terminal, &proof, forced);
     }
     let identity = scope.identity().clone();
-    let (stream, attempt_id) = begin_terminal_vt_cleanup(worker_id, registration_nonce, &identity)?;
+    let (stream, attempt_id) = match begin_terminal_vt_cleanup(worker_id, registration_nonce, &identity) {
+        Ok(value) => value,
+        Err(error) if supervisor_channel_is_closed() => {
+            warn!(?error, "terminal report intent lost to a disconnected supervisor");
+            return finalize_terminal_after_supervisor_disconnect(terminal, &proof, forced);
+        }
+        Err(error) => return Err(error),
+    };
     info!("releasing session VT after durable supervisor intent");
     match terminal.release() {
         Ok(()) => {
-            complete_terminal_vt_cleanup(stream, worker_id, registration_nonce, attempt_id, niralis_session::TerminalVtCleanupResult::Released)?;
+            if let Err(error) = complete_terminal_vt_cleanup(stream, worker_id, registration_nonce, attempt_id, niralis_session::TerminalVtCleanupResult::Released) {
+                if supervisor_channel_is_closed() {
+                    warn!(?error, "terminal report result lost to a disconnected supervisor");
+                    return finalize_terminal_after_supervisor_disconnect_completed_vt(&proof, forced);
+                }
+                return Err(error);
+            }
             let delivery = TerminalReportDelivery::Delivered;
             debug!(?delivery, "terminal VT cleanup result delivered to supervisor");
         }
@@ -161,6 +164,30 @@ fn finalize_session_after_empty_proof_with_vt_report(
     if forced { info!("forced session finalization complete"); } else { info!("cooperative session finalization complete"); }
     emit_fixture_event("WorkerReturning");
     terminal_local_finalization_result(&proof, forced)
+}
+
+fn finalize_terminal_after_supervisor_disconnect(
+    terminal: &mut VirtualTerminalGuard,
+    proof: &crate::termination::BoundaryEmptyProof,
+    forced: bool,
+) -> Result<(), SessionError> {
+    info!("terminal session cleanup completed after supervisor disconnect");
+    terminal.release().map_err(|error| {
+        warn!(?error, "session VT release failed after supervisor disconnect");
+        SessionError::AuthenticatedSessionFailed
+    })?;
+    let delivery = TerminalReportDelivery::UnavailableAfterSupervisorDisconnect;
+    info!(?delivery, "terminal report unavailable because supervisor channel is closed");
+    finalize_terminal_after_supervisor_disconnect_completed_vt(proof, forced)
+}
+
+fn finalize_terminal_after_supervisor_disconnect_completed_vt(
+    proof: &crate::termination::BoundaryEmptyProof,
+    forced: bool,
+) -> Result<(), SessionError> {
+    info!("worker exiting with locally finalized session state");
+    emit_fixture_event("WorkerReturning");
+    terminal_local_finalization_result(proof, forced)
 }
 
 fn terminal_local_finalization_result(

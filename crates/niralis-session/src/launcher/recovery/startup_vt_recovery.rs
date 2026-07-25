@@ -29,6 +29,30 @@ pub(crate) fn reconcile_startup_vt(
             ledger
                 .operation_failed(&record.lifecycle_id, "vt_disallocate", attempt, libc::EBUSY)
                 .map_err(|_| StartupRecoveryFailure::UnsupportedRehydration)?;
+            let provenance = inspect_vt_busy(
+                vt.number,
+                &[
+                    VtKnownProcess {
+                        pid: std::process::id(),
+                        starttime: None,
+                    },
+                    VtKnownProcess {
+                        pid: record.worker_pid,
+                        starttime: record.worker_starttime,
+                    },
+                    VtKnownProcess {
+                        pid: record.launcher_pid,
+                        starttime: None,
+                    },
+                    VtKnownProcess {
+                        pid: record.leader_pid.unwrap_or(0),
+                        starttime: record.leader_starttime,
+                    },
+                ],
+            );
+            ledger
+                .record_vt_busy_provenance(&record.lifecycle_id, provenance)
+                .map_err(|_| StartupRecoveryFailure::UnsupportedRehydration)?;
             Err(StartupRecoveryFailure::VtDisallocateBusy)
         }
         Err(_) => Err(StartupRecoveryFailure::LogindIdentityChanged),

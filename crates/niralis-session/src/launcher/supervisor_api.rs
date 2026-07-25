@@ -1,4 +1,16 @@
 impl WorkerSupervisor {
+    fn recovery_admin(
+        &self,
+        request: crate::RecoveryAdminRequest,
+    ) -> Result<crate::RecoveryAdminResponse, SessionError> {
+        let (result, receiver) = mpsc::channel();
+        self.sender
+            .send(WorkerSupervisorMessage::RecoveryAdmin { request, result })
+            .map_err(|_| SessionError::WorkerIoFailed)?;
+        receiver
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|_| SessionError::WorkerIoFailed)?
+    }
     fn reserve_seat(&self, worker_id: &str) -> Result<PreviousVtIdentity, SessionError> {
         let (result, receiver) = mpsc::channel();
         self.sender

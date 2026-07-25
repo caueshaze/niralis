@@ -31,6 +31,9 @@ fn supervisor_channel_fd() -> i32 {
     SUPERVISOR_CHANNEL_FD.get()
 }
 fn supervisor_channel_is_closed() -> bool {
+    if SUPERVISOR_CHANNEL_DISCONNECTED.get() {
+        return true;
+    }
     let fd = supervisor_channel_fd();
     if fd < 0 {
         return true;
@@ -42,6 +45,10 @@ fn supervisor_channel_is_closed() -> bool {
     };
     (unsafe { libc::poll(&mut descriptor, 1, 0) }) > 0
         && descriptor.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0
+}
+fn note_supervisor_channel_disconnected() -> bool {
+    let observed = SUPERVISOR_CHANNEL_DISCONNECTED.replace(true);
+    !observed
 }
 fn set_worker_signal_fd(fd: i32) -> i32 {
     WORKER_SIGNAL_FD.replace(fd)
@@ -77,6 +84,7 @@ pub fn run_worker_process_with_signals<R: Read, W: Write>(
     signals: &crate::termination::WorkerSignalFd,
     supervisor_fd: RawFd,
 ) -> Result<(), SessionError> {
+    SUPERVISOR_CHANNEL_DISCONNECTED.set(false);
     run_worker_process_with_dependencies_and_signals(
         reader,
         writer,

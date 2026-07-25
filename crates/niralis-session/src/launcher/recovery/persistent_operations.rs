@@ -2,6 +2,59 @@ use super::*;
 use std::io;
 
 impl PersistentRecoveryLedger {
+    pub(crate) fn record_vt_busy_provenance(
+        &mut self,
+        id: &str,
+        provenance: crate::VtBusyProvenance,
+    ) -> io::Result<()> {
+        let mut next = self.record_for_operation(id)?;
+        next.vt_busy_provenance = Some(provenance);
+        let state = next.state.clone();
+        self.commit_transition(next, &state)
+    }
+
+    pub(crate) fn append_vt_recovery_attempt(
+        &mut self,
+        id: &str,
+        attempt: crate::VtRecoveryAttempt,
+    ) -> io::Result<()> {
+        let mut next = self.record_for_operation(id)?;
+        next.vt_recovery_attempts.push(attempt);
+        if next.vt_recovery_attempts.len() > crate::MAX_VT_RECOVERY_ATTEMPTS {
+            next.vt_recovery_attempts.remove(0);
+        }
+        let state = next.state.clone();
+        self.commit_transition(next, &state)
+    }
+
+    pub(crate) fn finish_vt_recovery_attempt(
+        &mut self,
+        id: &str,
+        attempt_id: u64,
+        state: crate::VtRecoveryAttemptState,
+        provenance_after: Option<crate::VtBusyProvenance>,
+    ) -> io::Result<()> {
+        let mut next = self.record_for_operation(id)?;
+        let attempt = next
+            .vt_recovery_attempts
+            .iter_mut()
+            .rev()
+            .find(|attempt| attempt.attempt_id == attempt_id)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "VT recovery attempt"))?;
+        if !matches!(
+            attempt.state,
+            crate::VtRecoveryAttemptState::IntentPersisted
+        ) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "VT recovery attempt is not pending",
+            ));
+        }
+        attempt.state = state;
+        attempt.provenance_after = provenance_after;
+        let current = next.state.clone();
+        self.commit_transition(next, &current)
+    }
     pub(crate) fn worker_vt_cleanup_intent(&mut self, id: &str, attempt_id: u64) -> io::Result<()> {
         let mut next = self.record_for_operation(id)?;
         next.pam_status = "closed_by_worker_confirmed".to_owned();
@@ -124,6 +177,7 @@ impl PersistentRecoveryLedger {
             "vt_activation" => next.operation_ledger.vt_activation = state,
             "vt_disallocate" => next.operation_ledger.vt_disallocate = state,
             "runtime_release" => next.operation_ledger.runtime_release = state,
+            "record_resolution" => next.operation_ledger.record_resolution = state,
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,

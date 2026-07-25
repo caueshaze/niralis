@@ -71,6 +71,11 @@ VT, wait for an active VT, or disallocate a real console. Any physical VT smoke
 must be explicitly enabled in a dedicated test environment; no automatic
 restoration of an unrelated previous VT is attempted.
 
+For the supervisor-owned EBUSY quarantine and root-only explicit recovery
+procedure, see [Recovery administration](recovery-administration.md). In
+particular, an unavailable procfs inspection never becomes proof that a VT is
+free, and recovery does not kill holders or retry automatically.
+
 ## PAM Authority Migration
 
 When configured with:

@@ -120,7 +120,8 @@ pub(crate) fn boundary_error_stage(reason: &SupervisorRecoveryError) -> Emergenc
         | SupervisorRecoveryError::BoundaryTimedOut => EmergencyRecoveryStage::BoundaryObservation,
         SupervisorRecoveryError::InvalidPayloadIdentity
         | SupervisorRecoveryError::BoundaryIdentityChanged
-        | SupervisorRecoveryError::BusUnavailable => {
+        | SupervisorRecoveryError::BusUnavailable
+        | SupervisorRecoveryError::AuthorizationDenied { .. } => {
             EmergencyRecoveryStage::PayloadIdentityValidation
         }
         _ => EmergencyRecoveryStage::BoundaryProof,

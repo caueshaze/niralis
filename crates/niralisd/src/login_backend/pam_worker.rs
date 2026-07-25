@@ -1,4 +1,7 @@
-use niralis_session::{SessionExecPlan, SessionRequest, StartedSession, WorkerSessionLauncher};
+use niralis_session::{
+    RecoveryAdminRequest, RecoveryAdminResponse, SessionExecPlan, SessionRequest, StartedSession,
+    WorkerSessionLauncher,
+};
 use std::os::unix::ffi::OsStrExt;
 
 use super::{into_worker_secret, map_session_error, LoginAttempt, LoginBackend, LoginBackendError};
@@ -53,5 +56,14 @@ impl LoginBackend for PamWorkerLoginBackend {
 
     fn shutdown_sessions(&self) {
         self.launcher.shutdown_sessions();
+    }
+
+    fn recovery_admin(
+        &self,
+        request: RecoveryAdminRequest,
+    ) -> Result<RecoveryAdminResponse, LoginBackendError> {
+        self.launcher
+            .recovery_admin(request)
+            .map_err(map_session_error)
     }
 }

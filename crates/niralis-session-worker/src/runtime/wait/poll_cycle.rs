@@ -113,6 +113,9 @@
         }
         if fds[4].revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
             warn!("supervisor channel disconnected; terminating session");
+            if note_supervisor_channel_disconnected() {
+                emit_fixture_event("SupervisorDisconnectedObserved");
+            }
             trigger.get_or_insert(TerminationCause::SupervisorDisconnected);
         }
         if fds[1].revents & libc::POLLIN != 0 {

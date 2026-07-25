@@ -1,4 +1,5 @@
 use super::*;
+use crate::launcher::recovery_admin_host::{LinuxRecoveryAdminHost, RecoveryAdminHostRef};
 
 mod messages;
 mod pending;
@@ -9,6 +10,8 @@ pub(super) mod support;
 mod terminal_vt;
 use running::RunningRegistration;
 use support::*;
+mod admin;
+mod admin_support;
 use tracing::info;
 
 pub(super) struct SupervisorLoopState {
@@ -17,12 +20,14 @@ pub(super) struct SupervisorLoopState {
     quarantined: Vec<SupervisorSessionRecoveryRecord>,
     seat: SeatLifecycle,
     recovery_provider: Arc<dyn SupervisorRecoveryProvider>,
+    recovery_admin_host: RecoveryAdminHostRef,
     ledger: Option<Arc<Mutex<PersistentRecoveryLedger>>>,
 }
 
 impl SupervisorLoopState {
     fn new(
         recovery_provider: Arc<dyn SupervisorRecoveryProvider>,
+        recovery_admin_host: RecoveryAdminHostRef,
         ledger: Option<Arc<Mutex<PersistentRecoveryLedger>>>,
     ) -> Self {
         if let Some(record) = ledger
@@ -87,6 +92,7 @@ impl SupervisorLoopState {
             quarantined: Vec::new(),
             seat,
             recovery_provider,
+            recovery_admin_host,
             ledger,
         }
     }
@@ -111,6 +117,31 @@ impl SupervisorLoopState {
     }
 }
 
+/// Test-only entry point used by the root sacrificial-VT harness.  It invokes
+/// the same administrative coordinator as the recovery socket, while the host
+/// implementation is supplied by the test instead of Linux production I/O.
+#[cfg(all(test, feature = "vt-integration-tests"))]
+pub(crate) fn dispatch_recovery_admin_for_test(
+    ledger: PersistentRecoveryLedger,
+    host: RecoveryAdminHostRef,
+    request: crate::RecoveryAdminRequest,
+) -> (crate::RecoveryAdminResponse, bool, PersistentRecoveryLedger) {
+    let ledger = Arc::new(Mutex::new(ledger));
+    let mut state = SupervisorLoopState::new(
+        Arc::new(LinuxSupervisorRecoveryProvider),
+        host,
+        Some(ledger.clone()),
+    );
+    let response = state.recovery_admin(request).expect("fixture coordinator");
+    let published_free = matches!(state.seat, SeatLifecycle::Free);
+    drop(state);
+    let ledger = Arc::try_unwrap(ledger)
+        .expect("fixture ledger sole owner")
+        .into_inner()
+        .expect("fixture ledger mutex");
+    (response, published_free, ledger)
+}
+
 impl WorkerSupervisor {
     pub(super) fn new() -> Self {
         Self::new_with_recovery_provider(Arc::new(LinuxSupervisorRecoveryProvider))
@@ -120,8 +151,10 @@ impl WorkerSupervisor {
         recovery_provider: Arc<dyn SupervisorRecoveryProvider>,
     ) -> Self {
         let (sender, receiver) = mpsc::channel();
-        let join =
-            thread::spawn(move || SupervisorLoopState::new(recovery_provider, None).run(receiver));
+        let join = thread::spawn(move || {
+            SupervisorLoopState::new(recovery_provider, Arc::new(LinuxRecoveryAdminHost), None)
+                .run(receiver)
+        });
         Self {
             sender,
             join: Mutex::new(Some(join)),
@@ -136,7 +169,31 @@ impl WorkerSupervisor {
         let (sender, receiver) = mpsc::channel();
         let ledger = Arc::new(Mutex::new(ledger));
         let join = thread::spawn(move || {
-            SupervisorLoopState::new(recovery_provider, Some(ledger)).run(receiver)
+            SupervisorLoopState::new(
+                recovery_provider,
+                Arc::new(LinuxRecoveryAdminHost),
+                Some(ledger),
+            )
+            .run(receiver)
+        });
+        Self {
+            sender,
+            join: Mutex::new(Some(join)),
+        }
+    }
+
+    #[cfg(all(test, feature = "supervisor-test-fixtures"))]
+    pub(super) fn new_with_persistent_ledger_and_admin_host(
+        recovery_provider: Arc<dyn SupervisorRecoveryProvider>,
+        mut ledger: PersistentRecoveryLedger,
+        recovery_admin_host: RecoveryAdminHostRef,
+    ) -> Self {
+        StartupRecoveryCoordinator::new(recovery_provider.as_ref()).reconcile(&mut ledger);
+        let (sender, receiver) = mpsc::channel();
+        let ledger = Arc::new(Mutex::new(ledger));
+        let join = thread::spawn(move || {
+            SupervisorLoopState::new(recovery_provider, recovery_admin_host, Some(ledger))
+                .run(receiver)
         });
         Self {
             sender,
@@ -144,3 +201,15 @@ impl WorkerSupervisor {
         }
     }
 }
+
+#[cfg(all(test, feature = "supervisor-test-fixtures"))]
+mod admin_host_construction_tests {
+    use super::*;
+    #[test]
+    fn fixture_constructor_accepts_an_explicit_admin_host() {
+        let _ = WorkerSupervisor::new_with_persistent_ledger_and_admin_host;
+    }
+}
+
+#[cfg(all(test, feature = "supervisor-test-fixtures"))]
+mod admin_tests;

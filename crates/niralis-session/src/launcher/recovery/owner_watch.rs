@@ -67,6 +67,11 @@ impl OwnerWatch {
             return Err(SupervisorRecoveryError::BusUnavailable);
         }
         let event = unsafe { OwnedFd::from_raw_fd(event) };
+        let ready = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
+        if ready < 0 {
+            return Err(SupervisorRecoveryError::BusUnavailable);
+        }
+        let ready = unsafe { OwnedFd::from_raw_fd(ready) };
         let state = Arc::new(Mutex::new(AuthorityWatchState::Stable {
             unique_owner: initial_owner.clone(),
             generation: 0,
@@ -82,6 +87,11 @@ impl OwnerWatch {
             return Err(SupervisorRecoveryError::BusUnavailable);
         }
         let thread_event = unsafe { OwnedFd::from_raw_fd(thread_event) };
+        let thread_ready = unsafe { libc::dup(ready.as_raw_fd()) };
+        if thread_ready < 0 {
+            return Err(SupervisorRecoveryError::BusUnavailable);
+        }
+        let thread_ready = unsafe { OwnedFd::from_raw_fd(thread_ready) };
         std::thread::Builder::new()
             .name("niralis-owner-watch".to_owned())
             .spawn(move || {
@@ -105,18 +115,24 @@ impl OwnerWatch {
                 else {
                     return;
                 };
-                if signals.next().is_some() {
+                let value = 1u64.to_ne_bytes();
+                let _ = unsafe {
+                    libc::write(thread_ready.as_raw_fd(), value.as_ptr().cast(), value.len())
+                };
+                while signals.next().is_some() {
                     let generation = thread_generation.fetch_add(1, Ordering::AcqRel) + 1;
                     let current_owner = current_owner_on_address(&name, thread_address.as_deref());
                     if let Ok(mut state) = thread_state.lock() {
-                        *state = match current_owner {
-                            Ok(current_owner) => AuthorityWatchState::Changed {
-                                previous_owner: thread_initial_owner,
-                                current_owner,
-                                generation,
-                            },
-                            Err(()) => AuthorityWatchState::Lost { generation },
-                        };
+                        if matches!(*state, AuthorityWatchState::Stable { .. }) {
+                            *state = match current_owner {
+                                Ok(current_owner) => AuthorityWatchState::Changed {
+                                    previous_owner: thread_initial_owner.clone(),
+                                    current_owner,
+                                    generation,
+                                },
+                                Err(()) => AuthorityWatchState::Lost { generation },
+                            };
+                        }
                     }
                     let value = 1u64.to_ne_bytes();
                     let _ = unsafe {
@@ -125,6 +141,16 @@ impl OwnerWatch {
                 }
             })
             .map_err(|_| SupervisorRecoveryError::BusUnavailable)?;
+        let mut ready_poll = libc::pollfd {
+            fd: ready.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        if unsafe { libc::poll(&mut ready_poll, 1, 2_000) } != 1
+            || ready_poll.revents & libc::POLLIN == 0
+        {
+            return Err(SupervisorRecoveryError::BusUnavailable);
+        }
         Ok(Self {
             destination: destination.to_owned(),
             state,
@@ -212,20 +238,4 @@ fn current_owner_on_address(destination: &str, address: Option<&str>) -> Result<
         zbus::blocking::Proxy::new(&connection, DBUS_DESTINATION, DBUS_PATH, DBUS_INTERFACE)
             .map_err(|_| ())?;
     proxy.call("GetNameOwner", &(destination,)).map_err(|_| ())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn owner_change_invalidates_authority_before_runtime_lookup() {
-        let watch = OwnerWatch::scripted();
-        watch.invalidate_for_test();
-        assert!(watch.stable().is_err());
-        assert!(matches!(
-            watch.state().unwrap(),
-            AuthorityWatchState::Changed { generation: 1, .. }
-        ));
-    }
 }

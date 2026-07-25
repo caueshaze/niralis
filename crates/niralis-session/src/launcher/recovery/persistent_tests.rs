@@ -18,6 +18,8 @@ fn record(id: &str) -> PersistentRecoveryRecord {
         seat: "seat0".to_owned(),
         worker_pid: 1,
         launcher_pid: 1,
+        launcher_starttime: None,
+        launcher_executable: None,
         worker_starttime: None,
         worker_executable: None,
         worker_cgroup: None,
@@ -37,6 +39,8 @@ fn record(id: &str) -> PersistentRecoveryRecord {
         pam_status: "opened_by_worker".to_owned(),
         operation_ledger: DurableOperationLedger::default(),
         quarantine_reason: None,
+        vt_busy_provenance: None,
+        vt_recovery_attempts: Vec::new(),
     }
 }
 

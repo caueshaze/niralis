@@ -10,7 +10,7 @@ authentication and mock session startup.
 - `niralis-protocol`: shared serde IPC types.
 - `niralis-auth`: PAM and mock authentication behind an `Authenticator` trait.
 - `niralis-session`: mock session launcher behind a `SessionLauncher` trait.
-- `niralisctl`: small CLI for status, users, and login.
+- `niralisctl`: CLI for status, users, login, and root-only recovery inspection.
 
 ## Build Requirements
 
@@ -108,6 +108,10 @@ does not overwrite `/etc/niralis/niralis.toml` or the PAM service file:
 ```sh
 ./scripts/install-local.sh --install-selinux-policy
 ```
+
+For the root-only VT quarantine inspection and explicit recovery procedure,
+see [Recovery administration](docs/recovery-administration.md). It is not a
+normal login-control interface and is unavailable through the greeter socket.
 
 For the normal edit/build/install/restart loop, when no Niralis graphical
 session is active:

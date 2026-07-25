@@ -13,7 +13,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::config::Config;
 use crate::error::{NiralisdError, Result};
-use crate::handler::RequestHandler;
+use crate::handler::{RecoveryAdminHandler, RequestHandler};
 
 const NSS_BUFFER_FALLBACK: usize = 1024;
 const NSS_BUFFER_MAX: usize = 1024 * 1024;
@@ -34,11 +34,13 @@ enum NssLookupResult {
 
 pub fn run<H>(config: &Config, handler: H) -> Result<()>
 where
-    H: RequestHandler + 'static,
+    H: RequestHandler + RecoveryAdminHandler + 'static,
 {
     let greeter = resolve_greeter_identity(&config.greeter.user)?;
     let listener = bind_socket(&config.daemon.socket, &greeter)?;
     let handler = Arc::new(handler);
+
+    recovery_admin::start(Arc::clone(&handler))?;
 
     info!(socket = %config.daemon.socket.display(), "niralisd listening");
 

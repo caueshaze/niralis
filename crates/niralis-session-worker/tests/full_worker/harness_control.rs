@@ -174,6 +174,17 @@ impl FullWorker {
         assert_eq!(event, expected, "unexpected harness event sequence");
     }
 
+    fn expect_after_supervisor_disconnect(&mut self, expected: &str) {
+        loop {
+            let event = self.read_event();
+            if event == "SupervisorDisconnectedObserved" {
+                continue;
+            }
+            assert_eq!(event, expected, "unexpected harness event sequence");
+            return;
+        }
+    }
+
     fn expect_prefix(&mut self, prefix: &str) -> String {
         let event = self.read_event();
         assert!(
@@ -240,28 +251,28 @@ impl FullWorker {
     }
 
     fn finish_cooperative(&mut self, cause: &str) {
-        self.expect(cause);
-        self.expect("GracefulRequestObserved:count=1");
+        self.expect_after_supervisor_disconnect(cause);
+        self.expect_after_supervisor_disconnect("GracefulRequestObserved:count=1");
         self.send_harness_command("AllowPayloadExit");
-        self.expect("TimerArmed");
-        self.expect("LeaderReaped");
+        self.expect_after_supervisor_disconnect("TimerArmed");
+        self.expect_after_supervisor_disconnect("LeaderReaped");
         self.send_harness_command("MakeBoundaryTerminal");
-        self.expect("BoundaryCandidate");
-        self.expect("BoundaryEmptyProofEstablished:count=1");
-        self.expect("BoundaryEmptyProofAccepted");
-        self.expect("UnitUnrefAttempted:count=1");
-        self.expect("PamCloseStarted");
-        self.expect("PamCloseCompleted");
-        self.expect("PamDropped");
+        self.expect_after_supervisor_disconnect("BoundaryCandidate");
+        self.expect_after_supervisor_disconnect("BoundaryEmptyProofEstablished:count=1");
+        self.expect_after_supervisor_disconnect("BoundaryEmptyProofAccepted");
+        self.expect_after_supervisor_disconnect("UnitUnrefAttempted:count=1");
+        self.expect_after_supervisor_disconnect("PamCloseStarted");
+        self.expect_after_supervisor_disconnect("PamCloseCompleted");
+        self.expect_after_supervisor_disconnect("PamDropped");
         let terminal_attempt = self
             .supervisor
             .is_some()
             .then(|| self.acknowledge_terminal_vt_intent());
-        self.expect("VtReleased");
+        self.expect_after_supervisor_disconnect("VtReleased");
         if let Some(attempt_id) = terminal_attempt {
             self.acknowledge_terminal_vt_result(attempt_id);
         }
-        self.expect("WorkerReturning");
+        self.expect_after_supervisor_disconnect("WorkerReturning");
         let status = self.child.wait().expect("reap full worker fixture");
         assert!(
             status.success(),

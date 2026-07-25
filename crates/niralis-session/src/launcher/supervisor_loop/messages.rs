@@ -129,6 +129,9 @@ impl SupervisorLoopState {
                     terminal_result,
                 ));
             }
+            WorkerSupervisorMessage::RecoveryAdmin { request, result } => {
+                let _ = result.send(self.recovery_admin(request));
+            }
             WorkerSupervisorMessage::Terminate {
                 session,
                 runtime_id,

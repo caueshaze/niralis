@@ -110,14 +110,21 @@ pub(crate) fn reconcile_real_owner_change(
     let Some(address) = std::env::var_os("NIRALIS_FIXTURE_DBUS_ADDRESS") else {
         return StartupRecoveryOutcome::Quarantined(StartupRecoveryFailure::UnsupportedRehydration);
     };
-    let Ok((systemd, logind)) = open_recovery_owner_watches_on_address(&address.to_string_lossy())
-    else {
+    let systemd_destination = std::env::var("NIRALIS_FIXTURE_SYSTEMD_DESTINATION")
+        .unwrap_or_else(|_| SYSTEMD_DESTINATION.to_owned());
+    let logind_destination = std::env::var("NIRALIS_FIXTURE_LOGIND_DESTINATION")
+        .unwrap_or_else(|_| LOGIND_DESTINATION.to_owned());
+    let Ok((systemd, logind)) = open_recovery_owner_watches_on_address_named(
+        &address.to_string_lossy(),
+        &systemd_destination,
+        &logind_destination,
+    ) else {
         return StartupRecoveryOutcome::Quarantined(StartupRecoveryFailure::UnsupportedRehydration);
     };
     let destination = if matches!(mode, SupervisorFixtureBoundaryMode::RealSystemdOwnerChange) {
-        SYSTEMD_DESTINATION
+        systemd_destination.as_str()
     } else {
-        LOGIND_DESTINATION
+        logind_destination.as_str()
     };
     let Some(pid) = std::env::var("NIRALIS_FIXTURE_DBUS_OWNER_PID")
         .ok()
@@ -128,11 +135,19 @@ pub(crate) fn reconcile_real_owner_change(
     if unsafe { libc::kill(pid, libc::SIGKILL) } != 0 {
         return StartupRecoveryOutcome::Quarantined(StartupRecoveryFailure::UnsupportedRehydration);
     }
-    let changed = if destination == SYSTEMD_DESTINATION {
-        systemd.stable().is_err()
+    let watch = if destination == systemd_destination {
+        &systemd
     } else {
-        logind.stable().is_err()
+        &logind
     };
+    let mut changed = false;
+    for _ in 0..1024 {
+        if watch.stable().is_err() {
+            changed = true;
+            break;
+        }
+        std::thread::yield_now();
+    }
     if changed {
         fixture_event(provider, "owner_change:real_name_owner_changed");
         return StartupRecoveryOutcome::Quarantined(fixture_owner_failure(mode).unwrap());

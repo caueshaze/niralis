@@ -152,6 +152,7 @@ pub fn run_worker_process<R: Read, W: Write>(
 thread_local! {
     static WORKER_SIGNAL_FD: Cell<i32> = const { Cell::new(-1) };
     static SUPERVISOR_CHANNEL_FD: Cell<i32> = const { Cell::new(-1) };
+    static SUPERVISOR_CHANNEL_DISCONNECTED: Cell<bool> = const { Cell::new(false) };
 }
 
 #[cfg(feature = "worker-test-fixtures")]

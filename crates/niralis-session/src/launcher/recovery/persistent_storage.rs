@@ -118,6 +118,19 @@ impl PersistentRecoveryLedger {
     pub(crate) fn resolve_and_remove(&mut self, id: &str) -> io::Result<()> {
         self.resolve_state_and_remove(id, "record_resolved")
     }
+    /// Persist the resolved lifecycle state without deleting the evidence.
+    /// Administrative VT recovery must retain the record through runtime
+    /// release so a crash cannot publish a seat as free between those steps.
+    pub(crate) fn mark_record_resolved(&mut self, id: &str) -> io::Result<()> {
+        let mut next = self
+            .records
+            .get(id)
+            .cloned()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "recovery record"))?;
+        next.transition("record_resolved")
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        self.commit(next)
+    }
     pub(crate) fn clear_previous_boot_record(&mut self, id: &str) -> io::Result<()> {
         self.resolve_state_and_remove(id, "cleared_by_boot_boundary")
     }
@@ -152,7 +165,12 @@ impl PersistentRecoveryLedger {
         info!(lifecycle_id = id, "persistent recovery record removed");
         Ok(())
     }
-    pub(crate) fn commit(&mut self, record: PersistentRecoveryRecord) -> io::Result<()> {
+    pub(crate) fn commit(&mut self, mut record: PersistentRecoveryRecord) -> io::Result<()> {
+        // Version 1 records remain readable. Their first subsequent durable
+        // transition is an explicit in-place migration to the current schema.
+        if record.format_version < RECOVERY_FORMAT_VERSION {
+            record.format_version = RECOVERY_FORMAT_VERSION;
+        }
         validate_record(&record)?;
         let path = self.record_path(&record.lifecycle_id)?;
         let tmp = self.directory.join(format!(".{}.tmp", record.lifecycle_id));

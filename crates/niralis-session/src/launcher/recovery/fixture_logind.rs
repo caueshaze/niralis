@@ -126,7 +126,21 @@ pub(crate) fn reconcile_real_dbus_logind_owner_change(
     else {
         return StartupRecoveryOutcome::Quarantined(StartupRecoveryFailure::LogindOwnerChanged);
     };
-    if unsafe { libc::kill(pid, libc::SIGKILL) } != 0 || logind_watch.stable().is_ok() {
+    if unsafe { libc::kill(pid, libc::SIGKILL) } != 0 {
+        return StartupRecoveryOutcome::Quarantined(StartupRecoveryFailure::LogindOwnerChanged);
+    }
+    // A successful kill only proves the old process was targeted.  The test
+    // must wait for the private bus to deliver NameOwnerChanged before it
+    // asserts that a live authority was invalidated.
+    let mut descriptor = libc::pollfd {
+        fd: logind_watch.event_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    if unsafe { libc::poll(&mut descriptor, 1, 2_000) } != 1
+        || descriptor.revents & libc::POLLIN == 0
+        || logind_watch.stable().is_ok()
+    {
         return StartupRecoveryOutcome::Quarantined(StartupRecoveryFailure::LogindOwnerChanged);
     }
     fixture_event(provider, "owner_change:real_logind_before_terminate");

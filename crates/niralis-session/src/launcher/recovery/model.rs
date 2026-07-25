@@ -117,12 +117,23 @@ pub(crate) enum SupervisorEmergencyRecoveryOutcome {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SystemdUnitOperation {
+    Ref,
+    Kill,
+    Unref,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SupervisorRecoveryError {
     InvalidRecord,
     InvalidPayloadIdentity,
     BoundaryIdentityChanged,
     BusUnavailable,
+    AuthorizationDenied {
+        action: &'static str,
+        operation: SystemdUnitOperation,
+    },
     BusDeliveryIndeterminate,
     LeaderPidfdUnavailable,
     LeaderAlreadyDead,

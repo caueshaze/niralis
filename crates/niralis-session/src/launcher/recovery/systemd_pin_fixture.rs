@@ -1,26 +1,18 @@
 use super::super::*;
-use std::process::{Child, Command};
+use std::os::unix::fs::MetadataExt;
+use std::os::unix::net::UnixListener;
+use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
-use zbus::zvariant::Value;
 
-#[zbus::proxy(
-    interface = "org.freedesktop.systemd1.Manager",
-    default_service = "org.freedesktop.systemd1",
-    default_path = "/org/freedesktop/systemd1",
-    gen_async = false
-)]
-trait SystemdManager {
-    #[zbus(name = "StartTransientUnit", allow_interactive_auth)]
-    fn start_transient_unit(
-        &self,
-        unit: &str,
-        mode: &str,
-        properties: Vec<(&str, Value<'_>)>,
-        auxiliary: Vec<(&str, Vec<(&str, Value<'_>)>)>,
-    ) -> zbus::Result<OwnedObjectPath>;
-
-    fn get_unit(&self, unit: &str) -> zbus::Result<OwnedObjectPath>;
-}
+#[path = "systemd_pin_fixture_cleanup.rs"]
+mod systemd_pin_fixture_cleanup;
+#[path = "systemd_pin_fixture_identity.rs"]
+mod systemd_pin_fixture_identity;
+use systemd_pin_fixture_cleanup::terminate_fixture_launcher;
+use systemd_pin_fixture_identity::{
+    fixture_expected_uid, fixture_helper_path, parse_ready, proc_starttime, rand_token,
+    wait_for_fixture_ready,
+};
 
 pub(super) struct SystemdScopeFixture {
     pub(super) unit: String,
@@ -28,104 +20,120 @@ pub(super) struct SystemdScopeFixture {
     pub(super) object_path: String,
     pub(super) control_group: String,
     slice: String,
+    pub(super) expected_uid: u32,
     pub(super) leader_pid: u32,
-    leader: Child,
+    pub(super) descendant_pid: Option<u32>,
+    launcher: Child,
+    _directory: tempfile::TempDir,
     cleanup_needed: bool,
 }
 
 impl SystemdScopeFixture {
-    pub(super) fn start() -> Result<Self, String> {
+    pub(super) fn start(spawn_descendant: bool) -> Result<Self, String> {
         if !std::path::Path::new("/sys/fs/cgroup/cgroup.controllers").exists() {
             return Err("cgroup v2 is unavailable on this host".to_owned());
         }
-        if !std::path::Path::new("/usr/bin/sleep").exists() {
-            return Err("the fixture helper /usr/bin/sleep is unavailable".to_owned());
+        for required in ["/usr/bin/systemd-run"] {
+            if !std::path::Path::new(required).exists() {
+                return Err(format!("fixture helper {required} is unavailable"));
+            }
         }
-        let uid = unsafe { libc::geteuid() };
-        if uid == 0 {
-            return Err(
-                    "this integration test must run as the non-root fixture user; PayloadScopeIdentity intentionally rejects UID 0. Grant that user org.freedesktop.systemd1.manage-units instead of running cargo through sudo"
-                        .to_owned(),
-                );
+        let helper = fixture_helper_path()?;
+        let helper_metadata = std::fs::metadata(&helper)
+            .map_err(|_| "fixture helper metadata is unavailable".to_owned())?;
+        let directory =
+            tempfile::tempdir().map_err(|_| "fixture socket directory is unavailable")?;
+        let ready_path = directory.path().join("ready.sock");
+        let ready_listener = UnixListener::bind(&ready_path)
+            .map_err(|_| "fixture helper Ready listener is unavailable")?;
+        let uid = fixture_expected_uid()?;
+        let unit = format!("niralis-payload-{:032x}.scope", rand_token()?);
+        let slice = format!("user-{uid}.slice");
+        let mut command = Command::new("/usr/bin/systemd-run");
+        command
+            .args([
+                "--scope",
+                "--quiet",
+                &format!("--unit={unit}"),
+                &format!("--slice={slice}"),
+                helper
+                    .to_str()
+                    .ok_or_else(|| "fixture helper path is not UTF-8".to_owned())?,
+                "--fixture-ready-socket",
+                ready_path
+                    .to_str()
+                    .ok_or_else(|| "fixture Ready socket path is not UTF-8".to_owned())?,
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit());
+        if spawn_descendant {
+            command.arg("--fixture-spawn-descendant");
         }
-        let token = format!("{:032x}", rand_token()?);
-        let unit = format!("niralis-payload-{token}.scope");
-        let mut leader = Command::new("/usr/bin/sleep")
-            .arg("600")
+        let mut launcher = command
             .spawn()
-            .map_err(|error| format!("starting fixture helper failed: {error}"))?;
-        let leader_pid = leader.id();
+            .map_err(|error| format!("starting transient fixture scope failed: {error}"))?;
+        let ready = wait_for_fixture_ready(&ready_listener, &mut launcher)?;
+        let (helper_pid, descendant_pid) = parse_ready(&ready, spawn_descendant)?;
+        let helper_starttime =
+            proc_starttime(helper_pid).ok_or("fixture helper starttime is unavailable")?;
+
         let connection = match zbus::blocking::connection::Builder::system()
             .map_err(|error| format!("opening the system bus failed: {error}"))
             .and_then(|builder| {
                 builder
-                    .method_timeout(Duration::from_secs(30))
+                    .method_timeout(Duration::from_secs(5))
                     .build()
                     .map_err(|error| format!("connecting to the system bus failed: {error}"))
             }) {
             Ok(connection) => connection,
             Err(error) => {
-                terminate_fixture_helper(&mut leader);
+                terminate_fixture_launcher(&mut launcher);
                 return Err(error);
             }
         };
-        let manager = SystemdManagerProxy::new(&connection)
-            .map_err(|error| format!("creating systemd Manager proxy failed: {error}"));
-        let manager = match manager {
+        let manager = match zbus::blocking::Proxy::new(
+            &connection,
+            SYSTEMD_DESTINATION,
+            SYSTEMD_MANAGER_PATH,
+            SYSTEMD_MANAGER_INTERFACE,
+        ) {
             Ok(manager) => manager,
             Err(error) => {
-                terminate_fixture_helper(&mut leader);
-                return Err(error);
+                terminate_fixture_launcher(&mut launcher);
+                return Err(format!("creating systemd Manager proxy failed: {error}"));
             }
         };
-        let slice = format!("user-{uid}.slice");
-        let description = "Niralis isolated invocation-bound Unit.Kill fixture";
-        let properties = vec![
-            ("Description", Value::from(description)),
-            ("Slice", Value::from(slice.as_str())),
-            ("PIDs", Value::from(vec![leader_pid])),
-            ("CollectMode", Value::from("inactive-or-failed")),
-        ];
-        let auxiliary: Vec<(&str, Vec<(&str, Value<'_>)>)> = Vec::new();
-        let start_result =
-            manager.start_transient_unit(unit.as_str(), "fail", properties, auxiliary);
-        match start_result {
-            Ok(_) => {}
-            Err(error) => {
-                terminate_fixture_helper(&mut leader);
-                return Err(format!(
-                    "StartTransientUnit was rejected; run pkttyagent --process $$ in another terminal or grant this user org.freedesktop.systemd1.manage-units for the explicitly requested integration fixture: {error}"
-                ));
-            }
-        }
-        let deadline = Instant::now() + Duration::from_secs(2);
+        let deadline = Instant::now() + Duration::from_secs(30);
         loop {
-            let path: OwnedObjectPath = match manager.get_unit(unit.as_str()) {
+            match launcher.try_wait() {
+                Ok(Some(status)) => {
+                    return Err(format!(
+                        "systemd-run exited before creating the transient fixture scope: {status}"
+                    ));
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    terminate_fixture_launcher(&mut launcher);
+                    return Err(format!("observing systemd-run failed: {error}"));
+                }
+            }
+            let path: OwnedObjectPath = match manager.call("GetUnit", &(unit.as_str(),)) {
                 Ok(path) => path,
                 Err(_) if Instant::now() < deadline => {
                     std::thread::yield_now();
                     continue;
                 }
                 Err(_) => {
-                    terminate_fixture_helper(&mut leader);
+                    terminate_fixture_launcher(&mut launcher);
                     return Err("systemd did not load the transient fixture scope".to_owned());
                 }
             };
             let observation = match read_unit_observation(&connection, &path) {
                 Ok(observation) => observation,
                 Err(_) => {
-                    terminate_fixture_helper(&mut leader);
+                    terminate_fixture_launcher(&mut launcher);
                     return Err("cannot inspect the transient fixture scope".to_owned());
-                }
-            };
-            let procs = match std::fs::read_to_string(format!(
-                "/sys/fs/cgroup{}/cgroup.procs",
-                observation.control_group
-            )) {
-                Ok(procs) => procs,
-                Err(_) => {
-                    terminate_fixture_helper(&mut leader);
-                    return Err("cannot read the transient fixture cgroup".to_owned());
                 }
             };
             if observation.id != unit
@@ -133,16 +141,61 @@ impl SystemdScopeFixture {
                 || !observation.transient
                 || observation.invocation_id.is_empty()
             {
-                terminate_fixture_helper(&mut leader);
+                terminate_fixture_launcher(&mut launcher);
                 return Err("transient fixture scope identity did not validate".to_owned());
             }
-            if procs.lines().any(|value| value == leader_pid.to_string()) {
-                if read_pid_cgroup(leader_pid).ok().as_deref()
+            let Some(invocation_path) = resolve_invocation(&connection, &observation.invocation_id)
+                .map_err(|error| format!("resolving fixture invocation failed: {error:?}"))?
+            else {
+                if Instant::now() < deadline {
+                    std::thread::yield_now();
+                    continue;
+                }
+                terminate_fixture_launcher(&mut launcher);
+                return Err("systemd did not resolve the transient fixture invocation".to_owned());
+            };
+            let members = match std::fs::read_to_string(format!(
+                "/sys/fs/cgroup{}/cgroup.procs",
+                observation.control_group
+            )) {
+                Ok(members) => members,
+                Err(_) => {
+                    terminate_fixture_launcher(&mut launcher);
+                    return Err("cannot read the transient fixture cgroup".to_owned());
+                }
+            };
+            let pids: Vec<u32> = match members.lines().map(str::parse).collect::<Result<_, _>>() {
+                Ok(pids) => pids,
+                Err(_) => {
+                    terminate_fixture_launcher(&mut launcher);
+                    return Err("fixture cgroup contains an invalid PID".to_owned());
+                }
+            };
+            if pids.len() == usize::from(spawn_descendant) + 1
+                && pids.contains(&helper_pid)
+                && descendant_pid.is_none_or(|pid| pids.contains(&pid))
+            {
+                if read_pid_cgroup(helper_pid).ok().as_deref()
                     != Some(observation.control_group.as_str())
+                    || descendant_pid.is_some_and(|pid| {
+                        read_pid_cgroup(pid).ok().as_deref()
+                            != Some(observation.control_group.as_str())
+                    })
+                    || proc_starttime(helper_pid) != Some(helper_starttime)
+                    || !matches!(
+                        std::fs::metadata(format!("/proc/{helper_pid}/exe")).map(|metadata| {
+                            metadata.dev() == helper_metadata.dev()
+                                && metadata.ino() == helper_metadata.ino()
+                        }),
+                        Ok(true)
+                    )
                     || ensure_outside_boundary(std::process::id(), &observation.control_group)
                         .is_err()
+                    || (launcher.id() != helper_pid
+                        && ensure_outside_boundary(launcher.id(), &observation.control_group)
+                            .is_err())
                 {
-                    terminate_fixture_helper(&mut leader);
+                    terminate_fixture_launcher(&mut launcher);
                     return Err(
                         "fixture helper or test runner has an unsafe cgroup identity".to_owned(),
                     );
@@ -150,85 +203,33 @@ impl SystemdScopeFixture {
                 return Ok(Self {
                     unit,
                     invocation: observation.invocation_id,
-                    object_path: path.to_string(),
+                    object_path: invocation_path.to_string(),
                     control_group: observation.control_group,
                     slice,
-                    leader_pid,
-                    leader,
+                    expected_uid: uid,
+                    leader_pid: helper_pid,
+                    descendant_pid,
+                    launcher,
+                    _directory: directory,
                     cleanup_needed: true,
                 });
             }
             if Instant::now() >= deadline {
-                terminate_fixture_helper(&mut leader);
-                return Err("fixture helper was not attached to its transient scope".to_owned());
+                terminate_fixture_launcher(&mut launcher);
+                return Err("fixture scope did not contain exactly its dedicated helper".to_owned());
             }
             std::thread::yield_now();
         }
     }
 
-    pub(super) fn wait_for_leader_exit(&mut self) -> Result<(), String> {
-        self.leader
-            .wait()
-            .map(|_| ())
-            .map_err(|error| format!("waiting for fixture helper failed: {error}"))
-    }
-
     pub(super) fn disarm(&mut self) {
         self.cleanup_needed = false;
     }
-}
 
-impl Drop for SystemdScopeFixture {
-    fn drop(&mut self) {
-        if !self.cleanup_needed {
-            return;
-        }
-        let connection = match zbus::blocking::connection::Builder::system()
-            .and_then(|builder| builder.build())
-        {
-            Ok(connection) => connection,
-            Err(_) => return,
-        };
-        let Ok(Some(path)) = resolve_invocation(&connection, &self.invocation) else {
-            return;
-        };
-        if path.as_str() != self.object_path {
-            return;
-        }
-        let Ok(observation) = read_unit_observation(&connection, &path) else {
-            return;
-        };
-        if observation.id != self.unit
-            || observation.invocation_id != self.invocation
-            || observation.control_group != self.control_group
-            || observation.slice != self.slice
-            || !observation.transient
-        {
-            return;
-        }
-        if self.leader.try_wait().ok().flatten().is_none() {
-            let _ = unit_call(&connection, &path, "Kill", &("all", libc::SIGKILL));
-            let _ = self.leader.wait();
-        }
-        let _ = unit_call(&connection, &path, "Unref", &());
-    }
-}
-
-fn rand_token() -> Result<u128, String> {
-    let mut bytes = [0u8; 16];
-    if std::fs::File::open("/dev/urandom")
-        .and_then(|mut file| std::io::Read::read_exact(&mut file, &mut bytes))
-        .is_ok()
-    {
-        Ok(u128::from_ne_bytes(bytes))
-    } else {
-        Err("cannot obtain 128 bits of fixture entropy".to_owned())
-    }
-}
-
-fn terminate_fixture_helper(helper: &mut Child) {
-    if helper.try_wait().ok().flatten().is_none() {
-        let _ = helper.kill();
-        let _ = helper.wait();
+    pub(super) fn wait_for_launcher_exit(&mut self) -> Result<(), String> {
+        self.launcher
+            .wait()
+            .map(|_| ())
+            .map_err(|error| format!("waiting for fixture launcher failed: {error}"))
     }
 }

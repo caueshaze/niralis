@@ -680,7 +680,9 @@ name = "niralisctl"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "libc",
  "niralis-protocol",
+ "niralis-session",
  "serde_json",
  "thiserror",
 ]

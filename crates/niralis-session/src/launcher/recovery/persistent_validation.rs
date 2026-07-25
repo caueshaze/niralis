@@ -93,7 +93,7 @@ pub(crate) fn load_records(
 }
 
 pub(crate) fn validate_record(record: &PersistentRecoveryRecord) -> io::Result<()> {
-    if record.format_version != RECOVERY_FORMAT_VERSION
+    if !matches!(record.format_version, 1 | RECOVERY_FORMAT_VERSION)
         || record.lifecycle_id.is_empty()
         || record.sequence == 0
         || record.created_boot_id.is_empty()

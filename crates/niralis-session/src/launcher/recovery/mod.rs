@@ -86,7 +86,10 @@ mod logind_cleanup;
 mod logind_identity;
 mod model;
 mod owner_watch;
+mod owner_watch_authority;
 mod owner_watch_open;
+#[cfg(test)]
+mod owner_watch_tests;
 mod persistent;
 mod persistent_operations;
 mod persistent_validation;
@@ -110,6 +113,11 @@ mod systemd_rehydrate;
 mod tests;
 mod unknown_scope;
 mod vt;
+mod vt_busy;
+mod vt_busy_holders;
+mod vt_busy_support;
+#[cfg(all(test, feature = "vt-integration-tests"))]
+mod vt_integration_tests;
 mod vt_verification;
 
 pub(crate) use boundary::*;
@@ -172,6 +180,7 @@ pub(crate) use logind_cleanup::*;
 pub(crate) use logind_identity::*;
 pub(crate) use model::*;
 pub(crate) use owner_watch::*;
+pub(crate) use owner_watch_authority::*;
 pub(crate) use owner_watch_open::*;
 pub(crate) use persistent::*;
 pub(crate) use persistent_validation::*;
@@ -190,4 +199,5 @@ pub(crate) use systemd_dbus::*;
 pub(crate) use systemd_pin::*;
 pub(crate) use unknown_scope::*;
 pub(crate) use vt::*;
+pub(crate) use vt_busy::*;
 pub(crate) use vt_verification::*;

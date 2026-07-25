@@ -49,7 +49,7 @@ impl PrivateBusFixture {
                 "--print-pid=1",
             ])
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            .stderr(Stdio::piped())
             .spawn()
             .expect("private dbus-daemon");
         let stdout = bus.stdout.take().expect("dbus stdout");
@@ -57,6 +57,13 @@ impl PrivateBusFixture {
         let mut address = String::new();
         output.read_line(&mut address).expect("dbus address");
         assert!(!address.trim().is_empty(), "dbus address missing");
+        // dbus-daemon writes address and pid on the same inherited stdout
+        // pipe.  Dropping the reader after only the first line can race its
+        // second write and SIGPIPE the private bus before any fixture joins.
+        let mut pid_line = String::new();
+        output.read_line(&mut pid_line).expect("dbus pid");
+        let pid = pid_line.trim().parse::<u32>().expect("numeric dbus pid");
+        assert_eq!(bus.id(), pid, "dbus pid does not match child");
         Self {
             bus,
             owner_children: Vec::new(),
@@ -532,7 +539,7 @@ fn replacement_quarantines_without_targeting_new_unit() {
 }
 
 #[test]
-fn unknown_scope_never_triggers_destructive_cleanup() {
+fn real_unknown_scope_without_known_seat_quarantines_globally() {
     let mut daemon_a = DaemonFixture::spawn("restart-reconciles");
     assert!(daemon_a.receive_barrier().starts_with("ready "));
     daemon_a.start();
@@ -744,32 +751,32 @@ fn assert_startup_quarantine_mode(mode: &str, expected_event: &str) {
 }
 
 #[test]
-fn systemd_owner_changes_before_kill_quarantine() {
+fn systemd_owner_change_before_kill_quarantines() {
     assert_startup_quarantine_mode("systemd-before-kill", "owner_change:invalidated\n");
 }
 
 #[test]
-fn systemd_owner_changes_during_kill_quarantine() {
+fn systemd_owner_change_during_kill_is_indeterminate() {
     assert_startup_quarantine_mode("systemd-during-kill", "owner_change:invalidated\n");
 }
 
 #[test]
-fn systemd_owner_changes_before_proof_quarantine() {
+fn systemd_owner_change_before_proof_blocks_proof() {
     assert_startup_quarantine_mode("systemd-before-proof", "owner_change:invalidated\n");
 }
 
 #[test]
-fn logind_owner_changes_before_terminate_quarantine() {
+fn logind_owner_change_before_terminate_quarantines() {
     assert_startup_quarantine_mode("logind-before-terminate", "owner_change:invalidated\n");
 }
 
 #[test]
-fn logind_owner_changes_during_cleanup_quarantine() {
+fn logind_owner_change_during_terminate_is_indeterminate() {
     assert_startup_quarantine_mode("logind-during-cleanup", "owner_change:invalidated\n");
 }
 
 #[test]
-fn logind_owner_changes_before_absence_quarantine() {
+fn logind_owner_change_before_absence_confirmation_blocks_cleanup() {
     assert_startup_quarantine_mode("logind-before-absence", "owner_change:invalidated\n");
 }
 
@@ -777,7 +784,7 @@ fn logind_owner_changes_before_absence_quarantine() {
 fn real_systemd_owner_change_invalidates_startup_authority() {
     assert_real_owner_change(
         "real-systemd-owner",
-        "org.freedesktop.systemd1",
+        "org.niralis.fixture.systemd",
         "owner_change:real_name_owner_changed\n",
     );
 }
@@ -786,7 +793,7 @@ fn real_systemd_owner_change_invalidates_startup_authority() {
 fn real_logind_owner_change_invalidates_startup_authority() {
     assert_real_owner_change(
         "real-logind-owner",
-        "org.freedesktop.login1",
+        "org.niralis.fixture.logind",
         "owner_change:real_name_owner_changed\n",
     );
 }
@@ -971,10 +978,10 @@ fn real_dbus_logind_owner_change_blocks_terminate() {
 fn assert_real_owner_change(mode: &str, replaced_name: &str, expected_event: &str) {
     let mut bus = PrivateBusFixture::start();
     let owner_pid = bus.start_owner(replaced_name);
-    let other_name = if replaced_name == "org.freedesktop.systemd1" {
-        "org.freedesktop.login1"
+    let other_name = if replaced_name == "org.niralis.fixture.systemd" {
+        "org.niralis.fixture.logind"
     } else {
-        "org.freedesktop.systemd1"
+        "org.niralis.fixture.systemd"
     };
     let _other_pid = bus.start_owner(other_name);
 
@@ -994,6 +1001,14 @@ fn assert_real_owner_change(mode: &str, replaced_name: &str, expected_event: &st
         ("DBUS_SYSTEM_BUS_ADDRESS", address.as_str()),
         ("NIRALIS_FIXTURE_DBUS_ADDRESS", address.as_str()),
         ("NIRALIS_FIXTURE_DBUS_OWNER_PID", owner_pid.as_str()),
+        (
+            "NIRALIS_FIXTURE_SYSTEMD_DESTINATION",
+            "org.niralis.fixture.systemd",
+        ),
+        (
+            "NIRALIS_FIXTURE_LOGIND_DESTINATION",
+            "org.niralis.fixture.logind",
+        ),
     ];
     let mut daemon_b =
         DaemonFixture::spawn_reusing_storage_with_env(mode, &daemon_a.recovery, &environment);
@@ -1012,13 +1027,22 @@ fn assert_real_owner_change(mode: &str, replaced_name: &str, expected_event: &st
 }
 
 #[test]
-fn unknown_scope_with_known_seat_is_non_destructive() {
+fn real_unknown_scope_with_known_seat_quarantines_only_that_seat() {
     assert_startup_quarantine_mode("unknown-known-seat", "quarantine:unknown_scope\n");
 }
 
 #[test]
-fn scope_record_conflict_is_non_destructive() {
+fn unknown_scope_record_conflict_is_non_destructive() {
     assert_startup_quarantine_mode("conflict", "quarantine:scope_record_conflict\n");
+}
+
+#[test]
+fn duplicate_owner_events_keep_operations_single_shot() {
+    // Re-running the same replacement against preserved authority loss must
+    // never turn quarantine into a second destructive attempt.
+    for _ in 0..2 {
+        assert_startup_quarantine_mode("systemd-during-kill", "owner_change:invalidated\n");
+    }
 }
 
 fn proc_exists(pid: u32) -> bool {

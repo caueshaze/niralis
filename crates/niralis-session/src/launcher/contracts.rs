@@ -106,6 +106,10 @@ enum WorkerSupervisorMessage {
         result: crate::TerminalVtCleanupResult,
         acknowledged: mpsc::Sender<Result<(), SessionError>>,
     },
+    RecoveryAdmin {
+        request: crate::RecoveryAdminRequest,
+        result: mpsc::Sender<Result<crate::RecoveryAdminResponse, SessionError>>,
+    },
     Terminate {
         session: StartedSession,
         runtime_id: Option<RuntimeSessionId>,

@@ -24,6 +24,7 @@ pub(crate) fn wait_for_pidfd(fd: i32, timeout_ms: i32) -> Result<bool, ()> {
 pub(crate) fn wait_for_boundary_empty(
     pin: &SupervisorPinnedInvocationUnit,
     owner_watch: &OwnerWatch,
+    authority: &AuthoritySnapshot,
 ) -> Result<(), StartupRecoveryFailure> {
     let mut observer = CgroupEventsObserver::open(&pin.control_group)
         .map_err(|_| StartupRecoveryFailure::BoundaryIdentityChanged)?;
@@ -31,7 +32,7 @@ pub(crate) fn wait_for_boundary_empty(
         .map_err(|_| StartupRecoveryFailure::BoundaryIdentityChanged)?;
     loop {
         owner_watch
-            .stable()
+            .still_authorizes(authority)
             .map_err(|_| StartupRecoveryFailure::SystemdOwnerChanged)?;
         if matches!(
             pin.boundary_state()
@@ -65,7 +66,7 @@ pub(crate) fn wait_for_boundary_empty(
         }
         if descriptors[2].revents & libc::POLLIN != 0 {
             owner_watch
-                .stable()
+                .still_authorizes(authority)
                 .map_err(|_| StartupRecoveryFailure::SystemdOwnerChanged)?;
         }
         if descriptors[0].revents & (libc::POLLPRI | libc::POLLERR) != 0 {
@@ -78,9 +79,10 @@ pub(crate) fn wait_for_boundary_empty(
 pub(crate) fn startup_boundary_proof(
     pin: &SupervisorPinnedInvocationUnit,
     owner_watch: &OwnerWatch,
+    authority: &AuthoritySnapshot,
 ) -> Result<(), StartupRecoveryFailure> {
     owner_watch
-        .stable()
+        .still_authorizes(authority)
         .map_err(|_| StartupRecoveryFailure::SystemdOwnerChanged)?;
     pin.validate_owner()
         .map_err(|_| StartupRecoveryFailure::SystemdOwnerChanged)?;
@@ -97,7 +99,7 @@ pub(crate) fn startup_boundary_proof(
         .map_err(|_| StartupRecoveryFailure::BoundaryIdentityChanged)?;
     for _ in 0..2 {
         owner_watch
-            .stable()
+            .still_authorizes(authority)
             .map_err(|_| StartupRecoveryFailure::SystemdOwnerChanged)?;
         let observation = pin
             .revalidate(true)
@@ -113,7 +115,7 @@ pub(crate) fn startup_boundary_proof(
         }
     }
     owner_watch
-        .stable()
+        .still_authorizes(authority)
         .map_err(|_| StartupRecoveryFailure::SystemdOwnerChanged)?;
     pin.validate_owner()
         .map_err(|_| StartupRecoveryFailure::SystemdOwnerChanged)

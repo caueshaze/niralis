@@ -8,6 +8,7 @@ version.workspace = true
 integration-test-control = []
 supervisor-test-fixtures = ["integration-test-control"]
 systemd-integration-tests = []
+vt-integration-tests = []
 
 [dependencies]
 libc.workspace = true
@@ -48,6 +49,16 @@ required-features = ["supervisor-test-fixtures"]
 name = "fixture-dbus-logind"
 path = "src/bin/fixture-dbus-logind.rs"
 required-features = ["supervisor-test-fixtures"]
+
+[[bin]]
+name = "fixture-systemd-scope-helper"
+path = "src/bin/fixture-systemd-scope-helper.rs"
+required-features = ["systemd-integration-tests"]
+
+[[bin]]
+name = "fixture-vt-holder"
+path = "src/bin/fixture-vt-holder.rs"
+required-features = ["vt-integration-tests"]
 
 [[test]]
 name = "supervisor_full_process"

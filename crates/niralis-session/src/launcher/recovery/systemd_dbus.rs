@@ -50,6 +50,7 @@ pub(crate) fn unit_call<A>(
 where
     A: serde::ser::Serialize + zbus::zvariant::DynamicType,
 {
+    let operation = systemd_unit_operation(method)?;
     let unit = zbus::blocking::Proxy::new(
         connection,
         SYSTEMD_DESTINATION,
@@ -58,7 +59,45 @@ where
     )
     .map_err(|_| SupervisorRecoveryError::BusUnavailable)?;
     unit.call::<_, _, ()>(method, args)
-        .map_err(|_| SupervisorRecoveryError::BusUnavailable)
+        .map_err(|error| classify_unit_call_error(error, operation))
+}
+
+fn systemd_unit_operation(method: &str) -> Result<SystemdUnitOperation, SupervisorRecoveryError> {
+    match method {
+        "Ref" => Ok(SystemdUnitOperation::Ref),
+        "Kill" => Ok(SystemdUnitOperation::Kill),
+        "Unref" => Ok(SystemdUnitOperation::Unref),
+        _ => Err(SupervisorRecoveryError::BusUnavailable),
+    }
+}
+
+fn classify_unit_call_error(
+    error: zbus::Error,
+    operation: SystemdUnitOperation,
+) -> SupervisorRecoveryError {
+    match error {
+        zbus::Error::MethodError(name, _, _) if is_authorization_error(name.as_str()) => {
+            warn!(
+                action = "org.freedesktop.systemd1.manage-units",
+                ?operation,
+                dbus_error = %name,
+                "systemd unit operation authorization denied"
+            );
+            SupervisorRecoveryError::AuthorizationDenied {
+                action: "org.freedesktop.systemd1.manage-units",
+                operation,
+            }
+        }
+        _ => SupervisorRecoveryError::BusUnavailable,
+    }
+}
+
+fn is_authorization_error(name: &str) -> bool {
+    matches!(
+        name,
+        "org.freedesktop.DBus.Error.AccessDenied"
+            | "org.freedesktop.DBus.Error.InteractiveAuthorizationRequired"
+    )
 }
 
 pub(crate) fn read_unit_observation(
@@ -149,7 +188,8 @@ pub(crate) fn parse_invocation_id(value: &str) -> Option<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
-    use super::is_absent_invocation_error;
+    use super::{is_absent_invocation_error, is_authorization_error, SystemdUnitOperation};
+    use crate::launcher::recovery::SupervisorRecoveryError;
 
     #[test]
     fn systemd_260_no_unit_for_invocation_id_is_an_absence_proof() {
@@ -159,5 +199,24 @@ mod tests {
         assert!(!is_absent_invocation_error(
             "org.freedesktop.DBus.Error.Failed"
         ));
+    }
+
+    #[test]
+    fn access_denied_is_kept_distinct_from_bus_unavailable() {
+        assert!(is_authorization_error(
+            "org.freedesktop.DBus.Error.AccessDenied"
+        ));
+        assert!(is_authorization_error(
+            "org.freedesktop.DBus.Error.InteractiveAuthorizationRequired"
+        ));
+        assert!(!is_authorization_error(
+            "org.freedesktop.DBus.Error.NoReply"
+        ));
+
+        let denied = SupervisorRecoveryError::AuthorizationDenied {
+            action: "org.freedesktop.systemd1.manage-units",
+            operation: SystemdUnitOperation::Ref,
+        };
+        assert_ne!(denied, SupervisorRecoveryError::BusUnavailable);
     }
 }

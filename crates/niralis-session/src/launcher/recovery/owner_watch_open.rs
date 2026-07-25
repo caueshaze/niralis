@@ -24,6 +24,19 @@ pub(crate) fn open_recovery_owner_watches(
 pub(crate) fn open_recovery_owner_watches_on_address(
     address: &str,
 ) -> Result<(OwnerWatch, OwnerWatch), SupervisorRecoveryError> {
+    open_recovery_owner_watches_on_address_named(address, SYSTEMD_DESTINATION, LOGIND_DESTINATION)
+}
+
+#[cfg(any(
+    test,
+    feature = "integration-test-control",
+    feature = "supervisor-test-fixtures"
+))]
+pub(crate) fn open_recovery_owner_watches_on_address_named(
+    address: &str,
+    systemd_destination: &str,
+    logind_destination: &str,
+) -> Result<(OwnerWatch, OwnerWatch), SupervisorRecoveryError> {
     let connection = zbus::blocking::connection::Builder::address(address)
         .map_err(|_| SupervisorRecoveryError::BusUnavailable)?
         .method_timeout(Duration::from_secs(2))
@@ -37,13 +50,13 @@ pub(crate) fn open_recovery_owner_watches_on_address(
     };
     Ok((
         OwnerWatch::open_on_address(
-            SYSTEMD_DESTINATION,
-            owner(SYSTEMD_DESTINATION)?,
+            systemd_destination,
+            owner(systemd_destination)?,
             Some(address.to_owned()),
         )?,
         OwnerWatch::open_on_address(
-            LOGIND_DESTINATION,
-            owner(LOGIND_DESTINATION)?,
+            logind_destination,
+            owner(logind_destination)?,
             Some(address.to_owned()),
         )?,
     ))

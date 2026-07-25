@@ -4,7 +4,7 @@ mod pam_worker;
 use niralis_auth::MockAuthenticator;
 use niralis_discovery::ResolvedSessionLaunchSpec;
 use niralis_protocol::SessionInfo;
-use niralis_session::{StartedSession, WorkerSecret};
+use niralis_session::{RecoveryAdminRequest, RecoveryAdminResponse, StartedSession, WorkerSecret};
 use thiserror::Error;
 use zeroize::Zeroizing;
 
@@ -45,6 +45,13 @@ pub trait LoginBackend: Send + Sync {
     ) -> std::result::Result<StartedSession, LoginBackendError>;
 
     fn shutdown_sessions(&self) {}
+
+    fn recovery_admin(
+        &self,
+        _request: RecoveryAdminRequest,
+    ) -> std::result::Result<RecoveryAdminResponse, LoginBackendError> {
+        Err(LoginBackendError::InfrastructureFailed)
+    }
 }
 
 impl<T> LoginBackend for Box<T>
@@ -56,6 +63,17 @@ where
         attempt: LoginAttempt,
     ) -> std::result::Result<StartedSession, LoginBackendError> {
         (**self).login(attempt)
+    }
+
+    fn shutdown_sessions(&self) {
+        (**self).shutdown_sessions();
+    }
+
+    fn recovery_admin(
+        &self,
+        request: RecoveryAdminRequest,
+    ) -> std::result::Result<RecoveryAdminResponse, LoginBackendError> {
+        (**self).recovery_admin(request)
     }
 }
 
