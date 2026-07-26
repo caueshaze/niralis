@@ -82,6 +82,8 @@ pub(crate) fn reconcile_real_dbus_logind(
     {
         return StartupRecoveryOutcome::Quarantined(StartupRecoveryFailure::LogindIdentityChanged);
     }
+    // Controlled D-Bus fixture only: production SameBoot recovery reaches
+    // TerminateSession through SameBootLogindEffects.
     if manager
         .call::<_, _, ()>("TerminateSession", &(session_id,))
         .is_err()

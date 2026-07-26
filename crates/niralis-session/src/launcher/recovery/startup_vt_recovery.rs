@@ -1,9 +1,12 @@
 use super::*;
 
 pub(crate) fn reconcile_startup_vt(
-    record: &PersistentRecoveryRecord,
+    snapshot: RecoveryStateSnapshot,
     ledger: &mut PersistentRecoveryLedger,
+    boundary_proof: Option<AuthorizedRecoveryBoundaryProof>,
+    owner_watch: &OwnerWatch,
 ) -> Result<(), StartupRecoveryFailure> {
+    let record = &snapshot.record;
     let vt = persisted_vt_identity(record)?;
     match record.operation_ledger.vt_disallocate {
         DurableOperationState::Confirmed { .. } => return Ok(()),
@@ -18,16 +21,47 @@ pub(crate) fn reconcile_startup_vt(
         DurableOperationState::NotStarted => {}
     }
     let attempt = record.sequence.saturating_add(3);
-    ledger
-        .operation_intent(&record.lifecycle_id, "vt_disallocate", attempt)
+    let proof = boundary_proof.ok_or(StartupRecoveryFailure::BoundaryIdentityChanged)?;
+    let owner = owner_watch
+        .stable_snapshot()
+        .map_err(|_| StartupRecoveryFailure::SystemdOwnerChanged)?;
+    let _validated =
+        ValidatedRecoveryVtTarget::from_identity(&snapshot, vt.clone(), &proof, &owner)
+            .map_err(|_| StartupRecoveryFailure::BoundaryIdentityChanged)?;
+    let (next_snapshot, permit) = ledger
+        .persist_recovery_intent_from_snapshot::<VtRecoveryOperation>(
+            snapshot,
+            "vt_disallocate",
+            attempt,
+        )
         .map_err(|_| StartupRecoveryFailure::UnsupportedRehydration)?;
-    match recover_virtual_terminal(&vt) {
+    let authorized = proof.authorize_next_sequence(next_snapshot.record.sequence);
+    let target =
+        ValidatedRecoveryVtTarget::from_identity(&next_snapshot, vt.clone(), &authorized, &owner)
+            .map_err(|_| StartupRecoveryFailure::BoundaryIdentityChanged)?;
+    match SameBootVtEffects::recover(
+        &next_snapshot.authority,
+        target,
+        &authorized,
+        permit,
+        owner_watch,
+        &owner,
+    ) {
         Ok(()) => ledger
-            .operation_confirmed(&record.lifecycle_id, "vt_disallocate", attempt)
+            .operation_confirmed(
+                &next_snapshot.record.lifecycle_id,
+                "vt_disallocate",
+                attempt,
+            )
             .map_err(|_| StartupRecoveryFailure::UnsupportedRehydration),
         Err(SupervisorRecoveryError::VtDisallocateBusy) => {
             ledger
-                .operation_failed(&record.lifecycle_id, "vt_disallocate", attempt, libc::EBUSY)
+                .operation_failed(
+                    &next_snapshot.record.lifecycle_id,
+                    "vt_disallocate",
+                    attempt,
+                    libc::EBUSY,
+                )
                 .map_err(|_| StartupRecoveryFailure::UnsupportedRehydration)?;
             let provenance = inspect_vt_busy(
                 vt.number,
@@ -37,21 +71,21 @@ pub(crate) fn reconcile_startup_vt(
                         starttime: None,
                     },
                     VtKnownProcess {
-                        pid: record.worker_pid,
-                        starttime: record.worker_starttime,
+                        pid: next_snapshot.record.worker_pid,
+                        starttime: next_snapshot.record.worker_starttime,
                     },
                     VtKnownProcess {
-                        pid: record.launcher_pid,
+                        pid: next_snapshot.record.launcher_pid,
                         starttime: None,
                     },
                     VtKnownProcess {
-                        pid: record.leader_pid.unwrap_or(0),
-                        starttime: record.leader_starttime,
+                        pid: next_snapshot.record.leader_pid.unwrap_or(0),
+                        starttime: next_snapshot.record.leader_starttime,
                     },
                 ],
             );
             ledger
-                .record_vt_busy_provenance(&record.lifecycle_id, provenance)
+                .record_vt_busy_provenance(&next_snapshot.record.lifecycle_id, provenance)
                 .map_err(|_| StartupRecoveryFailure::UnsupportedRehydration)?;
             Err(StartupRecoveryFailure::VtDisallocateBusy)
         }

@@ -1,6 +1,6 @@
 use super::*;
 
-pub(crate) fn cleanup_logind_session(
+pub(super) fn terminate_logind_session_raw(
     identity: &SupervisorLogindSessionIdentity,
 ) -> Result<SupervisorLogindCleanupResult, SupervisorRecoveryError> {
     let connection = zbus::blocking::connection::Builder::system()
@@ -51,6 +51,14 @@ pub(crate) fn cleanup_logind_session(
     watch.wait(LOGIND_REMOVAL_TIMEOUT)?;
     info!(session_id = %identity.id.as_str(), "logind session removed after worker death");
     Ok(SupervisorLogindCleanupResult::Removed)
+}
+
+/// Live/provider compatibility entry point. SameBoot startup must use the
+/// capability-gated adapter below instead of passing a primitive session.
+pub(crate) fn cleanup_logind_session(
+    identity: &SupervisorLogindSessionIdentity,
+) -> Result<SupervisorLogindCleanupResult, SupervisorRecoveryError> {
+    terminate_logind_session_raw(identity)
 }
 
 pub(crate) fn logind_session_absent(

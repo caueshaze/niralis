@@ -164,6 +164,10 @@ impl PersistentRecoveryRecord {
 }
 
 pub(crate) fn current_boot_id() -> std::io::Result<String> {
+    #[cfg(any(test, feature = "supervisor-test-fixtures"))]
+    if let Ok(override_id) = std::env::var("NIRALIS_TEST_BOOT_ID") {
+        return Ok(override_id);
+    }
     Ok(fs::read_to_string("/proc/sys/kernel/random/boot_id")?
         .trim()
         .to_owned())

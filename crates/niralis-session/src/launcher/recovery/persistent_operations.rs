@@ -115,6 +115,27 @@ impl PersistentRecoveryLedger {
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         self.commit(next)
     }
+
+    pub(crate) fn transition_with_operation(
+        &mut self,
+        id: &str,
+        state: &str,
+        operation: &str,
+        operation_state: DurableOperationState,
+    ) -> io::Result<()> {
+        let mut next = self.record_for_operation(id)?;
+        match operation {
+            "record_resolution" => next.operation_ledger.record_resolution = operation_state,
+            "runtime_release" => next.operation_ledger.runtime_release = operation_state,
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "unsupported transition operation",
+                ))
+            }
+        }
+        self.commit_transition(next, state)
+    }
     pub(crate) fn operation_intent(
         &mut self,
         id: &str,

@@ -1,6 +1,8 @@
 use super::*;
 use std::os::unix::fs::PermissionsExt;
 use tempfile::tempdir;
+#[path = "persistent_tests_storage.rs"]
+mod storage;
 
 fn record(id: &str) -> PersistentRecoveryRecord {
     PersistentRecoveryRecord {
@@ -152,16 +154,16 @@ fn unknown_format_is_rejected_without_deletion() {
 
 #[cfg(any(test, feature = "supervisor-test-fixtures"))]
 #[test]
-fn previous_boot_reconciliation_resolves_and_removes_record() {
+fn previous_boot_reconciliation_plans_without_removing_record() {
     let dir = tempdir().unwrap();
     let records = dir.path().join("records");
     let mut ledger = PersistentRecoveryLedger::open(&records, dir.path().join("lock")).unwrap();
     ledger.create(record("lifecycle-previous")).unwrap();
     let provider = SupervisorFixtureRecoveryProvider::successful();
     let summary = StartupRecoveryCoordinator::new(&provider).reconcile(&mut ledger);
-    assert_eq!(summary.free, 1);
-    assert_eq!(summary.quarantined, 0);
-    assert_eq!(ledger.records().count(), 0);
+    assert_eq!(summary.free, 0);
+    assert_eq!(summary.quarantined, 1);
+    assert_eq!(ledger.records().count(), 1);
 }
 
 #[cfg(any(test, feature = "supervisor-test-fixtures"))]
@@ -191,7 +193,7 @@ fn startup_conflict_never_selects_a_record_heuristically() {
 
 #[cfg(any(test, feature = "supervisor-test-fixtures"))]
 #[test]
-fn previous_boot_duplicate_records_clear_after_non_destructive_validation() {
+fn previous_boot_duplicate_records_remain_quarantined_without_effects() {
     let dir = tempdir().unwrap();
     let records = dir.path().join("records");
     let mut ledger = PersistentRecoveryLedger::open(&records, dir.path().join("lock")).unwrap();
@@ -199,9 +201,9 @@ fn previous_boot_duplicate_records_clear_after_non_destructive_validation() {
     ledger.create(record("lifecycle-old-two")).unwrap();
     let provider = SupervisorFixtureRecoveryProvider::successful();
     let summary = StartupRecoveryCoordinator::new(&provider).reconcile(&mut ledger);
-    assert_eq!(summary.free, 2);
-    assert_eq!(summary.quarantined, 0);
-    assert_eq!(ledger.records().count(), 0);
+    assert_eq!(summary.free, 0);
+    assert_eq!(summary.quarantined, 2);
+    assert_eq!(ledger.records().count(), 2);
 }
 
 #[test]

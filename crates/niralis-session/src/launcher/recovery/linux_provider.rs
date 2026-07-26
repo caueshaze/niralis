@@ -13,11 +13,10 @@ impl SupervisorRecoveryProvider for LinuxSupervisorRecoveryProvider {
 
     fn reconcile_startup(
         &self,
-        record: &PersistentRecoveryRecord,
-        relation: RecoveryBootRelation,
+        record: &SameBootRecoveryRecord,
         ledger: &mut PersistentRecoveryLedger,
     ) -> StartupRecoveryOutcome {
-        reconcile_linux_startup(record, relation, ledger)
+        reconcile_linux_startup(record, ledger)
     }
 
     fn capture_previous_vt(
@@ -47,7 +46,7 @@ impl SupervisorRecoveryProvider for LinuxSupervisorRecoveryProvider {
         previous_vt: &PreviousVtIdentity,
     ) -> Result<SupervisorPreparedPayload, SupervisorRecoveryError> {
         let leader = SupervisorLeaderPidfd::open(authoritative_leader_pid)?;
-        let pin = SupervisorPinnedInvocationUnit::acquire(
+        let pin = LivePinnedInvocationUnit::acquire(
             identity.clone(),
             authoritative_leader_pid,
             worker_pid,
@@ -75,7 +74,7 @@ impl SupervisorRecoveryProvider for LinuxSupervisorRecoveryProvider {
             device_minor: logind.vt_number,
         };
         Ok(SupervisorPreparedPayload {
-            boundary: Box::new(LinuxSupervisorPayloadBoundary { pin, leader }),
+            boundary: Box::new(LinuxLivePayloadBoundary { pin, leader }),
             logind,
             vt,
             target_gid,

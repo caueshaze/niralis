@@ -1,3 +1,4 @@
+use super::admin_finalization::finalize_admin_success;
 use super::admin_support::{attempt, inspect_request, next_attempt_id, reject};
 use super::*;
 use crate::SessionError;
@@ -163,25 +164,15 @@ impl SupervisorLoopState {
                                 Some(after),
                             )
                             .map_err(|_| SessionError::PersistentRecoveryUnavailable)?;
-                        ledger
-                            .operation_confirmed(&record_id, "record_resolution", id)
-                            .map_err(|_| SessionError::PersistentRecoveryUnavailable)?;
-                        ledger
-                            .mark_record_resolved(&record_id)
-                            .map_err(|_| SessionError::PersistentRecoveryUnavailable)?;
-                        if let Err(error) = self.recovery_admin_host.runtime_release(&record) {
-                            ledger
-                                .operation_failed(&record_id, "runtime_release", id, libc::EIO)
-                                .map_err(|_| SessionError::PersistentRecoveryUnavailable)?;
-                            return Ok(reject(&format!("runtime release failed: {error:?}"), None));
+                        if let Err(reason) = finalize_admin_success(
+                            &self.recovery_admin_host,
+                            &mut self.seat,
+                            &mut ledger,
+                            &record_id,
+                            id,
+                        ) {
+                            return Ok(reject(&reason, None));
                         }
-                        ledger
-                            .operation_confirmed(&record_id, "runtime_release", id)
-                            .map_err(|_| SessionError::PersistentRecoveryUnavailable)?;
-                        ledger
-                            .remove_resolved(&record_id)
-                            .map_err(|_| SessionError::PersistentRecoveryUnavailable)?;
-                        self.seat = SeatLifecycle::Free;
                         Ok(crate::RecoveryAdminResponse::RetryAccepted {
                             record_id,
                             sequence: record_sequence.saturating_add(3),

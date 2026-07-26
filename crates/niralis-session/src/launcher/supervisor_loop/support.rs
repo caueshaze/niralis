@@ -55,7 +55,7 @@ pub(crate) fn finalize_expected_prestarted_exit(
     if !provider.confirm_logind_absent(&payload.logind)? {
         return Err(SupervisorRecoveryError::LogindIdentityChanged);
     }
-    payload.boundary.release()
+    payload.boundary.release_live()
 }
 
 pub(crate) fn finalize_clean_worker_exit(
@@ -73,7 +73,7 @@ pub(crate) fn finalize_clean_worker_exit(
     if !provider.confirm_logind_absent(&payload.logind)? {
         return Err(SupervisorRecoveryError::LogindIdentityChanged);
     }
-    payload.boundary.release()
+    payload.boundary.release_live()
 }
 
 pub(crate) fn reap_pending_worker(child: &Arc<Mutex<Child>>) -> Result<ExitStatus, SessionError> {

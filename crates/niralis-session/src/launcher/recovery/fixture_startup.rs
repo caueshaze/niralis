@@ -60,17 +60,6 @@ pub(crate) fn prepare_fixture_payload(
     })
 }
 
-fn fixture_process_cgroup(pid: u32) -> String {
-    fs::read_to_string(format!("/proc/{pid}/cgroup"))
-        .ok()
-        .and_then(|value| {
-            value
-                .lines()
-                .find_map(|line| line.strip_prefix("0::").map(str::to_owned))
-        })
-        .unwrap_or_else(|| "/fixture/payload".to_owned())
-}
-
 pub(crate) fn fixture_event(provider: &SupervisorFixtureRecoveryProvider, value: &str) {
     if let Some(path) = &provider.operation_log {
         if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path) {
@@ -157,9 +146,11 @@ pub(crate) fn reconcile_real_owner_change(
 
 pub(crate) fn reconcile_fixture_worker(
     provider: &SupervisorFixtureRecoveryProvider,
-    record: &PersistentRecoveryRecord,
+    same_boot: &SameBootRecoveryRecord,
     ledger: &mut PersistentRecoveryLedger,
 ) {
+    let record = &same_boot.record;
+    let authority = same_boot.destructive_authority();
     let identity = rehydrate_process_identity(
         record.worker_pid,
         record.worker_starttime,
@@ -174,7 +165,7 @@ pub(crate) fn reconcile_fixture_worker(
             .is_ok()
         {
             fixture_event(provider, "worker_sigterm");
-            let _ = send_sigterm(pidfd.as_raw_fd());
+            let _ = signal_validated_worker(&authority, record, pidfd.as_raw_fd());
             let _ = wait_for_pidfd(pidfd.as_raw_fd(), 1000);
             let _ = ledger.operation_confirmed(&record.lifecycle_id, "runtime_release", attempt);
         }

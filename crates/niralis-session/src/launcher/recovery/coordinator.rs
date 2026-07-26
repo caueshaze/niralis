@@ -76,13 +76,13 @@ impl<'a> SupervisorEmergencyRecoveryCoordinator<'a> {
         };
         let proof = match payload
             .boundary
-            .recover_emergency(worker_exit, EMERGENCY_BOUNDARY_TIMEOUT)
+            .recover_live_emergency(worker_exit, EMERGENCY_BOUNDARY_TIMEOUT)
         {
             Ok(proof) => proof,
             Err(reason) => return quarantine(boundary_error_stage(&reason), reason),
         };
         info!("emergency payload boundary proof established");
-        let unref_error = payload.boundary.release().err();
+        let unref_error = payload.boundary.release_live().err();
         if let Some(reason) = &unref_error {
             warn!(
                 ?reason,

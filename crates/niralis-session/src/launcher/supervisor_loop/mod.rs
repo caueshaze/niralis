@@ -11,6 +11,7 @@ mod terminal_vt;
 use running::RunningRegistration;
 use support::*;
 mod admin;
+mod admin_finalization;
 mod admin_support;
 use tracing::info;
 

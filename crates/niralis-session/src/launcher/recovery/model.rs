@@ -11,7 +11,6 @@ pub(crate) enum StartupRecoveryDecision {
     ResumeLogindCleanup,
     ResumeVtRecovery,
     PreserveQuarantine,
-    ClearPreviousBootRecord,
     Quarantine(StartupRecoveryFailure),
 }
 
@@ -144,6 +143,7 @@ pub(crate) enum SupervisorRecoveryError {
     SupervisorUnrefFailed,
     LogindUnavailable,
     LogindIdentityChanged,
+    LogindCleanupIndeterminate,
     LogindRemovalTimedOut,
     VtIdentityChanged,
     VtOpenFailed(i32),

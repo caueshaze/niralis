@@ -26,8 +26,7 @@ pub(crate) trait SupervisorRecoveryProvider: Send + Sync + fmt::Debug {
 
     fn reconcile_startup(
         &self,
-        _record: &PersistentRecoveryRecord,
-        _relation: RecoveryBootRelation,
+        _record: &SameBootRecoveryRecord,
         _ledger: &mut PersistentRecoveryLedger,
     ) -> StartupRecoveryOutcome {
         StartupRecoveryOutcome::Quarantined(StartupRecoveryFailure::UnsupportedRehydration)

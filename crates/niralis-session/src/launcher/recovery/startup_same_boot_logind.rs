@@ -1,14 +1,17 @@
+use super::vt_verification::{inspect_startup_virtual_terminal, StartupVtRecoveryState};
 use super::*;
 
 pub(crate) fn reconcile_logind_and_vt(
-    record: &PersistentRecoveryRecord,
+    mut snapshot: RecoveryStateSnapshot,
     ledger: &mut PersistentRecoveryLedger,
     owner_watch: &OwnerWatch,
+    boundary_proof: Option<AuthorizedRecoveryBoundaryProof>,
 ) -> Result<(), StartupRecoveryFailure> {
     let authority = owner_watch
         .stable_snapshot()
         .map_err(|_| StartupRecoveryFailure::LogindOwnerChanged)?;
     let owner = logind_owner().map_err(|_| StartupRecoveryFailure::LogindOwnerChanged)?;
+    let record = &snapshot.record;
     let Some(id) = record
         .logind_session_id
         .as_deref()
@@ -43,15 +46,42 @@ pub(crate) fn reconcile_logind_and_vt(
         {
             return Err(StartupRecoveryFailure::LogindIdentityChanged);
         }
+        let validated =
+            ValidatedRecoveryLogindSession::from_identity(&snapshot, session.clone(), &authority)
+                .map_err(|_| StartupRecoveryFailure::LogindIdentityChanged)?;
         owner_watch
             .still_authorizes(&authority)
             .map_err(|_| StartupRecoveryFailure::LogindOwnerChanged)?;
         let attempt = record.sequence.saturating_add(2);
-        ledger
-            .operation_intent(&record.lifecycle_id, "logind_termination", attempt)
+        let (next_snapshot, permit) = ledger
+            .persist_recovery_intent_from_snapshot::<LogindCleanupOperation>(
+                snapshot,
+                "logind_termination",
+                attempt,
+            )
             .map_err(|_| StartupRecoveryFailure::UnsupportedRehydration)?;
-        cleanup_logind_session(&session)
-            .map_err(|_| StartupRecoveryFailure::LogindIdentityChanged)?;
+        let target = ValidatedRecoveryLogindSession::from_identity(
+            &next_snapshot,
+            validated.as_identity(),
+            &authority,
+        )
+        .map_err(|_| StartupRecoveryFailure::LogindIdentityChanged)?;
+        SameBootLogindEffects::terminate_session(
+            &next_snapshot.authority,
+            target,
+            permit,
+            owner_watch,
+            &authority,
+        )
+        .map_err(|error| match error {
+            SupervisorRecoveryError::LogindCleanupIndeterminate => {
+                StartupRecoveryFailure::LogindOwnerChanged
+            }
+            SupervisorRecoveryError::LogindOwnerChanged => {
+                StartupRecoveryFailure::LogindOwnerChanged
+            }
+            _ => StartupRecoveryFailure::LogindIdentityChanged,
+        })?;
         // Never classify a call whose owner changed while it was in flight as
         // removed or already gone.  The durable intent is intentionally left
         // unconfirmed, so a later daemon cannot repeat it automatically.
@@ -59,7 +89,14 @@ pub(crate) fn reconcile_logind_and_vt(
             .still_authorizes(&authority)
             .map_err(|_| StartupRecoveryFailure::LogindOwnerChanged)?;
         ledger
-            .operation_confirmed(&record.lifecycle_id, "logind_termination", attempt)
+            .operation_confirmed(
+                &next_snapshot.record.lifecycle_id,
+                "logind_termination",
+                attempt,
+            )
+            .map_err(|_| StartupRecoveryFailure::UnsupportedRehydration)?;
+        snapshot = ledger
+            .refresh_recovery_snapshot(next_snapshot)
             .map_err(|_| StartupRecoveryFailure::UnsupportedRehydration)?;
     }
     if logind_owner().map_err(|_| StartupRecoveryFailure::LogindOwnerChanged)? != owner
@@ -67,7 +104,7 @@ pub(crate) fn reconcile_logind_and_vt(
     {
         return Err(StartupRecoveryFailure::LogindOwnerChanged);
     }
-    reconcile_startup_vt(record, ledger)
+    reconcile_startup_vt(snapshot, ledger, boundary_proof, owner_watch)
 }
 
 pub(crate) fn confirm_absent_boundary_logind_and_vt(
@@ -103,7 +140,15 @@ pub(crate) fn confirm_absent_boundary_logind_and_vt(
                 target_vt = vt.number,
                 "startup absent-boundary VT remains allocated; resuming supervisor VT recovery"
             );
-            reconcile_startup_vt(record, ledger)?;
+            let current_boot = BootIdentity::parse(
+                current_boot_id().map_err(|_| StartupRecoveryFailure::LogindOwnerChanged)?,
+            )
+            .map_err(|_| StartupRecoveryFailure::LogindOwnerChanged)?;
+            let snapshot = RecoveryStateSnapshot::from_record(&current_boot, record.clone())
+                .map_err(|_| StartupRecoveryFailure::LogindOwnerChanged)?;
+            let proof = RecoveryBoundaryEmptyProof::from_absent_boundary(&snapshot)
+                .authorize(snapshot.record.sequence);
+            reconcile_startup_vt(snapshot, ledger, Some(proof), owner_watch)?;
         }
     }
     owner_watch

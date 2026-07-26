@@ -24,7 +24,7 @@ pub(crate) struct SupervisorFixtureBoundary {
     feature = "integration-test-control",
     feature = "supervisor-test-fixtures"
 ))]
-impl SupervisorPayloadBoundary for SupervisorFixtureBoundary {
+impl LivePayloadBoundary for SupervisorFixtureBoundary {
     fn identity(&self) -> &crate::PayloadScopeIdentity {
         &self.identity
     }
@@ -45,7 +45,7 @@ impl SupervisorPayloadBoundary for SupervisorFixtureBoundary {
         self.leader_pid
     }
 
-    fn recover_emergency(
+    fn recover_live_emergency(
         &mut self,
         worker_exit: ExitStatus,
         _timeout: Duration,
@@ -142,7 +142,7 @@ impl SupervisorPayloadBoundary for SupervisorFixtureBoundary {
         Ok(fixture_boundary_proof(&self.identity, worker_exit))
     }
 
-    fn release(&mut self) -> Result<(), SupervisorRecoveryError> {
+    fn release_live(&mut self) -> Result<(), SupervisorRecoveryError> {
         use std::sync::atomic::Ordering;
         if !self.released {
             self.counters.unrefs.fetch_add(1, Ordering::SeqCst);

@@ -24,7 +24,7 @@ fn real_invocation_bound_unit_kill_empties_scope() {
             .expect("Kill fixture must create a descendant"),
     )
     .expect("fixture descendant pidfd");
-    let mut pin = SupervisorPinnedInvocationUnit::acquire(
+    let mut pin = LivePinnedInvocationUnit::acquire(
         identity,
         scope.leader_pid,
         std::process::id(),
@@ -32,9 +32,9 @@ fn real_invocation_bound_unit_kill_empties_scope() {
         &leader,
     )
     .expect("production invocation-bound Ref and revalidation");
-    assert_eq!(pin.object_path, scope.object_path);
-    assert_eq!(pin.control_group, scope.control_group);
-    pin.request_emergency_kill()
+    assert_eq!(pin.object_path(), scope.object_path);
+    assert_eq!(pin.control_group(), scope.control_group);
+    pin.request_live_emergency_kill()
         .expect("production Unit.Kill(all, SIGKILL)");
     // The private helper is the scope leader and its launcher must reap it
     // before cgroup.events can become terminal.
@@ -52,17 +52,17 @@ fn real_invocation_bound_unit_kill_empties_scope() {
     if terminal_boundary == SupervisorBoundaryState::Empty {
         assert!(std::fs::read_to_string(format!(
             "/sys/fs/cgroup{}/cgroup.procs",
-            pin.control_group
+            pin.control_group()
         ))
         .expect("fixture cgroup procs")
         .trim()
         .is_empty());
     }
     assert!(matches!(
-        pin.request_emergency_kill(),
+        pin.request_live_emergency_kill(),
         Err(SupervisorRecoveryError::BusDeliveryIndeterminate)
     ));
-    pin.release().expect("production Unit.Unref");
+    pin.release_live().expect("production Unit.Unref");
     assert_scope_removed(&scope.invocation);
     scope.disarm();
     assert_eq!(recovery_before, recovery_ledger_snapshot());
@@ -180,7 +180,7 @@ fn matching_scope_record(scope: &SystemdScopeFixture) -> PersistentRecoveryRecor
     }
 }
 
-fn wait_for_terminal_boundary(pin: &SupervisorPinnedInvocationUnit) -> SupervisorBoundaryState {
+fn wait_for_terminal_boundary(pin: &LivePinnedInvocationUnit) -> SupervisorBoundaryState {
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
         match pin.boundary_state() {
@@ -189,7 +189,7 @@ fn wait_for_terminal_boundary(pin: &SupervisorPinnedInvocationUnit) -> Superviso
             }
             _ if Instant::now() < deadline => std::thread::yield_now(),
             state => {
-                let cgroup = format!("/sys/fs/cgroup{}", pin.control_group);
+                let cgroup = format!("/sys/fs/cgroup{}", pin.control_group());
                 let events = std::fs::read_to_string(format!("{cgroup}/cgroup.events"));
                 let procs = std::fs::read_to_string(format!("{cgroup}/cgroup.procs"));
                 panic!(

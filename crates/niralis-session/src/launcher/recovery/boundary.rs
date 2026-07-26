@@ -1,6 +1,6 @@
 use super::*;
 
-pub(crate) trait SupervisorPayloadBoundary: Send + fmt::Debug {
+pub(crate) trait LivePayloadBoundary: Send + fmt::Debug {
     fn identity(&self) -> &crate::PayloadScopeIdentity;
     fn object_path(&self) -> Option<&str> {
         None
@@ -12,7 +12,7 @@ pub(crate) trait SupervisorPayloadBoundary: Send + fmt::Debug {
         None
     }
     fn leader_pid(&self) -> u32;
-    fn recover_emergency(
+    fn recover_live_emergency(
         &mut self,
         worker_exit: ExitStatus,
         timeout: Duration,
@@ -21,17 +21,17 @@ pub(crate) trait SupervisorPayloadBoundary: Send + fmt::Debug {
         &mut self,
         worker_exit: ExitStatus,
     ) -> Result<SupervisorEmergencyBoundaryProof, SupervisorRecoveryError>;
-    fn release(&mut self) -> Result<(), SupervisorRecoveryError>;
+    fn release_live(&mut self) -> Result<(), SupervisorRecoveryError>;
 }
 #[derive(Debug)]
-pub(crate) struct LinuxSupervisorPayloadBoundary {
-    pub(crate) pin: SupervisorPinnedInvocationUnit,
+pub(crate) struct LinuxLivePayloadBoundary {
+    pub(crate) pin: LivePinnedInvocationUnit,
     pub(crate) leader: SupervisorLeaderPidfd,
 }
 
-impl SupervisorPayloadBoundary for LinuxSupervisorPayloadBoundary {
+impl LivePayloadBoundary for LinuxLivePayloadBoundary {
     fn identity(&self) -> &crate::PayloadScopeIdentity {
-        &self.pin.identity
+        self.pin.identity()
     }
 
     fn leader_pid(&self) -> u32 {
@@ -39,16 +39,16 @@ impl SupervisorPayloadBoundary for LinuxSupervisorPayloadBoundary {
     }
 
     fn object_path(&self) -> Option<&str> {
-        Some(&self.pin.object_path)
+        Some(self.pin.object_path())
     }
     fn control_group(&self) -> Option<&str> {
-        Some(&self.pin.control_group)
+        Some(self.pin.control_group())
     }
     fn slice(&self) -> Option<&str> {
-        Some(&self.pin.slice)
+        Some(self.pin.slice())
     }
 
-    fn recover_emergency(
+    fn recover_live_emergency(
         &mut self,
         worker_exit: ExitStatus,
         timeout: Duration,
@@ -57,12 +57,12 @@ impl SupervisorPayloadBoundary for LinuxSupervisorPayloadBoundary {
         let initial_state = self.pin.boundary_state()?;
         let mut observer = match initial_state {
             SupervisorBoundaryState::Populated => {
-                Some(CgroupEventsObserver::open(&self.pin.control_group)?)
+                Some(CgroupEventsObserver::open(self.pin.control_group())?)
             }
             SupervisorBoundaryState::Empty | SupervisorBoundaryState::Absent => None,
         };
         if matches!(initial_state, SupervisorBoundaryState::Populated) {
-            self.pin.request_emergency_kill()?;
+            self.pin.request_live_emergency_kill()?;
         }
         wait_for_emergency_boundary(&self.leader, observer.as_mut(), &self.pin, timeout)?;
         prove_linux_supervisor_emergency_boundary(self, worker_exit)
@@ -75,13 +75,13 @@ impl SupervisorPayloadBoundary for LinuxSupervisorPayloadBoundary {
         prove_linux_supervisor_emergency_boundary(self, worker_exit)
     }
 
-    fn release(&mut self) -> Result<(), SupervisorRecoveryError> {
-        self.pin.release()
+    fn release_live(&mut self) -> Result<(), SupervisorRecoveryError> {
+        self.pin.release_live()
     }
 }
 
 pub(crate) struct SupervisorPreparedPayload {
-    pub(crate) boundary: Box<dyn SupervisorPayloadBoundary>,
+    pub(crate) boundary: Box<dyn LivePayloadBoundary>,
     pub(crate) logind: SupervisorLogindSessionIdentity,
     pub(crate) vt: SupervisorVtIdentity,
     pub(crate) target_gid: u32,

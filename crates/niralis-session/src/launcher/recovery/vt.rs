@@ -1,6 +1,7 @@
+use super::vt_verification::{validate_tty_device, validate_vt_identity};
 use super::*;
 
-pub(crate) fn recover_virtual_terminal(
+pub(super) fn recover_virtual_terminal_raw(
     identity: &SupervisorVtIdentity,
 ) -> Result<(), SupervisorRecoveryError> {
     validate_vt_identity(identity)?;
@@ -84,25 +85,15 @@ pub(crate) fn recover_virtual_terminal(
     Ok(())
 }
 
-pub(crate) fn disallocate_virtual_terminal_once(
-    target_vt: u32,
+/// Live/provider compatibility entry point. SameBoot startup uses the typed
+/// adapter below and never passes a primitive VT identity to this function.
+pub(crate) fn recover_virtual_terminal(
+    identity: &SupervisorVtIdentity,
 ) -> Result<(), SupervisorRecoveryError> {
-    let console =
-        CString::new("/dev/tty0").map_err(|_| SupervisorRecoveryError::VtIdentityChanged)?;
-    let raw = unsafe {
-        libc::open(
-            console.as_ptr(),
-            libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC,
-        )
-    };
-    if raw < 0 {
-        return Err(SupervisorRecoveryError::VtOpenFailed(last_errno()));
-    }
-    let console = unsafe { OwnedFd::from_raw_fd(raw) };
-    disallocate_virtual_terminal_with_console(console.as_raw_fd(), target_vt)
+    recover_virtual_terminal_raw(identity)
 }
 
-fn disallocate_virtual_terminal_with_console(
+pub(super) fn disallocate_virtual_terminal_with_console(
     console_fd: RawFd,
     target_vt: u32,
 ) -> Result<(), SupervisorRecoveryError> {

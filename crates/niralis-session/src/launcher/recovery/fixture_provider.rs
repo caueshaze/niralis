@@ -76,94 +76,91 @@ impl SupervisorRecoveryProvider for SupervisorFixtureRecoveryProvider {
 
     fn reconcile_startup(
         &self,
-        record: &PersistentRecoveryRecord,
-        relation: RecoveryBootRelation,
+        same_boot: &SameBootRecoveryRecord,
         ledger: &mut PersistentRecoveryLedger,
     ) -> StartupRecoveryOutcome {
-        match relation {
-            RecoveryBootRelation::PreviousBoot => StartupRecoveryOutcome::Free,
-            RecoveryBootRelation::SameBoot => {
-                fixture_event(self, "startup:same_boot");
-                fixture_event(
-                    self,
-                    match self.mode {
-                        SupervisorFixtureBoundaryMode::PayloadRecovered => "mode:payload_recovered",
-                        SupervisorFixtureBoundaryMode::WorkerAliveHandoff => "mode:worker_alive",
-                        SupervisorFixtureBoundaryMode::Replacement => "mode:replacement",
-                        _ => "mode:other",
-                    },
-                );
-                if matches!(
-                    self.mode,
-                    SupervisorFixtureBoundaryMode::RealSystemdOwnerChange
-                        | SupervisorFixtureBoundaryMode::RealLogindOwnerChange
-                ) {
-                    return reconcile_real_owner_change(self.mode, self);
-                }
-                if let Some(outcome) = reconcile_fixture_dbus(self.mode, record, ledger, self) {
-                    return outcome;
-                }
-                if let Some(failure) = fixture_owner_failure(self.mode) {
-                    let watch = OwnerWatch::scripted();
-                    watch.invalidate_for_test();
-                    if watch.stable().is_err() {
-                        fixture_event(self, "owner_change:invalidated");
-                    }
-                    return StartupRecoveryOutcome::Quarantined(failure);
-                }
-                if matches!(
-                    record.operation_ledger.payload_kill,
-                    DurableOperationState::IntentPersisted { .. }
-                        | DurableOperationState::Indeterminate { .. }
-                ) && !matches!(self.mode, SupervisorFixtureBoundaryMode::EmptyBoundary)
-                {
-                    fixture_event(self, "quarantine:indeterminate_payload_kill");
-                    return StartupRecoveryOutcome::Quarantined(
-                        StartupRecoveryFailure::BoundaryIdentityChanged,
-                    );
-                }
+        let record = &same_boot.record;
+        {
+            fixture_event(self, "startup:same_boot");
+            fixture_event(
+                self,
                 match self.mode {
-                    SupervisorFixtureBoundaryMode::Replacement => {
-                        fixture_event(self, "quarantine:replacement");
-                        StartupRecoveryOutcome::Quarantined(
-                            StartupRecoveryFailure::BoundaryIdentityChanged,
-                        )
-                    }
-                    SupervisorFixtureBoundaryMode::ScopeRecordConflict => {
-                        fixture_event(self, "quarantine:scope_record_conflict");
-                        StartupRecoveryOutcome::Quarantined(
-                            StartupRecoveryFailure::PersistentRecordConflict,
-                        )
-                    }
-                    SupervisorFixtureBoundaryMode::EbusyQuarantine => {
-                        fixture_event(self, "quarantine:vt_ebusy");
-                        StartupRecoveryOutcome::Quarantined(
-                            StartupRecoveryFailure::UnsupportedRehydration,
-                        )
-                    }
-                    SupervisorFixtureBoundaryMode::WorkerAliveHandoff => {
-                        reconcile_fixture_worker(self, record, ledger);
-                        StartupRecoveryOutcome::Free
-                    }
-                    SupervisorFixtureBoundaryMode::PayloadRecovered => {
-                        if reconcile_fixture_payload(self, record, ledger) {
-                            StartupRecoveryOutcome::Free
-                        } else {
-                            StartupRecoveryOutcome::Quarantined(
-                                StartupRecoveryFailure::LeaderIdentityIndeterminate,
-                            )
-                        }
-                    }
-                    SupervisorFixtureBoundaryMode::AlreadyEmpty
-                    | SupervisorFixtureBoundaryMode::EmptyBoundary
-                    | SupervisorFixtureBoundaryMode::RestartReconciles => {
-                        fixture_event(self, "proof:empty_boundary");
-                        StartupRecoveryOutcome::Free
-                    }
-                    _ => StartupRecoveryOutcome::Quarantined(
-                        StartupRecoveryFailure::UnsupportedRehydration,
-                    ),
+                    SupervisorFixtureBoundaryMode::PayloadRecovered => "mode:payload_recovered",
+                    SupervisorFixtureBoundaryMode::WorkerAliveHandoff => "mode:worker_alive",
+                    SupervisorFixtureBoundaryMode::Replacement => "mode:replacement",
+                    _ => "mode:other",
+                },
+            );
+            if matches!(
+                self.mode,
+                SupervisorFixtureBoundaryMode::RealSystemdOwnerChange
+                    | SupervisorFixtureBoundaryMode::RealLogindOwnerChange
+            ) {
+                return reconcile_real_owner_change(self.mode, self);
+            }
+            if let Some(outcome) = reconcile_fixture_dbus(self.mode, record, ledger, self) {
+                return outcome;
+            }
+            if let Some(failure) = fixture_owner_failure(self.mode) {
+                let watch = OwnerWatch::scripted();
+                watch.invalidate_for_test();
+                if watch.stable().is_err() {
+                    fixture_event(self, "owner_change:invalidated");
                 }
+                return StartupRecoveryOutcome::Quarantined(failure);
+            }
+            if matches!(
+                record.operation_ledger.payload_kill,
+                DurableOperationState::IntentPersisted { .. }
+                    | DurableOperationState::Indeterminate { .. }
+            ) && !matches!(self.mode, SupervisorFixtureBoundaryMode::EmptyBoundary)
+            {
+                fixture_event(self, "quarantine:indeterminate_payload_kill");
+                return StartupRecoveryOutcome::Quarantined(
+                    StartupRecoveryFailure::BoundaryIdentityChanged,
+                );
+            }
+            match self.mode {
+                SupervisorFixtureBoundaryMode::Replacement => {
+                    fixture_event(self, "quarantine:replacement");
+                    StartupRecoveryOutcome::Quarantined(
+                        StartupRecoveryFailure::BoundaryIdentityChanged,
+                    )
+                }
+                SupervisorFixtureBoundaryMode::ScopeRecordConflict => {
+                    fixture_event(self, "quarantine:scope_record_conflict");
+                    StartupRecoveryOutcome::Quarantined(
+                        StartupRecoveryFailure::PersistentRecordConflict,
+                    )
+                }
+                SupervisorFixtureBoundaryMode::EbusyQuarantine => {
+                    fixture_event(self, "quarantine:vt_ebusy");
+                    StartupRecoveryOutcome::Quarantined(
+                        StartupRecoveryFailure::UnsupportedRehydration,
+                    )
+                }
+                SupervisorFixtureBoundaryMode::WorkerAliveHandoff => {
+                    reconcile_fixture_worker(self, same_boot, ledger);
+                    StartupRecoveryOutcome::Free
+                }
+                SupervisorFixtureBoundaryMode::PayloadRecovered => {
+                    if reconcile_fixture_payload(self, record, ledger) {
+                        StartupRecoveryOutcome::Free
+                    } else {
+                        StartupRecoveryOutcome::Quarantined(
+                            StartupRecoveryFailure::LeaderIdentityIndeterminate,
+                        )
+                    }
+                }
+                SupervisorFixtureBoundaryMode::AlreadyEmpty
+                | SupervisorFixtureBoundaryMode::EmptyBoundary
+                | SupervisorFixtureBoundaryMode::RestartReconciles => {
+                    fixture_event(self, "proof:empty_boundary");
+                    StartupRecoveryOutcome::Free
+                }
+                _ => StartupRecoveryOutcome::Quarantined(
+                    StartupRecoveryFailure::UnsupportedRehydration,
+                ),
             }
         }
     }

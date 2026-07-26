@@ -12,37 +12,60 @@ pub(crate) struct SupervisorUnitObservation {
     pub(crate) sub_state: String,
 }
 
-pub(crate) struct SupervisorPinnedInvocationUnit {
-    pub(crate) connection: zbus::blocking::Connection,
-    pub(crate) systemd_owner: String,
-    pub(crate) identity: crate::PayloadScopeIdentity,
-    pub(crate) object_path: String,
-    pub(crate) control_group: String,
-    pub(crate) slice: String,
-    pub(crate) worker_pid: u32,
-    pub(crate) launcher_pid: u32,
-    pub(crate) reference_held: bool,
-    pub(crate) emergency_kill_requested: bool,
+/// Private ownership nucleus for a systemd Unit.Ref.  No public wrapper can
+/// duplicate this value, and all raw Ref/Kill/Unref calls remain here.
+pub(super) struct PinnedInvocationInner {
+    pub(super) connection: zbus::blocking::Connection,
+    pub(super) systemd_owner: String,
+    pub(super) identity: crate::PayloadScopeIdentity,
+    pub(super) object_path: String,
+    pub(super) control_group: String,
+    pub(super) slice: String,
+    pub(super) worker_pid: u32,
+    pub(super) launcher_pid: u32,
+    pub(super) reference_held: bool,
+    emergency_kill_requested: bool,
 }
 
-impl fmt::Debug for SupervisorPinnedInvocationUnit {
+pub(crate) struct LiveLifecycleBinding {
+    pub(crate) identity: crate::PayloadScopeIdentity,
+}
+
+/// Pin acquired by the live lifecycle.  It is intentionally incompatible
+/// with RecoveryPinnedInvocationUnit.
+pub(crate) struct LivePinnedInvocationUnit {
+    pub(super) inner: PinnedInvocationInner,
+    pub(crate) live_binding: LiveLifecycleBinding,
+}
+
+impl fmt::Debug for LivePinnedInvocationUnit {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("SupervisorPinnedInvocationUnit")
-            .field("identity", &self.identity)
-            .field("object_path", &self.object_path)
-            .field("control_group", &self.control_group)
-            .field("slice", &self.slice)
-            .field("worker_pid", &self.worker_pid)
-            .field("launcher_pid", &self.launcher_pid)
-            .field("reference_held", &self.reference_held)
-            .field("emergency_kill_requested", &self.emergency_kill_requested)
+            .debug_struct("LivePinnedInvocationUnit")
+            .field("identity", &self.inner.identity)
+            .field("object_path", &self.inner.object_path)
+            .field("control_group", &self.inner.control_group)
+            .field("slice", &self.inner.slice)
+            .field("worker_pid", &self.inner.worker_pid)
+            .field("launcher_pid", &self.inner.launcher_pid)
+            .field("reference_held", &self.inner.reference_held)
             .finish()
     }
 }
 
-impl SupervisorPinnedInvocationUnit {
-    pub(crate) fn acquire(
+impl PinnedInvocationInner {
+    pub(super) fn ref_unit(
+        connection: &zbus::blocking::Connection,
+        path: &OwnedObjectPath,
+    ) -> Result<(), SupervisorRecoveryError> {
+        unit_call(connection, path, "Ref", &())
+    }
+
+    pub(super) fn unref_unit(connection: &zbus::blocking::Connection, path: &OwnedObjectPath) {
+        let _ = unit_call(connection, path, "Unref", &());
+    }
+
+    pub(super) fn acquire(
         identity: crate::PayloadScopeIdentity,
         leader_pid: u32,
         worker_pid: u32,
@@ -91,7 +114,7 @@ impl SupervisorPinnedInvocationUnit {
             let _ = unit_call(&connection, &object_path, "Unref", &());
             return Err(error);
         }
-        info!(unit = %identity.unit_name, invocation_id = %identity.invocation_id, "supervisor recovery pin validated");
+        info!(unit = %identity.unit_name, invocation_id = %identity.invocation_id, "supervisor live pin validated");
         Ok(Self {
             connection,
             systemd_owner: captured_systemd_owner,
@@ -106,7 +129,30 @@ impl SupervisorPinnedInvocationUnit {
         })
     }
 
-    pub(crate) fn revalidate(
+    pub(super) fn from_rehydrated(
+        connection: zbus::blocking::Connection,
+        systemd_owner: String,
+        identity: crate::PayloadScopeIdentity,
+        object_path: String,
+        observation: SupervisorUnitObservation,
+        worker_pid: u32,
+        launcher_pid: u32,
+    ) -> Self {
+        Self {
+            connection,
+            systemd_owner,
+            identity,
+            object_path,
+            control_group: observation.control_group,
+            slice: observation.slice,
+            worker_pid,
+            launcher_pid,
+            reference_held: true,
+            emergency_kill_requested: false,
+        }
+    }
+
+    pub(super) fn revalidate(
         &self,
         allow_terminal_cgroup_clear: bool,
     ) -> Result<SupervisorUnitObservation, SupervisorRecoveryError> {
@@ -131,7 +177,7 @@ impl SupervisorPinnedInvocationUnit {
         Ok(observation)
     }
 
-    pub(crate) fn validate_owner(&self) -> Result<(), SupervisorRecoveryError> {
+    pub(super) fn validate_owner(&self) -> Result<(), SupervisorRecoveryError> {
         if systemd_owner(&self.connection)? == self.systemd_owner {
             Ok(())
         } else {
@@ -139,13 +185,13 @@ impl SupervisorPinnedInvocationUnit {
         }
     }
 
-    pub(crate) fn boundary_state(
+    pub(super) fn boundary_state(
         &self,
     ) -> Result<SupervisorBoundaryState, SupervisorRecoveryError> {
         read_supervisor_boundary_state(&self.control_group)
     }
 
-    pub(crate) fn request_emergency_kill(&mut self) -> Result<(), SupervisorRecoveryError> {
+    pub(super) fn request_emergency_kill(&mut self) -> Result<(), SupervisorRecoveryError> {
         if self.emergency_kill_requested {
             return Err(SupervisorRecoveryError::BusDeliveryIndeterminate);
         }
@@ -157,11 +203,6 @@ impl SupervisorPinnedInvocationUnit {
             return Ok(());
         }
         self.emergency_kill_requested = true;
-        info!(
-            signal = "SIGKILL",
-            target = "all",
-            "requesting emergency supervisor payload termination"
-        );
         let path = OwnedObjectPath::try_from(self.object_path.as_str())
             .map_err(|_| SupervisorRecoveryError::BoundaryIdentityChanged)?;
         unit_call(&self.connection, &path, "Kill", &("all", libc::SIGKILL)).map_err(|error| {
@@ -174,15 +215,13 @@ impl SupervisorPinnedInvocationUnit {
         })?;
         self.validate_owner()
             .map_err(|_| SupervisorRecoveryError::BusDeliveryIndeterminate)?;
-        info!("emergency payload termination requested");
         Ok(())
     }
 
-    pub(crate) fn release(&mut self) -> Result<(), SupervisorRecoveryError> {
+    pub(super) fn release(&mut self) -> Result<(), SupervisorRecoveryError> {
         if !self.reference_held {
             return Ok(());
         }
-        info!("releasing supervisor-owned systemd unit reference");
         self.validate_owner()?;
         let path = OwnedObjectPath::try_from(self.object_path.as_str())
             .map_err(|_| SupervisorRecoveryError::BoundaryIdentityChanged)?;

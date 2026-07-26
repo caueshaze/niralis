@@ -3,7 +3,7 @@ use super::*;
 pub(crate) fn wait_for_emergency_boundary(
     leader: &SupervisorLeaderPidfd,
     mut observer: Option<&mut CgroupEventsObserver>,
-    pin: &SupervisorPinnedInvocationUnit,
+    pin: &LivePinnedInvocationUnit,
     timeout: Duration,
 ) -> Result<(), SupervisorRecoveryError> {
     if leader.observed_dead()?
@@ -64,16 +64,19 @@ pub(crate) fn wait_for_emergency_boundary(
 }
 
 pub(crate) fn prove_linux_supervisor_emergency_boundary(
-    payload: &LinuxSupervisorPayloadBoundary,
+    payload: &LinuxLivePayloadBoundary,
     worker_exit: ExitStatus,
 ) -> Result<SupervisorEmergencyBoundaryProof, SupervisorRecoveryError> {
     payload.pin.validate_owner()?;
     if !payload.leader.observed_dead()? {
         return Err(SupervisorRecoveryError::LeaderStillAlive);
     }
-    let first = resolve_invocation(&payload.pin.connection, &payload.pin.identity.invocation_id)?;
+    let first = resolve_invocation(
+        payload.pin.connection(),
+        &payload.pin.identity().invocation_id,
+    )?;
     if let Some(path) = &first {
-        if path.as_str() != payload.pin.object_path {
+        if path.as_str() != payload.pin.object_path() {
             return Err(SupervisorRecoveryError::BoundaryIdentityChanged);
         }
         let observation = payload.pin.revalidate(true)?;
@@ -87,10 +90,13 @@ pub(crate) fn prove_linux_supervisor_emergency_boundary(
     ) {
         return Err(SupervisorRecoveryError::BoundaryStillPopulated);
     }
-    ensure_outside_boundary(payload.pin.worker_pid, &payload.pin.control_group)?;
-    ensure_outside_boundary(payload.pin.launcher_pid, &payload.pin.control_group)?;
+    ensure_outside_boundary(payload.pin.worker_pid(), payload.pin.control_group())?;
+    ensure_outside_boundary(payload.pin.launcher_pid(), payload.pin.control_group())?;
     payload.pin.validate_owner()?;
-    let second = resolve_invocation(&payload.pin.connection, &payload.pin.identity.invocation_id)?;
+    let second = resolve_invocation(
+        payload.pin.connection(),
+        &payload.pin.identity().invocation_id,
+    )?;
     match (&first, &second) {
         (Some(a), Some(b)) if a == b => {
             let observation = payload.pin.revalidate(true)?;
@@ -102,9 +108,9 @@ pub(crate) fn prove_linux_supervisor_emergency_boundary(
         _ => return Err(SupervisorRecoveryError::BoundaryIdentityChanged),
     }
     Ok(SupervisorEmergencyBoundaryProof {
-        unit_name: payload.pin.identity.unit_name.clone(),
-        invocation_id: payload.pin.identity.invocation_id.clone(),
-        control_group: payload.pin.control_group.clone(),
+        unit_name: payload.pin.identity().unit_name.clone(),
+        invocation_id: payload.pin.identity().invocation_id.clone(),
+        control_group: payload.pin.control_group().to_owned(),
         worker_exit: exit_status_label(worker_exit),
         leader_observed_dead: true,
         cgroup_observed_empty: true,

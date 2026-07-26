@@ -1,7 +1,23 @@
 use super::*;
 use std::os::fd::AsRawFd;
 
-pub(crate) fn send_sigterm(fd: i32) -> Result<(), ()> {
+/// Recovery-only signal adapter. The pidfd is produced by a successful
+/// SameBoot process rehydration; primitive PIDs never reach this boundary.
+pub(crate) fn signal_validated_worker(
+    authority: &SameBootRecoveryAuthority,
+    record: &PersistentRecoveryRecord,
+    fd: i32,
+) -> Result<(), ()> {
+    if !authority.validates(record)
+        || record.worker_starttime.is_none()
+        || record.worker_executable.is_none()
+    {
+        return Err(());
+    }
+    raw_send_sigterm(fd)
+}
+
+fn raw_send_sigterm(fd: i32) -> Result<(), ()> {
     if unsafe { libc::syscall(libc::SYS_pidfd_send_signal, fd, libc::SIGTERM, 0, 0) } < 0 {
         Err(())
     } else {
@@ -22,11 +38,11 @@ pub(crate) fn wait_for_pidfd(fd: i32, timeout_ms: i32) -> Result<bool, ()> {
     }
 }
 pub(crate) fn wait_for_boundary_empty(
-    pin: &SupervisorPinnedInvocationUnit,
+    pin: &RecoveryPinnedInvocationUnit,
     owner_watch: &OwnerWatch,
     authority: &AuthoritySnapshot,
 ) -> Result<(), StartupRecoveryFailure> {
-    let mut observer = CgroupEventsObserver::open(&pin.control_group)
+    let mut observer = CgroupEventsObserver::open(pin.control_group())
         .map_err(|_| StartupRecoveryFailure::BoundaryIdentityChanged)?;
     let timer = MonotonicTimer::arm(EMERGENCY_BOUNDARY_TIMEOUT)
         .map_err(|_| StartupRecoveryFailure::BoundaryIdentityChanged)?;
@@ -77,10 +93,11 @@ pub(crate) fn wait_for_boundary_empty(
     }
 }
 pub(crate) fn startup_boundary_proof(
-    pin: &SupervisorPinnedInvocationUnit,
+    pin: &RecoveryPinnedInvocationUnit,
     owner_watch: &OwnerWatch,
     authority: &AuthoritySnapshot,
-) -> Result<(), StartupRecoveryFailure> {
+    snapshot: &RecoveryStateSnapshot,
+) -> Result<RecoveryBoundaryEmptyProof, StartupRecoveryFailure> {
     owner_watch
         .still_authorizes(authority)
         .map_err(|_| StartupRecoveryFailure::SystemdOwnerChanged)?;
@@ -93,9 +110,9 @@ pub(crate) fn startup_boundary_proof(
     ) {
         return Err(StartupRecoveryFailure::BoundaryIdentityChanged);
     }
-    ensure_outside_boundary(pin.worker_pid, &pin.control_group)
+    ensure_outside_boundary(pin.worker_pid(), pin.control_group())
         .map_err(|_| StartupRecoveryFailure::BoundaryIdentityChanged)?;
-    ensure_outside_boundary(pin.launcher_pid, &pin.control_group)
+    ensure_outside_boundary(pin.launcher_pid(), pin.control_group())
         .map_err(|_| StartupRecoveryFailure::BoundaryIdentityChanged)?;
     for _ in 0..2 {
         owner_watch
@@ -118,5 +135,11 @@ pub(crate) fn startup_boundary_proof(
         .still_authorizes(authority)
         .map_err(|_| StartupRecoveryFailure::SystemdOwnerChanged)?;
     pin.validate_owner()
-        .map_err(|_| StartupRecoveryFailure::SystemdOwnerChanged)
+        .map_err(|_| StartupRecoveryFailure::SystemdOwnerChanged)?;
+    if !snapshot.validates() {
+        return Err(StartupRecoveryFailure::BoundaryIdentityChanged);
+    }
+    Ok(RecoveryBoundaryEmptyProof::from_verified_boundary(
+        snapshot, pin,
+    ))
 }
