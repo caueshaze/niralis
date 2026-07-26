@@ -140,13 +140,13 @@ pub(super) fn advance(
             state,
             "record_resolution",
             DurableOperationState::IntentPersisted {
-                attempt_id: authority.sequence.saturating_add(1),
+                attempt_id: next_operation_attempt_id(&current)?,
             },
         )?,
         "record_resolved" => {
             let attempt_id = match current.operation_ledger.record_resolution {
                 DurableOperationState::IntentPersisted { attempt_id } => attempt_id,
-                DurableOperationState::NotStarted => authority.sequence.saturating_add(1),
+                DurableOperationState::NotStarted => next_operation_attempt_id(&current)?,
                 DurableOperationState::Confirmed { .. } => {
                     return Err(PreviousBootFinalizationError::StaleSnapshot)
                 }
@@ -227,3 +227,7 @@ pub(super) fn guard_current_boot(
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "previous_boot_finalization_core_tests.rs"]
+mod tests;

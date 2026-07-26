@@ -1,0 +1,17 @@
+[Unit]
+Description=Niralis PreviousBoot physical smoke (%i)
+Documentation=man:niralisd(8)
+After=systemd-user-sessions.service
+Conflicts=niralisd.service
+Before=niralisd.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+EnvironmentFile=-/var/lib/niralis-smoke/%i/failpoint.env
+ExecStart=/usr/bin/setpriv --inh-caps=-all -- /usr/libexec/niralis-smoke/niralisd-smoke run %i --config /etc/niralis/niralis.toml
+Restart=no
+UMask=0077
+
+[Install]
+WantedBy=graphical.target

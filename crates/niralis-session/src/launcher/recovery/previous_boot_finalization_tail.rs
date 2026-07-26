@@ -133,7 +133,7 @@ fn authority_for_runtime(
                 ledger,
                 &authority,
                 DurableOperationState::IntentPersisted {
-                    attempt_id: authority.sequence.saturating_add(1),
+                    attempt_id: next_operation_attempt_id(&current)?,
                 },
             )?;
             entry.sequence = next.sequence;

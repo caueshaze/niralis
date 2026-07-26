@@ -88,6 +88,9 @@ pub(crate) use resume::resume_removed_previous_boot_finalization;
 #[path = "previous_boot_finalization_core.rs"]
 mod core;
 use core::*;
+#[path = "previous_boot_finalization_attempts.rs"]
+mod attempts;
+use attempts::*;
 
 #[cfg(test)]
 #[path = "previous_boot_durability_tests.rs"]

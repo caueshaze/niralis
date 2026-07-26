@@ -2,6 +2,7 @@
 # both spellings so the same module labels the daemon on merged and split /usr.
 /usr/bin/niralisd -- gen_context(system_u:object_r:niralis_exec_t,s0)
 /usr/sbin/niralisd -- gen_context(system_u:object_r:niralis_exec_t,s0)
+/usr/libexec/niralis-smoke/niralisd-smoke -- gen_context(system_u:object_r:niralis_exec_t,s0)
 /usr/libexec/niralis-session-worker -- gen_context(system_u:object_r:niralis_exec_t,s0)
 /usr/libexec/niralis-session-child -- gen_context(system_u:object_r:niralis_exec_t,s0)
 /usr/libexec/niralis-session-probe -- gen_context(system_u:object_r:niralis_exec_t,s0)
@@ -9,3 +10,4 @@
 /run/niralis/recovery-admin(/.*)? gen_context(system_u:object_r:niralis_recovery_admin_var_run_t,s0)
 /run/niralis(/.*)? gen_context(system_u:object_r:niralis_var_run_t,s0)
 /var/lib/niralis(/.*)? gen_context(system_u:object_r:niralis_var_lib_t,s0)
+/var/lib/niralis-smoke(/.*)? gen_context(system_u:object_r:niralis_var_lib_t,s0)

@@ -44,3 +44,51 @@ old and new boot IDs, record sequence, journal stage, and the final Seat Free ev
 Do not simulate the physical reboot by calling another coordinator function in the same
 process. If Hiraeth is unavailable, report the physical smoke as pending rather than
 claiming reboot evidence.
+
+## Interrupted physical smoke harness
+
+The clean production smoke above proves the installed daemon, its sockets, and a new
+login. The two interrupted reboot cases use the separate `niralisd-smoke` binary so
+that no test record is ever placed in `/var/lib/niralis/recovery`.
+
+Install it explicitly, as the normal build user:
+
+```text
+./scripts/install-previous-boot-smoke.sh
+```
+
+The harness is compiled only with `supervisor-test-fixtures`, uses
+`/var/lib/niralis-smoke/<run-id>/`, and runs the same persistent launcher startup as
+the daemon without opening IPC or the recovery-admin socket. It refuses a SameBoot
+record before the launcher is constructed and rejects `NIRALIS_TEST_BOOT_ID`; the
+physical boot identity must come from `/proc/sys/kernel/random/boot_id`.
+
+For `after_historical_resolved`:
+
+```text
+./scripts/previous-boot-physical-smoke.sh prepare a343c-historical
+./scripts/previous-boot-physical-smoke.sh arm a343c-historical after_historical_resolved
+sudo systemctl reboot
+```
+
+After reconnecting, verify that `niralisd-smoke@a343c-historical.service` exited with
+status 86, that its journal has `RecordResolved`, that the isolated record remains,
+and that `FreePublished` is absent. Then disarm only after that exact durable state:
+
+```text
+./scripts/previous-boot-physical-smoke.sh disarm a343c-historical
+sudo systemctl reboot
+```
+
+On the second boot, require `historical_finalization_resumed`, the four seeded
+`historical_operation_not_replayed` entries, exact record removal, and
+`seat_free_after_historical_completion`. Restore production only after collecting the
+evidence:
+
+```text
+./scripts/previous-boot-physical-smoke.sh restore a343c-historical
+```
+
+Run the same sequence with `after_runtime_release_confirmed` and a new run id. The
+scripts never reboot automatically and retain the isolated ledger and journal; no
+purge operation is provided.

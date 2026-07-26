@@ -107,6 +107,8 @@ mod previous_boot_inspection;
 mod previous_boot_linux_facts;
 mod previous_boot_linux_host;
 mod previous_boot_linux_vt;
+#[cfg(feature = "supervisor-test-fixtures")]
+mod previous_boot_physical_smoke;
 mod provider;
 mod record;
 mod recovery_capabilities;
@@ -207,14 +209,6 @@ pub(crate) use fixture_provider::*;
     feature = "supervisor-test-fixtures"
 ))]
 pub(crate) use fixture_startup::*;
-pub(crate) use linux_provider::*;
-pub(crate) use logind_cleanup::*;
-pub(crate) use logind_identity::*;
-pub(crate) use logind_recovery_effects::*;
-pub(crate) use model::*;
-pub(crate) use owner_watch::*;
-pub(crate) use owner_watch_authority::*;
-pub(crate) use owner_watch_open::*;
 pub(crate) use persistent::*;
 pub(crate) use persistent_taxonomy::*;
 pub(crate) use persistent_validation::*;
@@ -224,6 +218,8 @@ pub(crate) use previous_boot_finalization::*;
 pub(crate) use previous_boot_finalization_storage::*;
 pub(crate) use previous_boot_inspection::*;
 pub(crate) use previous_boot_linux_host::*;
+#[cfg(feature = "supervisor-test-fixtures")]
+pub use previous_boot_physical_smoke::*;
 pub(crate) use provider::*;
 pub(crate) use record::*;
 pub(crate) use recovery_capabilities::*;
@@ -243,7 +239,8 @@ pub(crate) use systemd_dbus::*;
 pub(crate) use systemd_pin::*;
 pub(crate) use systemd_rehydrate::*;
 pub(crate) use unknown_scope::*;
-pub(crate) use vt::*;
-pub(crate) use vt_admin_effects::*;
-pub(crate) use vt_busy::*;
-pub(crate) use vt_recovery_effects::*;
+pub(crate) use {
+    linux_provider::*, logind_cleanup::*, logind_identity::*, logind_recovery_effects::*, model::*,
+    owner_watch::*, owner_watch_authority::*, owner_watch_open::*,
+};
+pub(crate) use {vt::*, vt_admin_effects::*, vt_busy::*, vt_recovery_effects::*};

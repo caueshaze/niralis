@@ -24,3 +24,8 @@ zeroize.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+
+[[bin]]
+name = "niralisd-smoke"
+path = "src/bin/niralisd-smoke.rs"
+required-features = ["supervisor-test-fixtures"]

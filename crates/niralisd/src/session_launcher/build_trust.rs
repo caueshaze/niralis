@@ -3,6 +3,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use niralis_session::{MockSessionLauncher, SessionLauncher, WorkerSessionLauncher};
+#[cfg(feature = "supervisor-test-fixtures")]
+use niralis_session::PhysicalPreviousBootSmoke;
 
 use crate::config::{AuthBackend, Config, SessionLauncherBackend};
 use crate::error::{NiralisdError, Result};
@@ -28,6 +30,32 @@ pub fn build_worker_session_launcher(config: &Config) -> Result<WorkerSessionLau
         config.session.probe_path.clone(),
         Duration::from_secs(config.session.worker_timeout_seconds),
         real_graphical_gate_environment(),
+    )
+    .map_err(|error| map_worker_launcher_error(error, &config.session.worker_path))
+}
+
+/// Feature-only constructor used by the physical PreviousBoot smoke binary.
+/// It retains the normal trusted-worker validation but opens only the isolated
+/// fixture ledger after the smoke preflight has proved the record is older
+/// than the current physical boot.
+#[cfg(feature = "supervisor-test-fixtures")]
+pub fn build_worker_session_launcher_for_physical_smoke(
+    config: &Config,
+    smoke: &PhysicalPreviousBootSmoke,
+) -> Result<WorkerSessionLauncher> {
+    validate_worker_timeout(config.session.worker_timeout_seconds)?;
+    validate_worker_binary(config)?;
+    if matches!(config.auth.backend, AuthBackend::Pam) {
+        validate_trusted_executable(&config.session.child_path, ExecutableRole::SessionChild)?;
+        validate_trusted_executable(&config.session.probe_path, ExecutableRole::SessionProbe)?;
+    }
+    WorkerSessionLauncher::new_persistent_with_physical_previous_boot_smoke(
+        config.session.worker_path.clone(),
+        config.session.child_path.clone(),
+        config.session.probe_path.clone(),
+        Duration::from_secs(config.session.worker_timeout_seconds),
+        real_graphical_gate_environment(),
+        smoke,
     )
     .map_err(|error| map_worker_launcher_error(error, &config.session.worker_path))
 }

@@ -20,6 +20,10 @@ pub use launcher::SupervisorFixtureBoundaryMode;
 #[cfg(feature = "supervisor-test-fixtures")]
 pub use launcher::SupervisorFixtureSnapshot;
 pub use launcher::WorkerSessionLauncher;
+#[cfg(feature = "supervisor-test-fixtures")]
+pub use launcher::{
+    PhysicalPreviousBootSmoke, PhysicalPreviousBootSmokeFailpoint, PhysicalPreviousBootSmokePaths,
+};
 pub use mock::MockSessionLauncher;
 pub use protocol::{
     PayloadScopeIdentity, PayloadScopeRecoveryReason, SessionExecPlan, TerminalVtCleanupResult,
