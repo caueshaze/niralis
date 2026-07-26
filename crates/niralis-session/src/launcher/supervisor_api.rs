@@ -11,11 +11,11 @@ impl WorkerSupervisor {
             .recv_timeout(Duration::from_secs(2))
             .map_err(|_| SessionError::WorkerIoFailed)?
     }
-    fn reserve_seat(&self, worker_id: &str) -> Result<PreviousVtIdentity, SessionError> {
+    fn reserve_seat(&self, lifecycle_id: &str) -> Result<supervisor_loop::admission::AdmissionLease, SessionError> {
         let (result, receiver) = mpsc::channel();
         self.sender
             .send(WorkerSupervisorMessage::ReserveSeat {
-                worker_id: worker_id.to_owned(),
+                lifecycle_id: lifecycle_id.to_owned(),
                 result,
             })
             .map_err(|_| SessionError::WorkerIoFailed)?;
@@ -24,32 +24,28 @@ impl WorkerSupervisor {
             .map_err(|_| SessionError::WorkerIoFailed)?
     }
 
-    fn cancel_seat_reservation(&self, worker_id: &str) {
+    fn cancel_admission(&self, lease: supervisor_loop::admission::AdmissionRollbackLease) {
         let _ = self
             .sender
-            .send(WorkerSupervisorMessage::CancelSeatReservation {
-                worker_id: worker_id.to_owned(),
-            });
+            .send(WorkerSupervisorMessage::CancelAdmission { lease });
     }
 
     fn begin_pending(
         &self,
-        worker_id: &str,
+        lease: supervisor_loop::admission::AdmissionLease,
         worker_pid: u32,
         launcher_pid: u32,
         session: StartedSession,
         child: Arc<Mutex<Child>>,
-        previous_vt: PreviousVtIdentity,
-    ) -> Result<(), SessionError> {
+    ) -> Result<supervisor_loop::admission::PendingLifecycleLease, SessionError> {
         let (result, receiver) = mpsc::channel();
         self.sender
             .send(WorkerSupervisorMessage::BeginPending {
-                worker_id: worker_id.to_owned(),
+                lease,
                 worker_pid,
                 launcher_pid,
                 session,
                 child,
-                previous_vt,
                 result,
             })
             .map_err(|_| SessionError::WorkerIoFailed)?;
@@ -130,14 +126,14 @@ impl WorkerSupervisor {
 
     fn abort_pending(
         &self,
-        worker_id: &str,
+        lease: supervisor_loop::admission::PendingLifecycleLease,
         expected_clean: bool,
         worker_exit_status: Option<ExitStatus>,
     ) -> Result<(), SessionError> {
         let (result, receiver) = mpsc::channel();
         self.sender
             .send(WorkerSupervisorMessage::AbortPending {
-                worker_id: worker_id.to_owned(),
+                lease,
                 expected_clean,
                 worker_exit_status,
                 result,
@@ -151,8 +147,13 @@ impl WorkerSupervisor {
     #[allow(clippy::too_many_arguments)]
     fn register(
         &self,
+        admission_transaction: login_transaction::PendingLaunchTransaction,
         child: Arc<Mutex<Child>>,
         supervisor_channel: UnixStream,
+        #[cfg(any(test, feature = "integration-test-control", feature = "supervisor-test-fixtures"))]
+        fixture_supervisor_transport: Option<worker_attempt::FixtureSupervisorTransportHandle>,
+        #[cfg(any(test, feature = "integration-test-control", feature = "supervisor-test-fixtures"))]
+        fixture_inherited_supervisor_control: bool,
         session: StartedSession,
         session_pid: u32,
         session_pgid: u32,
@@ -175,8 +176,13 @@ impl WorkerSupervisor {
         let runtime_id = RuntimeSessionId::new(worker_id.clone());
         let (result, receiver) = mpsc::channel();
         match self.sender.send(WorkerSupervisorMessage::Register {
+            admission_transaction: Box::new(admission_transaction),
             runtime_id: runtime_id.clone(),
             supervisor_channel,
+            #[cfg(any(test, feature = "integration-test-control", feature = "supervisor-test-fixtures"))]
+            fixture_supervisor_transport,
+            #[cfg(any(test, feature = "integration-test-control", feature = "supervisor-test-fixtures"))]
+            fixture_inherited_supervisor_control,
             session,
             session_pid,
             session_pgid,

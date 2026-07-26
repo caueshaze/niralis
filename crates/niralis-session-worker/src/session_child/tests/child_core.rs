@@ -64,7 +64,7 @@ fn maximum_supported_credentials_fit_the_child_protocol() {
         },
     };
     let payload = serde_json::to_vec(&envelope).expect("maximum request should serialize");
-    assert!(payload.len() + 1 <= super::protocol::MAX_SESSION_CHILD_MESSAGE_BYTES);
+    assert!(payload.len() < super::protocol::MAX_SESSION_CHILD_MESSAGE_BYTES);
 }
 
 #[test]
@@ -145,13 +145,13 @@ fn ready_binding_rejects_each_identity_or_credential_mismatch() {
                 saved_gid: 1000,
                 supplementary_gids: vec![10, 20],
             },
-            isolation_proof: proof(),
+            isolation_proof: Box::new(proof()),
             process_identity: SessionProcessIdentityProof {
                 pid: child_pid,
                 sid: 42,
                 pgid: 42,
             },
-            runtime_environment: SessionRuntimeEnvironmentProof {
+            runtime_environment: Box::new(SessionRuntimeEnvironmentProof {
                 home: runtime().home.clone(),
                 user: "canonical-user".into(),
                 logname: "canonical-user".into(),
@@ -170,9 +170,9 @@ fn ready_binding_rejects_each_identity_or_credential_mismatch() {
                 user_bus_connected: true,
                 cwd: runtime().home,
                 exec_plan: runtime().exec_plan,
-            },
+            }),
             exec_probe_version: SESSION_EXEC_PROBE_VERSION,
-            terminal_proof: None,
+            terminal_proof: Box::new(None),
         };
 
         assert_eq!(

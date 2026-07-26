@@ -24,6 +24,7 @@ fn await_payload_scope_ack(
     worker_id: &str,
     expected_worker_pid: u32,
     registration_nonce: &str,
+    transaction: &niralis_session::WorkerTransactionIdentity,
     deadline: Instant,
 ) -> Result<(), SessionError> {
     let timeout = deadline
@@ -66,23 +67,18 @@ fn await_payload_scope_ack(
     let supervisor_events = pollfds[1].revents;
     if supervisor_events & libc::POLLIN != 0 {
         let mut stream = duplicate_supervisor_channel()?;
-        let read_timeout = deadline
-            .checked_duration_since(Instant::now())
-            .filter(|timeout| !timeout.is_zero())
-            .ok_or(SessionError::WorkerTimedOut)?;
-        stream
-            .set_read_timeout(Some(read_timeout))
-            .map_err(|_| SessionError::WorkerIoFailed)?;
         match read_control_request(&mut stream) {
             Ok(envelope) if envelope.version == WORKER_CONTROL_PROTOCOL_VERSION => {
                 return match envelope.message {
                     WorkerControlRequest::PayloadScopeRegistered {
+                        transaction: ack_transaction,
                         worker_id: ack_worker_id,
                         expected_worker_pid: ack_pid,
                         registration_nonce: ack_nonce,
                     } if ack_worker_id == worker_id
                         && ack_pid == expected_worker_pid
-                        && ack_nonce == registration_nonce =>
+                        && ack_nonce == registration_nonce
+                        && ack_transaction.matches_worker(transaction, "scope_registered", 1) =>
                     {
                         Ok(())
                     }

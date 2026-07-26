@@ -51,7 +51,7 @@ fn write_final_exec_failure(stage: &str) {
 }
 
 fn exec_final(plan: &niralis_session::SessionExecPlan) -> Result<(), ()> {
-    plan.validate()?;
+    plan.validate().map_err(|_| ())?;
     let executable_path =
         std::path::PathBuf::from(std::ffi::OsString::from_vec(plan.executable.clone()));
     use std::os::unix::ffi::OsStringExt;

@@ -14,6 +14,7 @@
                         &worker_id,
                         &registration_nonce,
                         &scope_identity,
+                        &login_identity,
                         local_cleanup_succeeded,
                         launch_watchdog_deadline,
                     );
@@ -66,6 +67,7 @@
                             &worker_id,
                             &registration_nonce,
                             &scope_identity,
+                            &login_identity,
                             local_cleanup_succeeded,
                             launch_watchdog_deadline,
                         );
@@ -127,6 +129,7 @@
                             &worker_id,
                             &registration_nonce,
                             &scope_identity,
+                            &login_identity,
                             local_cleanup_succeeded,
                             launch_watchdog_deadline,
                         );

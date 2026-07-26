@@ -193,7 +193,7 @@ fn non_ebusy_failure_is_single_shot_and_quarantined() {
     let host = host(Err(SupervisorRecoveryError::VtDisallocateFailed(libc::EPERM)), Ok(()));
     let (mut state, ledger) = state(host.clone());
     assert!(matches!(state.recovery_admin(request()).unwrap(), crate::RecoveryAdminResponse::Rejected { .. }));
-    assert!(!matches!(state.seat, SeatLifecycle::Free));
+    assert!(!state.admission.is_free());
     assert!(matches!(ledger.lock().unwrap().records["admin-fixture"].vt_recovery_attempts.last().unwrap().state, crate::VtRecoveryAttemptState::Failed { errno } if errno == libc::EPERM));
     assert_eq!(host.events().iter().filter(|event| **event == ControlledRecoveryAdminEvent::DisallocateVtOnce).count(), 1);
 }

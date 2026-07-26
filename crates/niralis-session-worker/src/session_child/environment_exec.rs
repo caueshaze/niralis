@@ -1,14 +1,27 @@
 
-fn write_ready_response(
-    writer: &mut impl Write,
+struct ReadyResponsePayload {
     canonical_username: String,
     session_id: String,
     child_pid: u32,
     applied_credentials: SessionChildUnixCredentials,
-    runtime_proof: &PostDropIsolationProof,
+    runtime_proof: PostDropIsolationProof,
     runtime: SessionChildRuntimeContext,
     terminal_proof: Option<SessionChildTerminalProof>,
+}
+
+fn write_ready_response(
+    writer: &mut impl Write,
+    payload: ReadyResponsePayload,
 ) -> i32 {
+    let ReadyResponsePayload {
+        canonical_username,
+        session_id,
+        child_pid,
+        applied_credentials,
+        runtime_proof,
+        runtime,
+        terminal_proof,
+    } = payload;
     let response = SessionChildEnvelope {
         version: SESSION_CHILD_PROTOCOL_VERSION,
         message: SessionChildResponse::Ready {
@@ -25,13 +38,13 @@ fn write_ready_response(
                 saved_gid: applied_credentials.gid,
                 supplementary_gids: applied_credentials.supplementary_gids.clone(),
             },
-            isolation_proof: SessionChildIsolationProof::from(runtime_proof),
+            isolation_proof: Box::new(SessionChildIsolationProof::from(&runtime_proof)),
             process_identity: SessionProcessIdentityProof {
                 pid: child_pid,
                 sid: child_pid,
                 pgid: child_pid,
             },
-            runtime_environment: SessionRuntimeEnvironmentProof {
+            runtime_environment: Box::new(SessionRuntimeEnvironmentProof {
                 home: runtime.home.clone(),
                 user: canonical_username.clone(),
                 logname: canonical_username.clone(),
@@ -50,9 +63,9 @@ fn write_ready_response(
                 user_bus_connected: true,
                 cwd: runtime.home,
                 exec_plan: runtime.exec_plan.clone(),
-            },
+            }),
             exec_probe_version: SESSION_EXEC_PROBE_VERSION,
-            terminal_proof,
+            terminal_proof: Box::new(terminal_proof),
         },
     };
     if let Err(error) = serde_json::to_writer(&mut *writer, &response) {

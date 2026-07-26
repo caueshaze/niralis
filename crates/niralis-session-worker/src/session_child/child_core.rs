@@ -197,12 +197,14 @@ pub(crate) fn run_child_process_with_dependencies(
 
     write_ready_response(
         &mut writer,
-        canonical_username,
-        session_id,
-        child_pid,
-        applied_credentials,
-        &proof,
-        runtime,
-        terminal_proof,
+        ReadyResponsePayload {
+            canonical_username,
+            session_id,
+            child_pid,
+            applied_credentials,
+            runtime_proof: proof,
+            runtime,
+            terminal_proof,
+        },
     )
 }

@@ -37,9 +37,15 @@ pub use privilege_drop::{
     PrivilegeDropper,
 };
 pub use runtime::{
-    run_worker_process, run_worker_process_with_signals, take_inherited_supervisor_channel,
-    LinuxRuntimeDirValidator, RuntimeDirValidationError, RuntimeDirValidator,
-    StubRuntimeDirValidator, WorkerAuthenticatorFactory,
+    diagnose_inherited_supervisor_channel, probe_af_unix_environment_support, run_worker_process,
+    run_worker_process_with_signals, take_inherited_supervisor_channel, AfUnixEnvironmentProbe,
+    InheritedSupervisorChannelError, LinuxRuntimeDirValidator, RuntimeDirValidationError,
+    RuntimeDirValidator, StubRuntimeDirValidator, WorkerAuthenticatorFactory,
+};
+#[cfg(feature = "worker-test-fixtures")]
+pub use runtime::{
+    take_fixture_supervisor_transport_for_test, take_inherited_supervisor_channel_for_test,
+    FixtureSupervisorTransport,
 };
 pub use selinux::{
     LinuxSelinuxContextManager, PamSelinuxExecContext, SelinuxContextManager, SelinuxError,

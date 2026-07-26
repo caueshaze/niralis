@@ -134,7 +134,7 @@ fn normalize_groups(
 ) -> Result<Vec<u32>, GroupResolutionError> {
     let mut result = groups
         .iter()
-        .map(|gid| u32::try_from(*gid).map_err(|_| GroupResolutionError::LookupFailed))
+        .map(|gid| Ok(*gid))
         .collect::<Result<Vec<_>, _>>()?;
     result.sort_unstable();
     result.dedup();

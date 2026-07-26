@@ -101,7 +101,7 @@ mod tests {
     fn rejects_relative_session_child_path() {
         let error = validate_trusted_executable(
             Path::new("relative-session-child"),
-            ExecutableRole::SessionChild,
+            ExecutableRole::Child,
         )
         .expect_err("relative child path should fail");
         assert!(matches!(error, NiralisdError::InvalidSessionChildPath(_)));
@@ -111,7 +111,7 @@ mod tests {
     fn rejects_missing_session_child_path() {
         let error = validate_trusted_executable(
             Path::new("/missing/niralis-session-child"),
-            ExecutableRole::SessionChild,
+            ExecutableRole::Child,
         )
         .expect_err("missing child should fail");
         assert!(matches!(error, NiralisdError::SessionChildUnavailable(_)));

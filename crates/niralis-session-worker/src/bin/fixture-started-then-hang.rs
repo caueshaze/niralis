@@ -23,6 +23,14 @@ fn main() {
             worker_id: String::new(),
             logind_session_id: niralis_session::LogindSessionId::new("fixture-logind".to_owned())
                 .unwrap(),
+            transaction: niralis_session::WorkerTransactionIdentity {
+                transaction_id: String::new(),
+                admission_attempt_id: 1,
+                lifecycle_id: String::new(),
+                seat: "seat0".into(),
+                seat_generation: 1,
+                stage: "started".into(),
+            },
         },
     };
     let stdout = std::io::stdout();

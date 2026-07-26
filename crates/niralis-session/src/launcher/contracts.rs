@@ -26,6 +26,10 @@ pub struct WorkerSessionLauncher {
     worker_environment: Vec<(String, String)>,
     supervisor: Arc<WorkerSupervisor>,
     release_verifier: Arc<dyn crate::PayloadScopeReleaseVerifier>,
+    #[cfg(any(test, feature = "integration-test-control", feature = "supervisor-test-fixtures"))]
+    fixture_supervisor_transport: bool,
+    #[cfg(any(test, feature = "integration-test-control", feature = "supervisor-test-fixtures"))]
+    fixture_inherited_supervisor_control: bool,
     #[cfg(any(feature = "integration-test-control", feature = "supervisor-test-fixtures"))]
     fixture_recovery_provider: Option<Arc<SupervisorFixtureRecoveryProvider>>,
 }
@@ -33,20 +37,19 @@ pub struct WorkerSessionLauncher {
 #[derive(Debug)]
 enum WorkerSupervisorMessage {
     ReserveSeat {
-        worker_id: String,
-        result: mpsc::Sender<Result<PreviousVtIdentity, SessionError>>,
+        lifecycle_id: String,
+        result: mpsc::Sender<Result<supervisor_loop::admission::AdmissionLease, SessionError>>,
     },
-    CancelSeatReservation {
-        worker_id: String,
+    CancelAdmission {
+        lease: supervisor_loop::admission::AdmissionRollbackLease,
     },
     BeginPending {
-        worker_id: String,
+        lease: supervisor_loop::admission::AdmissionLease,
         worker_pid: u32,
         launcher_pid: u32,
         session: StartedSession,
         child: Arc<Mutex<Child>>,
-        previous_vt: PreviousVtIdentity,
-        result: mpsc::Sender<Result<(), SessionError>>,
+        result: mpsc::Sender<Result<supervisor_loop::admission::PendingLifecycleLease, SessionError>>,
     },
     RecordPreparedScope {
         worker_id: String,
@@ -71,14 +74,19 @@ enum WorkerSupervisorMessage {
         result: mpsc::Sender<Result<(), SessionError>>,
     },
     AbortPending {
-        worker_id: String,
+        lease: supervisor_loop::admission::PendingLifecycleLease,
         expected_clean: bool,
         worker_exit_status: Option<ExitStatus>,
         result: mpsc::Sender<Result<(), SessionError>>,
     },
     Register {
+        admission_transaction: Box<login_transaction::PendingLaunchTransaction>,
         runtime_id: RuntimeSessionId,
         supervisor_channel: UnixStream,
+        #[cfg(any(test, feature = "integration-test-control", feature = "supervisor-test-fixtures"))]
+        fixture_supervisor_transport: Option<worker_attempt::FixtureSupervisorTransportHandle>,
+        #[cfg(any(test, feature = "integration-test-control", feature = "supervisor-test-fixtures"))]
+        fixture_inherited_supervisor_control: bool,
         session: StartedSession,
         session_pid: u32,
         session_pgid: u32,
@@ -125,9 +133,14 @@ struct WorkerSupervisor {
 }
 
 struct SupervisedWorker {
+    admission: supervisor_loop::admission::RunningSeatReceipt,
     record: SupervisorSessionRecoveryRecord,
     child: Arc<Mutex<Child>>,
-    _supervisor_channel: UnixStream,
+    supervisor_channel: UnixStream,
+    #[cfg(any(test, feature = "integration-test-control", feature = "supervisor-test-fixtures"))]
+    fixture_supervisor_transport: Option<worker_attempt::FixtureSupervisorTransportHandle>,
+    #[cfg(any(test, feature = "integration-test-control", feature = "supervisor-test-fixtures"))]
+    fixture_inherited_supervisor_control: bool,
     session: StartedSession,
     session_pid: u32,
     session_pgid: u32,
@@ -182,62 +195,4 @@ enum PendingLaunchPhase {
     },
 }
 
-struct PendingSupervisorGuard {
-    supervisor: Arc<WorkerSupervisor>,
-    worker_id: String,
-    expected_clean: bool,
-    worker_exit_status: Option<ExitStatus>,
-}
-
-struct SeatReservationGuard {
-    supervisor: Arc<WorkerSupervisor>,
-    worker_id: String,
-    armed: bool,
-}
-
-impl SeatReservationGuard {
-    fn consume(&mut self) {
-        self.armed = false;
-    }
-}
-
-impl Drop for SeatReservationGuard {
-    fn drop(&mut self) {
-        if self.armed {
-            self.supervisor.cancel_seat_reservation(&self.worker_id);
-        }
-    }
-}
-
-impl Drop for PendingSupervisorGuard {
-    fn drop(&mut self) {
-        if !self.worker_id.is_empty() {
-            let _ = self
-                .supervisor
-                .abort_pending(
-                    &self.worker_id,
-                    self.expected_clean,
-                    self.worker_exit_status,
-                );
-        }
-    }
-}
-
-impl PendingSupervisorGuard {
-    fn mark_expected_clean(&mut self, status: ExitStatus) {
-        self.expected_clean = true;
-        self.worker_exit_status = Some(status);
-    }
-
-    fn complete(mut self) -> Result<(), SessionError> {
-        let result = self
-            .supervisor
-            .abort_pending(
-                &self.worker_id,
-                self.expected_clean,
-                self.worker_exit_status,
-            );
-        self.worker_id.clear();
-        result
-    }
-}
+include!("contracts/guards.rs");

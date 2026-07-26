@@ -3,28 +3,29 @@ use super::*;
 impl SupervisorLoopState {
     pub(super) fn handle_message(&mut self, message: WorkerSupervisorMessage) {
         match message {
-            WorkerSupervisorMessage::ReserveSeat { worker_id, result } => {
-                let _ = result.send(self.reserve_seat(worker_id));
+            WorkerSupervisorMessage::ReserveSeat {
+                lifecycle_id,
+                result,
+            } => {
+                let _ = result.send(self.reserve_seat(lifecycle_id));
             }
-            WorkerSupervisorMessage::CancelSeatReservation { worker_id } => {
-                self.cancel_seat_reservation(&worker_id)
+            WorkerSupervisorMessage::CancelAdmission { lease } => {
+                let _ = self.cancel_admission(lease);
             }
             WorkerSupervisorMessage::BeginPending {
-                worker_id,
+                lease,
                 worker_pid,
                 launcher_pid,
                 session,
                 child,
-                previous_vt,
                 result,
             } => {
                 let _ = result.send(self.begin_pending(
-                    worker_id,
+                    lease,
                     worker_pid,
                     launcher_pid,
                     session,
                     child,
-                    previous_vt,
                 ));
             }
             WorkerSupervisorMessage::RecordPreparedScope {
@@ -61,17 +62,29 @@ impl SupervisorLoopState {
                 let _ = result.send(self.complete_release(token, verification));
             }
             WorkerSupervisorMessage::AbortPending {
-                worker_id,
+                lease,
                 expected_clean,
                 worker_exit_status,
                 result,
             } => {
-                let _ =
-                    result.send(self.abort_pending(worker_id, expected_clean, worker_exit_status));
+                let _ = result.send(self.abort_pending(lease, expected_clean, worker_exit_status));
             }
             WorkerSupervisorMessage::Register {
+                admission_transaction,
                 runtime_id,
                 supervisor_channel,
+                #[cfg(any(
+                    test,
+                    feature = "integration-test-control",
+                    feature = "supervisor-test-fixtures"
+                ))]
+                fixture_supervisor_transport,
+                #[cfg(any(
+                    test,
+                    feature = "integration-test-control",
+                    feature = "supervisor-test-fixtures"
+                ))]
+                fixture_inherited_supervisor_control,
                 session,
                 session_pid,
                 session_pgid,
@@ -85,8 +98,21 @@ impl SupervisorLoopState {
                 result,
             } => {
                 let _ = result.send(self.register_running(RunningRegistration {
+                    admission_transaction: *admission_transaction,
                     runtime_id,
                     supervisor_channel,
+                    #[cfg(any(
+                        test,
+                        feature = "integration-test-control",
+                        feature = "supervisor-test-fixtures"
+                    ))]
+                    fixture_supervisor_transport,
+                    #[cfg(any(
+                        test,
+                        feature = "integration-test-control",
+                        feature = "supervisor-test-fixtures"
+                    ))]
+                    fixture_inherited_supervisor_control,
                     session,
                     session_pid,
                     session_pgid,

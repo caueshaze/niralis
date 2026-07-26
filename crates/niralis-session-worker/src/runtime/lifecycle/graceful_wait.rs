@@ -1,18 +1,31 @@
 
-fn wait_for_session_with_grace(
-    listener: Option<&UnixListener>,
-    child_runner: &dyn crate::session_child::SessionChildRunner,
+struct SessionWaitContext<'a> {
+    listener: Option<&'a UnixListener>,
+    child_runner: &'a dyn crate::session_child::SessionChildRunner,
     worker_id: String,
     session_pid: u32,
     session_pgid: u32,
-    authoritative_scope: &dyn crate::payload_scope::AuthoritativePayloadScope,
-    grace: Duration,
+    authoritative_scope: &'a dyn crate::payload_scope::AuthoritativePayloadScope,
     expected_control_uid: u32,
+}
+
+fn wait_for_session_with_grace(
+    context: SessionWaitContext<'_>,
+    grace: Duration,
 ) -> Result<SessionWaitResult, SessionError> {
     use crate::termination::{
         BoundaryTerminalObservation, GracefulTerminationCoordinator, GracefulTerminationError,
         LeaderExit, TerminationCause, WorkerTerminationSignal,
     };
+    let SessionWaitContext {
+        listener,
+        child_runner,
+        worker_id,
+        session_pid,
+        session_pgid,
+        authoritative_scope,
+        expected_control_uid,
+    } = context;
     let mut coordinator = match GracefulTerminationCoordinator::new() {
         Ok(coordinator) => coordinator,
         Err(_) => {
@@ -106,16 +119,25 @@ fn finalize_session_after_empty_proof(
     }
 }
 
+struct TerminalFinalizationContext<'a> {
+    worker_id: &'a str,
+    registration_nonce: &'a str,
+    report_expectation: TerminalReportExpectation,
+}
+
 fn finalize_session_after_empty_proof_with_vt_report(
     scope: &mut dyn crate::payload_scope::AuthoritativePayloadScope,
     mut transaction: Box<dyn niralis_auth::AuthenticatedTransaction>,
     terminal: &mut VirtualTerminalGuard,
     proof: crate::termination::BoundaryEmptyProof,
     forced: bool,
-    worker_id: &str,
-    registration_nonce: &str,
-    report_expectation: TerminalReportExpectation,
+    context: TerminalFinalizationContext<'_>,
 ) -> Result<(), SessionError> {
+    let TerminalFinalizationContext {
+        worker_id,
+        registration_nonce,
+        report_expectation,
+    } = context;
     info!("releasing pinned systemd unit reference");
     if let Err(error) = scope.release_pin() { warn!(?error, "pinned unit reference release failed after empty proof"); }
     info!("closing worker PAM transaction after empty proof");

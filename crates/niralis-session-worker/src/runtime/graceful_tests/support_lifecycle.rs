@@ -3,10 +3,25 @@
     use std::os::unix::process::ExitStatusExt;
     use std::sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering},
-        Arc, Mutex,
+        Arc, Mutex, MutexGuard,
     };
 
     static SIGNAL_TEST_LOCK: Mutex<()> = Mutex::new(());
+    static CONTROL_SOCKET_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+
+    fn lock_signal_tests() -> MutexGuard<'static, ()> {
+        SIGNAL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn unique_control_socket_path(tag: &str) -> std::path::PathBuf {
+        let sequence = CONTROL_SOCKET_SEQUENCE.fetch_add(1, AtomicOrdering::SeqCst);
+        std::env::temp_dir().join(format!(
+            "niralis-{tag}-{}-{sequence}.sock",
+            std::process::id()
+        ))
+    }
 
     struct OrderedTransaction {
         events: Arc<Mutex<Vec<&'static str>>>,

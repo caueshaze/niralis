@@ -39,6 +39,10 @@
                         logind.id.as_str().to_owned(),
                     )
                     .expect("validated logind id"),
+                    transaction: {
+                        login_identity.stage = "started".to_owned();
+                        login_identity.clone()
+                    },
                 },
             )?;
             emit_fixture_event("Running");
@@ -75,9 +79,11 @@
                                 &mut terminal,
                                 proof,
                                 false,
-                                &worker_id,
-                                &registration_nonce,
-                                report_expectation,
+                                TerminalFinalizationContext {
+                                    worker_id: &worker_id,
+                                    registration_nonce: &registration_nonce,
+                                    report_expectation,
+                                },
                             );
                         }
                         crate::termination::GracefulFinalizationDecision::NeedsEscalation(
@@ -113,9 +119,12 @@
                                         &mut terminal,
                                         proof,
                                         true,
-                                        &worker_id,
-                                        &registration_nonce,
-                                        TerminalReportExpectation::Required,
+                                        TerminalFinalizationContext {
+                                            worker_id: &worker_id,
+                                            registration_nonce: &registration_nonce,
+                                            report_expectation:
+                                                TerminalReportExpectation::Required,
+                                        },
                                     );
                                 }
                                 forced_outcome => {

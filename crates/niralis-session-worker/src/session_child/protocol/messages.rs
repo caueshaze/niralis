@@ -46,12 +46,12 @@ pub enum SessionChildResponse {
         child_pid: u32,
         applied_credentials: SessionChildUnixCredentials,
         credential_proof: SessionChildCredentialProof,
-        isolation_proof: SessionChildIsolationProof,
+        isolation_proof: Box<SessionChildIsolationProof>,
         process_identity: SessionProcessIdentityProof,
-        runtime_environment: SessionRuntimeEnvironmentProof,
+        runtime_environment: Box<SessionRuntimeEnvironmentProof>,
         exec_probe_version: u32,
         #[serde(default)]
-        terminal_proof: Option<SessionChildTerminalProof>,
+        terminal_proof: Box<Option<SessionChildTerminalProof>>,
     },
     Rejected {
         code: SessionChildErrorCode,

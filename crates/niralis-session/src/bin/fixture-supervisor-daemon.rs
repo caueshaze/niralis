@@ -1,7 +1,7 @@
 use niralis_protocol::{SessionInfo, SessionKind};
 use niralis_session::{
-    SessionExecPlan, SessionRequest, SupervisorFixtureBoundaryMode, WorkerSecret,
-    WorkerSessionLauncher,
+    PersistentSupervisorFixtureOptions, SessionExecPlan, SessionRequest,
+    SupervisorFixtureBoundaryMode, WorkerSecret, WorkerSessionLauncher,
 };
 use std::io::{self, BufRead, Write};
 use std::os::unix::net::UnixStream;
@@ -50,17 +50,19 @@ fn main() {
         _ => SupervisorFixtureBoundaryMode::PopulatedThenRecovered,
     };
     let launcher = WorkerSessionLauncher::new_persistent_supervisor_fixture_for_test(
-        worker,
-        PathBuf::from("/fixture/session-child"),
-        PathBuf::from("/fixture/session-probe"),
-        Duration::from_secs(5),
-        vec![(
-            "NIRALIS_SUPERVISOR_FIXTURE_SOCKET".to_owned(),
-            report_socket.clone(),
-        )],
-        recovery.clone(),
-        lock,
-        mode,
+        PersistentSupervisorFixtureOptions {
+            worker_path: worker,
+            session_child_path: PathBuf::from("/fixture/session-child"),
+            session_probe_path: PathBuf::from("/fixture/session-probe"),
+            timeout: Duration::from_secs(5),
+            worker_environment: vec![(
+                "NIRALIS_SUPERVISOR_FIXTURE_SOCKET".to_owned(),
+                report_socket.clone(),
+            )],
+            recovery_dir: recovery.clone(),
+            recovery_lock: lock,
+            mode,
+        },
     )
     .unwrap_or_else(|_| std::process::exit(3));
     send_barrier(

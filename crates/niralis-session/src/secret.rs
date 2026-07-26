@@ -1,8 +1,27 @@
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use zeroize::Zeroizing;
 
-#[derive(PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct WorkerSecret(Zeroizing<String>);
+
+/// Secret supplied to a login transaction. It is intentionally opaque and
+/// single-owner; callers must consume it when handing it to authentication.
+pub struct LoginSecret(Zeroizing<String>);
+
+impl LoginSecret {
+    pub fn new(secret: String) -> Self {
+        Self(Zeroizing::new(secret))
+    }
+    pub fn consume(self) -> Zeroizing<String> {
+        self.0
+    }
+}
+
+impl From<LoginSecret> for WorkerSecret {
+    fn from(secret: LoginSecret) -> Self {
+        Self(secret.consume())
+    }
+}
 
 impl WorkerSecret {
     pub fn new(secret: String) -> Self {

@@ -38,6 +38,55 @@ pub struct SessionRequest {
     pub session: SessionInfo,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnauthenticatedLoginRequest {
+    pub username: String,
+    pub session: SessionInfo,
+    pub attempt_id: u64,
+    pub launch_plan: Option<crate::SessionExecPlan>,
+    pub pam_service: Option<String>,
+}
+
+impl UnauthenticatedLoginRequest {
+    /// Validates the non-secret portion before any admission, backend, or
+    /// worker effect is allowed.  Authentication code must not repair or
+    /// normalize these fields after ownership has been acquired.
+    pub fn validate(&self) -> Result<(), SessionError> {
+        let username = self.username.as_bytes();
+        if username.is_empty()
+            || username.len() > 256
+            || username.contains(&0)
+            || self.username.trim() != self.username
+            || self.session.id.is_empty()
+            || self.session.id.len() > 256
+            || self.session.id.as_bytes().contains(&0)
+            || self.attempt_id == 0
+        {
+            return Err(SessionError::WorkerProtocolFailed);
+        }
+        self.launch_plan
+            .as_ref()
+            .ok_or(SessionError::WorkerProtocolFailed)?
+            .validate()
+            .map_err(|_| SessionError::WorkerProtocolFailed)
+    }
+}
+
+pub type LoginStartOutcome = StartedSession;
+pub type LoginStartError = SessionError;
+
+pub trait UnboundLoginBackend: Send {
+    fn authenticate(
+        self: Box<Self>,
+        request: &UnauthenticatedLoginRequest,
+        secret: crate::LoginSecret,
+    ) -> Result<String, SessionError>;
+}
+
+pub trait LoginBackendFactory: Send + Sync {
+    fn create_unbound(&self) -> Result<Box<dyn UnboundLoginBackend>, SessionError>;
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StartedSession {
     pub username: String,
@@ -45,14 +94,24 @@ pub struct StartedSession {
 }
 
 pub trait SessionLauncher: Send + Sync {
-    fn start_session(&self, request: SessionRequest) -> Result<StartedSession, SessionError>;
+    fn begin_login(
+        &self,
+        request: UnauthenticatedLoginRequest,
+        secret: crate::LoginSecret,
+        factory: &dyn LoginBackendFactory,
+    ) -> Result<LoginStartOutcome, LoginStartError>;
 }
 
 impl<T> SessionLauncher for Box<T>
 where
     T: SessionLauncher + ?Sized,
 {
-    fn start_session(&self, request: SessionRequest) -> Result<StartedSession, SessionError> {
-        (**self).start_session(request)
+    fn begin_login(
+        &self,
+        request: UnauthenticatedLoginRequest,
+        secret: crate::LoginSecret,
+        factory: &dyn LoginBackendFactory,
+    ) -> Result<LoginStartOutcome, LoginStartError> {
+        (**self).begin_login(request, secret, factory)
     }
 }

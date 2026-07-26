@@ -1,3 +1,4 @@
+use super::admission::{AdmissionRollbackLease, PendingLifecycleLease, RecoverySeatReceipt};
 use super::*;
 use tracing::{info, warn};
 
@@ -77,16 +78,23 @@ impl SupervisorLoopState {
 
     pub(super) fn abort_pending(
         &mut self,
-        worker_id: String,
+        lease: PendingLifecycleLease,
         expected_clean: bool,
         worker_exit_status: Option<ExitStatus>,
     ) -> Result<(), SessionError> {
+        let worker_id = lease.lifecycle_id().to_owned();
+        if !self.admission.matches_pending(&lease) {
+            return Err(SessionError::SessionSeatUnavailable);
+        }
         let Some(index) = self
             .pending
             .iter()
             .position(|entry| entry.record.lifecycle_id == worker_id)
         else {
-            return Ok(());
+            let _ = self
+                .admission
+                .cancel(AdmissionRollbackLease::Pending(lease));
+            return Err(SessionError::SessionSeatUnavailable);
         };
         let mut entry = self.pending.swap_remove(index);
         if let PendingReleaseState::RecoveryRequired(reason) = &entry.release {
@@ -111,14 +119,29 @@ impl SupervisorLoopState {
             };
         if expected_cleanup_verified {
             let _ = self.persist_resolve(&worker_id);
-            self.seat = SeatLifecycle::Free;
+            let _ = self
+                .admission
+                .cancel(AdmissionRollbackLease::Pending(lease));
             return Ok(());
         }
         if entry.record.payload_identity().is_some() {
             warn!(worker_id, status = %exit_status_label(status), "worker died with supervisor-owned payload recovery record retained");
-            self.recover_payload_entry(entry, status)
+            let lifecycle_id = entry.record.lifecycle_id.clone();
+            let classification = mark_worker_exited_unexpectedly(&mut entry.record, status);
+            let recovery = self.admission.pending_recovery(
+                &lifecycle_id,
+                entry.record.phase_name(),
+                classification,
+            )?;
+            self.recover_payload_entry(entry, status, recovery)
         } else {
-            self.recover_pre_payload_entry(entry, status)
+            let lifecycle_id = entry.record.lifecycle_id.clone();
+            let recovery = self.admission.pending_recovery(
+                &lifecycle_id,
+                entry.record.phase_name(),
+                WorkerExitClassification::UnexpectedExitBeforeStarted,
+            )?;
+            self.recover_pre_payload_entry(entry, status, recovery)
         }
     }
 
@@ -126,21 +149,16 @@ impl SupervisorLoopState {
         &mut self,
         mut entry: PendingWorkerLifecycle,
         status: ExitStatus,
+        recovery: RecoverySeatReceipt,
     ) -> Result<(), SessionError> {
-        let classification = mark_worker_exited_unexpectedly(&mut entry.record, status);
         let _ = self.persist_transition(&entry.record.lifecycle_id, "emergency_recovery_started");
-        self.seat = SeatLifecycle::Recovering {
-            lifecycle_id: entry.record.lifecycle_id.clone(),
-            phase: entry.record.phase_name(),
-            reason: classification,
-        };
         match SupervisorEmergencyRecoveryCoordinator::new(self.recovery_provider.as_ref())
             .recover(&mut entry.record, status)
         {
             outcome @ SupervisorEmergencyRecoveryOutcome::Recovered { .. } => {
                 entry.record.state = SupervisorRecoveryState::Recovered { outcome };
                 self.persist_resolve(&entry.record.lifecycle_id)?;
-                self.seat = SeatLifecycle::Free;
+                self.admission.release_after_a3_finalization(recovery)?;
                 Ok(())
             }
             SupervisorEmergencyRecoveryOutcome::Quarantined { stage, reason } => {
@@ -151,11 +169,8 @@ impl SupervisorLoopState {
                     );
                 }
                 entry.record.quarantine(stage, reason.clone());
-                self.seat = SeatLifecycle::Quarantined {
-                    lifecycle_id: entry.record.lifecycle_id.clone(),
-                    stage,
-                    reason,
-                };
+                self.admission
+                    .enter_quarantine_from_recovery(recovery, stage, reason)?;
                 self.quarantined.push(entry.record);
                 Err(SessionError::WorkerRecoveryIncomplete)
             }
@@ -166,6 +181,7 @@ impl SupervisorLoopState {
         &mut self,
         mut entry: PendingWorkerLifecycle,
         status: ExitStatus,
+        recovery: RecoverySeatReceipt,
     ) -> Result<(), SessionError> {
         let previous_vt = match &entry.record.state {
             SupervisorRecoveryState::WorkerSpawned { previous_vt } => previous_vt.clone(),
@@ -174,6 +190,7 @@ impl SupervisorLoopState {
                     entry,
                     EmergencyRecoveryStage::RecoveryRecordValidation,
                     SupervisorRecoveryError::InvalidRecord,
+                    recovery,
                 )
             }
         };
@@ -196,12 +213,15 @@ impl SupervisorLoopState {
                         pam_status: PamEmergencyCleanupStatus::UnavailableAfterWorkerDeath,
                     },
                 };
-                self.seat = SeatLifecycle::Free;
+                self.admission.release_after_a3_finalization(recovery)?;
                 Ok(())
             }
-            Err(reason) => {
-                self.quarantine_pre_payload(entry, EmergencyRecoveryStage::LogindCleanup, reason)
-            }
+            Err(reason) => self.quarantine_pre_payload(
+                entry,
+                EmergencyRecoveryStage::LogindCleanup,
+                reason,
+                recovery,
+            ),
         }
     }
 
@@ -210,13 +230,11 @@ impl SupervisorLoopState {
         mut entry: PendingWorkerLifecycle,
         stage: EmergencyRecoveryStage,
         reason: SupervisorRecoveryError,
+        recovery: RecoverySeatReceipt,
     ) -> Result<(), SessionError> {
         entry.record.quarantine(stage, reason.clone());
-        self.seat = SeatLifecycle::Quarantined {
-            lifecycle_id: entry.record.lifecycle_id.clone(),
-            stage,
-            reason,
-        };
+        self.admission
+            .enter_quarantine_from_recovery(recovery, stage, reason)?;
         self.quarantined.push(entry.record);
         Err(SessionError::WorkerRecoveryIncomplete)
     }

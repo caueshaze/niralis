@@ -5,8 +5,8 @@ use std::process::{Child, Command, Stdio};
 
 use niralis_session::{
     read_control_request, read_envelope, write_envelope, LogindSessionId, PayloadScopeIdentity,
-    StartedSession, WorkerControlRequest, WorkerEnvelope, WorkerRequest, WorkerResponse,
-    WORKER_CONTROL_PROTOCOL_VERSION,
+    StartedSession, WorkerControlRequest, WorkerEnvelope, WorkerPamSessionRequest, WorkerRequest,
+    WorkerResponse, WORKER_CONTROL_PROTOCOL_VERSION,
 };
 
 fn main() {
@@ -18,16 +18,17 @@ fn main() {
 fn run() -> Result<(), ()> {
     let request: WorkerEnvelope<WorkerRequest> =
         read_envelope(&mut std::io::stdin().lock()).map_err(|_| fail("request"))?;
-    let WorkerRequest::PamSession {
+    let WorkerRequest::PamSession(WorkerPamSessionRequest {
         request,
         control_path,
         worker_id,
+        transaction,
         ..
-    } = request.message
+    }) = request.message
     else {
         return Err(());
     };
-    let listener = UnixListener::bind(&control_path).map_err(|_| fail("control-bind"))?;
+    let listener = UnixListener::bind(&*control_path).map_err(|_| fail("control-bind"))?;
     let mut leader = spawn_payload().map_err(|_| fail("leader-spawn"))?;
     let mut remaining_member = spawn_payload().map_err(|_| fail("member-spawn"))?;
     let logind_session_id =
@@ -43,6 +44,11 @@ fn run() -> Result<(), ()> {
         &mut stdout,
         WorkerResponse::Preparing {
             worker_id: worker_id.clone(),
+            transaction: {
+                let mut value = (*transaction).clone();
+                value.stage = "preparing".into();
+                value
+            },
         },
     )
     .map_err(|_| fail("preparing"))?;
@@ -50,6 +56,11 @@ fn run() -> Result<(), ()> {
         &mut stdout,
         WorkerResponse::PayloadScopePrepared {
             worker_id: worker_id.clone(),
+            transaction: {
+                let mut value = (*transaction).clone();
+                value.stage = "scope_prepared".into();
+                value
+            },
             expected_worker_pid: std::process::id(),
             session_pid: leader.id(),
             registration_nonce: identity.invocation_id.clone(),
@@ -72,7 +83,8 @@ fn run() -> Result<(), ()> {
             } if ack_worker_id == &worker_id && expected_worker_pid == std::process::id()
         )
     {
-        return Err(fail("ack-invalid"));
+        fail("ack-invalid");
+        return Err(());
     }
     writeln!(report, "ack").map_err(|_| fail("ack-report"))?;
     if std::env::var_os("NIRALIS_SUPERVISOR_FIXTURE_POST_ACK_BARRIER").is_some() {
@@ -93,6 +105,11 @@ fn run() -> Result<(), ()> {
             fixture_version: 2,
             worker_id: worker_id.clone(),
             logind_session_id,
+            transaction: {
+                let mut value = *transaction;
+                value.stage = "started".into();
+                value
+            },
         },
     )
     .map_err(|_| fail("started"))?;

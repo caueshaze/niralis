@@ -63,6 +63,21 @@ pub(crate) struct RecordRemovedReceipt {
     pub(super) seat: String,
 }
 
+impl RecordRemovedReceipt {
+    pub(crate) fn record_id(&self) -> &str {
+        &self.record_id
+    }
+    pub(crate) fn lifecycle_id(&self) -> &str {
+        &self.lifecycle_id
+    }
+    pub(crate) fn sequence(&self) -> u64 {
+        self.sequence
+    }
+    pub(crate) fn seat(&self) -> &str {
+        &self.seat
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct SeatFreePermit {
     pub(super) boot_id: BootIdentity,

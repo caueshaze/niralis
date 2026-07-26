@@ -1,5 +1,28 @@
 impl SessionLauncher for WorkerSessionLauncher {
-    fn start_session(&self, request: SessionRequest) -> Result<StartedSession, SessionError> {
+    fn begin_login(
+        &self,
+        request: crate::UnauthenticatedLoginRequest,
+        secret: crate::LoginSecret,
+        _factory: &dyn crate::LoginBackendFactory,
+    ) -> Result<crate::LoginStartOutcome, crate::SessionError> {
+        request.validate()?;
+        let plan = request.launch_plan.ok_or(crate::SessionError::WorkerProtocolFailed)?;
+        self.start_pam_session(
+            crate::SessionRequest { username: request.username, session: request.session },
+            plan,
+            request.pam_service.unwrap_or_else(|| "niralis".to_owned()),
+            secret.into(),
+        )
+    }
+}
+
+impl WorkerSessionLauncher {
+    /// Test-only helper for the mock `PrepareSession` worker path. Production
+    /// login must flow through `begin_login`.
+    pub fn start_prepared_session_for_test(
+        &self,
+        request: SessionRequest,
+    ) -> Result<StartedSession, SessionError> {
         self.start_worker(
             WorkerRequest::PrepareSession {
                 request: request.clone(),
@@ -15,18 +38,6 @@ fn expected_started_session(request: &SessionRequest) -> StartedSession {
     StartedSession {
         username: request.username.clone(),
         session: request.session.clone(),
-    }
-}
-
-#[cfg(test)]
-mod ownership_tests {
-    use super::*;
-
-    #[test]
-    fn expired_runtime_id_cannot_match_a_future_lifecycle() {
-        let expired = RuntimeSessionId::new("runtime-a".to_owned());
-        let future = RuntimeSessionId::new("runtime-b".to_owned());
-        assert_ne!(expired, future);
     }
 }
 
@@ -64,16 +75,11 @@ fn prepare_control_root(root: &Path) -> Result<(), SessionError> {
 }
 
 fn install_control_request(request: &mut WorkerRequest, path: PathBuf, worker_id: String) {
-    if let WorkerRequest::PamSession {
-        control_path: control,
-        worker_id: id,
-        launcher_pid,
-        ..
-    } = request
+    if let WorkerRequest::PamSession(request) = request
     {
-        *control = path;
-        *id = worker_id;
-        *launcher_pid = std::process::id();
+        *request.control_path = path;
+        request.worker_id = worker_id;
+        request.launcher_pid = std::process::id();
     }
 }
 
@@ -105,5 +111,17 @@ fn map_response(
             Err(SessionError::WorkerRejected)
         }
         _ => Err(SessionError::WorkerProtocolFailed),
+    }
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    use super::*;
+
+    #[test]
+    fn expired_runtime_id_cannot_match_a_future_lifecycle() {
+        let expired = RuntimeSessionId::new("runtime-a".to_owned());
+        let future = RuntimeSessionId::new("runtime-b".to_owned());
+        assert_ne!(expired, future);
     }
 }

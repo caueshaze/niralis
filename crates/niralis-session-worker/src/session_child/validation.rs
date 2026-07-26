@@ -42,7 +42,7 @@ fn validate_ready_response(
             && applied_credentials
                 == SessionChildUnixCredentials::from(&expectation.target_credentials)
             && {
-                let proof = PostDropIsolationProof::from(isolation_proof.clone());
+                let proof = PostDropIsolationProof::from((*isolation_proof).clone());
                 let present_allowed_fds = allowed_inherited_fds
                     .iter()
                     .copied()
@@ -87,7 +87,7 @@ fn validate_ready_response(
             && runtime_environment.cwd == expectation.runtime.home
             && (expectation.runtime.session_id.is_empty()
                 || runtime_environment.exec_plan == expectation.runtime.exec_plan)
-            && match (&expectation.terminal, &terminal_proof) {
+            && match (&expectation.terminal, &*terminal_proof) {
                 (None, None) => true,
                 (Some(expected), Some(actual)) => {
                     actual.seat == expected.seat
@@ -110,7 +110,7 @@ fn validate_ready_response(
                     gid: applied_credentials.gid,
                     supplementary_gids: applied_credentials.supplementary_gids,
                 },
-                isolation_proof: isolation_proof.into(),
+                isolation_proof: (*isolation_proof).into(),
                 process_identity: ProcessIdentityProof {
                     pid: process_identity.pid,
                     sid: process_identity.sid,
@@ -138,7 +138,7 @@ fn validate_ready_response(
                 },
                 exec_probe_version,
                 credential_proof,
-                terminal_proof,
+                terminal_proof: *terminal_proof,
             })
         }
         SessionChildResponse::Rejected { .. } => Err(SessionChildError::ProtocolFailed),
@@ -154,7 +154,7 @@ fn validate_ready_response(
             exec_probe_version,
             terminal_proof,
         } => {
-            let proof = PostDropIsolationProof::from(isolation_proof.clone());
+            let proof = PostDropIsolationProof::from((*isolation_proof).clone());
             let present_allowed_fds = allowed_inherited_fds
                 .iter()
                 .copied()
@@ -171,7 +171,7 @@ fn validate_ready_response(
                     credential_proof.supplementary_gids,
                     expectation.target_credentials.gid,
                 ) == expectation.target_credentials.supplementary_gids;
-            let terminal_proof_matches = match (&expectation.terminal, &terminal_proof) {
+            let terminal_proof_matches = match (&expectation.terminal, &*terminal_proof) {
                 (None, None) => true,
                 (Some(expected), Some(actual)) => {
                     actual.seat == expected.seat

@@ -115,10 +115,7 @@ pub(crate) fn drop_privileges_with<S: CredentialSyscalls>(
         .supplementary_gids
         .windows(2)
         .any(|window| window[0] >= window[1])
-        || target
-            .supplementary_gids
-            .iter()
-            .any(|supplementary_gid| *supplementary_gid == target.gid)
+        || target.supplementary_gids.contains(&target.gid)
     {
         return Err(PrivilegeDropError::InvalidSupplementaryGroups);
     }
@@ -154,10 +151,8 @@ pub(crate) fn drop_privileges_with<S: CredentialSyscalls>(
     {
         return Err(PrivilegeDropError::CredentialMismatch);
     }
-    let observed_uid =
-        u32::try_from(observed.real_uid).map_err(|_| PrivilegeDropError::VerificationFailed)?;
-    let observed_gid =
-        u32::try_from(observed.real_gid).map_err(|_| PrivilegeDropError::VerificationFailed)?;
+    let observed_uid = observed.real_uid;
+    let observed_gid = observed.real_gid;
     let mut observed_groups = observed.supplementary_gids;
     observed_groups.sort_unstable();
     observed_groups.dedup();
@@ -168,7 +163,7 @@ pub(crate) fn drop_privileges_with<S: CredentialSyscalls>(
 
     let observed_supplementary_gids = observed_groups
         .into_iter()
-        .map(|gid| u32::try_from(gid).map_err(|_| PrivilegeDropError::VerificationFailed))
+        .map(Ok)
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok(AppliedCredentials {

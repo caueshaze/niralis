@@ -2,7 +2,7 @@ use super::*;
 
 pub(super) fn finalize_admin_success(
     host: &RecoveryAdminHostRef,
-    seat: &mut SeatLifecycle,
+    admission: &mut SeatAdmissionController,
     ledger: &mut PersistentRecoveryLedger,
     record_id: &str,
     attempt_id: u64,
@@ -33,12 +33,17 @@ pub(super) fn finalize_admin_success(
     let removed = ledger
         .remove_record_typed(released_snapshot, resolved, confirmed, removal_permit)
         .map_err(|_| "could not remove the exact resolved record".to_owned())?;
+    let admin_receipt = admission
+        .issue_admin_finalization_receipt(&removed)
+        .map_err(|_| "seat authority changed before finalization receipt".to_owned())?;
     let free_permit = ledger
         .issue_seat_free_permit(removed)
         .map_err(|_| "seat free preconditions changed".to_owned())?;
     ledger
         .consume_seat_free_permit(free_permit)
         .map_err(|_| "seat free preconditions changed".to_owned())?;
-    *seat = SeatLifecycle::Free;
+    admission
+        .release_after_admin_finalization(admin_receipt)
+        .map_err(|_| "seat authority changed before publication".to_owned())?;
     Ok(())
 }

@@ -152,16 +152,22 @@ pub(crate) enum SupervisorRecoveryError {
     VtActivationFailed(i32),
     VtDisallocateBusy,
     VtDisallocateFailed(i32),
+    #[cfg(test)]
     PersistentRecordConflict,
+    #[cfg(test)]
     WorkerIdentityIndeterminate,
+    #[cfg(test)]
     LeaderIdentityIndeterminate,
     SystemdOwnerChanged,
     LogindOwnerChanged,
+    #[cfg(test)]
     PreviousBootConflict,
     UnknownPayloadScope,
+    #[cfg(test)]
     UnsupportedStartupRecovery,
 }
 
+#[cfg(test)]
 impl SupervisorRecoveryError {
     pub(crate) fn from_persistent_quarantine(reason: Option<&str>, state: &str) -> Self {
         match reason {

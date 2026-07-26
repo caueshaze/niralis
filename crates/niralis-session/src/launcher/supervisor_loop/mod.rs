@@ -13,13 +13,17 @@ use support::*;
 mod admin;
 mod admin_finalization;
 mod admin_support;
+pub(super) mod admission;
+#[cfg(test)]
+mod admission_tests;
+use admission::{RecoveryAdmissionState, SeatAdmissionController};
 use tracing::info;
 
 pub(super) struct SupervisorLoopState {
     children: Vec<SupervisedWorker>,
     pending: Vec<PendingWorkerLifecycle>,
     quarantined: Vec<SupervisorSessionRecoveryRecord>,
-    seat: SeatLifecycle,
+    admission: SeatAdmissionController,
     recovery_provider: Arc<dyn SupervisorRecoveryProvider>,
     recovery_admin_host: RecoveryAdminHostRef,
     ledger: Option<Arc<Mutex<PersistentRecoveryLedger>>>,
@@ -31,67 +35,30 @@ impl SupervisorLoopState {
         recovery_admin_host: RecoveryAdminHostRef,
         ledger: Option<Arc<Mutex<PersistentRecoveryLedger>>>,
     ) -> Self {
-        if let Some(record) = ledger
-            .as_ref()
-            .and_then(|value| value.lock().ok())
-            .and_then(|value| value.records().next().cloned())
-        {
-            let reconciling = SeatLifecycle::Reconciling {
-                lifecycle_id: record.lifecycle_id,
-                stage: "startup_reconciliation",
-            };
-            info!(?reconciling, "seat entered startup reconciliation");
-        }
         let seat = ledger
             .as_ref()
             .and_then(|ledger| ledger.lock().ok())
-            .and_then(|ledger| {
-                ledger
-                    .records()
-                    .next()
-                    .map(|record| {
-                        match PersistentRecoveryLedger::boot_relation(record) {
-                            RecoveryBootRelation::SameBoot => {
-                                info!(lifecycle_id = %record.lifecycle_id, "recovery record belongs to current boot");
-                            }
-                            RecoveryBootRelation::PreviousBoot => {
-                                info!(lifecycle_id = %record.lifecycle_id, "recovery record belongs to previous boot");
-                            }
-                        }
-                        SeatLifecycle::Quarantined {
-                            lifecycle_id: record.lifecycle_id.clone(),
-                            stage: EmergencyRecoveryStage::RecoveryRecordValidation,
-                            reason: SupervisorRecoveryError::from_persistent_quarantine(
-                                record.quarantine_reason.as_deref(),
-                                &record.state,
-                            ),
-                        }
-                    })
-                    .or_else(|| {
-                        ledger
-                            .startup_quarantined()
-                            .then(|| SeatLifecycle::Quarantined {
-                                lifecycle_id: "startup-quarantine".to_owned(),
-                                stage: EmergencyRecoveryStage::RecoveryRecordValidation,
-                                reason: SupervisorRecoveryError::UnknownPayloadScope,
-                            })
-                            .or_else(|| {
-                                ledger
-                                    .seat_startup_quarantined("seat0")
-                                    .then(|| SeatLifecycle::Quarantined {
-                                    lifecycle_id: "unknown-payload-seat0".to_owned(),
-                                    stage: EmergencyRecoveryStage::RecoveryRecordValidation,
-                                    reason: SupervisorRecoveryError::UnknownPayloadScope,
-                                    })
-                            })
-                    })
+            .map(|ledger| {
+                let blocked = ledger.startup_quarantined()
+                    || ledger.record_set_classification().global_quarantine
+                    || ledger.seat_startup_quarantined("seat0")
+                    || ledger.record_set_classification().seat_blocked("seat0");
+                if blocked {
+                    SeatLifecycle::Quarantined {
+                        lifecycle_id: "consolidated-recovery-seat0".to_owned(),
+                        stage: EmergencyRecoveryStage::RecoveryRecordValidation,
+                        reason: SupervisorRecoveryError::UnknownPayloadScope,
+                    }
+                } else {
+                    SeatLifecycle::Free
+                }
             })
             .unwrap_or(SeatLifecycle::Free);
         Self {
             children: Vec::new(),
             pending: Vec::new(),
             quarantined: Vec::new(),
-            seat,
+            admission: SeatAdmissionController::new("seat0", seat),
             recovery_provider,
             recovery_admin_host,
             ledger,
@@ -113,8 +80,35 @@ impl SupervisorLoopState {
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
             }
             self.reap_exited_workers();
-            let _ = (&self.seat, self.quarantined.len());
+            let _ = self.quarantined.len();
         }
+    }
+}
+
+impl SupervisorLoopState {
+    pub(super) fn recovery_admission_state(&self, seat: &str) -> RecoveryAdmissionState {
+        let Some(ledger) = &self.ledger else {
+            return RecoveryAdmissionState::Clear;
+        };
+        let Ok(ledger) = ledger.lock() else {
+            return RecoveryAdmissionState::GloballyBlocked {
+                reason: "recovery_ledger_unavailable",
+            };
+        };
+        if ledger.startup_quarantined() || ledger.record_set_classification().global_quarantine {
+            return RecoveryAdmissionState::GloballyBlocked {
+                reason: "recovery_global_quarantine",
+            };
+        }
+        if ledger.seat_startup_quarantined(seat)
+            || ledger.record_set_classification().seat_blocked(seat)
+        {
+            return RecoveryAdmissionState::SeatBlocked {
+                seat: seat.to_owned(),
+                reason: "recovery_seat_blocked",
+            };
+        }
+        RecoveryAdmissionState::Clear
     }
 }
 
@@ -134,7 +128,7 @@ pub(crate) fn dispatch_recovery_admin_for_test(
         Some(ledger.clone()),
     );
     let response = state.recovery_admin(request).expect("fixture coordinator");
-    let published_free = matches!(state.seat, SeatLifecycle::Free);
+    let published_free = state.admission.is_free();
     drop(state);
     let ledger = Arc::try_unwrap(ledger)
         .expect("fixture ledger sole owner")

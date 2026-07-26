@@ -102,9 +102,7 @@ fn already_resolved_record_restarts_without_replaying_history() {
 
 #[test]
 fn fixture_child_is_a_noop_in_the_parent_process() {
-    if std::env::var_os("NIRALIS_PREVIOUS_BOOT_CHILD").is_some() {
-        return;
-    }
+    let _ = std::env::var_os("NIRALIS_PREVIOUS_BOOT_CHILD").is_some();
 }
 
 #[test]

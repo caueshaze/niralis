@@ -1,23 +1,27 @@
 use tracing::info;
 
-use crate::{SessionLauncher, SessionRequest, StartedSession};
+use crate::{LoginBackendFactory, SessionLauncher, StartedSession, UnauthenticatedLoginRequest};
 
 #[derive(Debug, Default)]
 pub struct MockSessionLauncher;
 
 impl SessionLauncher for MockSessionLauncher {
-    fn start_session(
+    fn begin_login(
         &self,
-        request: SessionRequest,
+        request: UnauthenticatedLoginRequest,
+        secret: crate::LoginSecret,
+        factory: &dyn LoginBackendFactory,
     ) -> Result<StartedSession, crate::SessionError> {
+        request.validate()?;
+        let username = factory.create_unbound()?.authenticate(&request, secret)?;
         info!(
-            username = %request.username,
+            username = %username,
             session = %request.session.id,
-            "mock session start requested"
+            "mock login admitted and started"
         );
 
         Ok(StartedSession {
-            username: request.username,
+            username,
             session: request.session,
         })
     }

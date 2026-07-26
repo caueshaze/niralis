@@ -1,55 +1,61 @@
+use super::admission::{AdmissionLease, AdmissionRollbackLease, PendingLifecycleLease};
 use super::*;
 use tracing::warn;
 
 impl SupervisorLoopState {
     pub(super) fn reserve_seat(
         &mut self,
-        worker_id: String,
-    ) -> Result<PreviousVtIdentity, SessionError> {
-        if worker_id.is_empty() || !matches!(self.seat, SeatLifecycle::Free) {
+        lifecycle_id: String,
+    ) -> Result<AdmissionLease, SessionError> {
+        if !self.admission.is_free() {
             return Err(SessionError::SessionSeatUnavailable);
         }
         let previous_vt = self
             .recovery_provider
             .capture_previous_vt("seat0")
             .map_err(|_| SessionError::WorkerIoFailed)?;
-        self.seat = SeatLifecycle::Active {
-            lifecycle_id: worker_id,
-        };
-        Ok(previous_vt)
+        let recovery = self.recovery_admission_state("seat0");
+        self.admission.reserve(lifecycle_id, recovery, previous_vt)
     }
 
-    pub(super) fn cancel_seat_reservation(&mut self, worker_id: &str) {
-        if matches!(&self.seat, SeatLifecycle::Active { lifecycle_id } if lifecycle_id == worker_id)
-            && !self
-                .pending
-                .iter()
-                .any(|entry| entry.record.lifecycle_id == worker_id)
-        {
-            self.seat = SeatLifecycle::Free;
-        }
+    pub(super) fn cancel_admission(
+        &mut self,
+        lease: AdmissionRollbackLease,
+    ) -> Result<(), SessionError> {
+        self.admission.cancel(lease)
     }
 
     pub(super) fn begin_pending(
         &mut self,
-        worker_id: String,
+        lease: AdmissionLease,
         worker_pid: u32,
         launcher_pid: u32,
         session: StartedSession,
         child: Arc<Mutex<Child>>,
-        previous_vt: PreviousVtIdentity,
-    ) -> Result<(), SessionError> {
-        if worker_id.is_empty()
-            || worker_pid == 0
+    ) -> Result<PendingLifecycleLease, SessionError> {
+        let worker_id = lease.lifecycle_id().to_owned();
+        if worker_pid == 0
             || launcher_pid != std::process::id()
-            || !matches!(&self.seat, SeatLifecycle::Active { lifecycle_id } if lifecycle_id == &worker_id)
             || self
                 .pending
                 .iter()
                 .any(|entry| entry.record.lifecycle_id == worker_id)
         {
+            let _ = self
+                .admission
+                .cancel(AdmissionRollbackLease::Reserved(lease));
             return Err(SessionError::SessionSeatUnavailable);
         }
+        let recovery = self.recovery_admission_state("seat0");
+        let (pending_lease, previous_vt) = match self.admission.promote(lease, recovery) {
+            Ok(value) => value,
+            Err((error, lease)) => {
+                let _ = self
+                    .admission
+                    .cancel(AdmissionRollbackLease::Reserved(lease));
+                return Err(error);
+            }
+        };
         self.pending.push(PendingWorkerLifecycle {
             record: SupervisorSessionRecoveryRecord::worker_spawned(
                 worker_id,
@@ -63,7 +69,7 @@ impl SupervisorLoopState {
             generation: 0,
             terminal_before_started: false,
         });
-        Ok(())
+        Ok(pending_lease)
     }
 
     pub(super) fn record_prepared_scope(
@@ -132,11 +138,11 @@ impl SupervisorLoopState {
                     },
                 };
                 entry.terminal_before_started = true;
-                self.seat = SeatLifecycle::Quarantined {
-                    lifecycle_id: worker_id,
-                    stage: EmergencyRecoveryStage::PayloadIdentityValidation,
-                    reason: SupervisorRecoveryError::InvalidPayloadIdentity,
-                };
+                let _ = self.admission.quarantine_pending_lifecycle(
+                    &worker_id,
+                    EmergencyRecoveryStage::PayloadIdentityValidation,
+                    SupervisorRecoveryError::InvalidPayloadIdentity,
+                );
                 Err(SessionError::WorkerProtocolFailed)
             }
         }

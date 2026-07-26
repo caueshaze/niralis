@@ -21,8 +21,8 @@ pub fn build_worker_session_launcher(config: &Config) -> Result<WorkerSessionLau
     validate_worker_timeout(config.session.worker_timeout_seconds)?;
     validate_worker_binary(config)?;
     if matches!(config.auth.backend, AuthBackend::Pam) {
-        validate_trusted_executable(&config.session.child_path, ExecutableRole::SessionChild)?;
-        validate_trusted_executable(&config.session.probe_path, ExecutableRole::SessionProbe)?;
+        validate_trusted_executable(&config.session.child_path, ExecutableRole::Child)?;
+        validate_trusted_executable(&config.session.probe_path, ExecutableRole::Probe)?;
     }
     new_worker_launcher(
         config.session.worker_path.clone(),
@@ -46,8 +46,8 @@ pub fn build_worker_session_launcher_for_physical_smoke(
     validate_worker_timeout(config.session.worker_timeout_seconds)?;
     validate_worker_binary(config)?;
     if matches!(config.auth.backend, AuthBackend::Pam) {
-        validate_trusted_executable(&config.session.child_path, ExecutableRole::SessionChild)?;
-        validate_trusted_executable(&config.session.probe_path, ExecutableRole::SessionProbe)?;
+        validate_trusted_executable(&config.session.child_path, ExecutableRole::Child)?;
+        validate_trusted_executable(&config.session.probe_path, ExecutableRole::Probe)?;
     }
     WorkerSessionLauncher::new_persistent_with_physical_previous_boot_smoke(
         config.session.worker_path.clone(),
@@ -138,9 +138,9 @@ fn validate_worker_binary(config: &Config) -> Result<()> {
         return Err(NiralisdError::InvalidWorkerPath(path.to_path_buf()));
     }
     if matches!(config.auth.backend, AuthBackend::Pam) {
-        validate_trusted_executable(path, ExecutableRole::SessionWorker)?;
+        validate_trusted_executable(path, ExecutableRole::Worker)?;
     } else {
-        validate_basic_executable(path, ExecutableRole::SessionWorker)?;
+        validate_basic_executable(path, ExecutableRole::Worker)?;
     }
 
     Ok(())
@@ -148,9 +148,9 @@ fn validate_worker_binary(config: &Config) -> Result<()> {
 
 #[derive(Debug, Clone, Copy)]
 enum ExecutableRole {
-    SessionWorker,
-    SessionChild,
-    SessionProbe,
+    Worker,
+    Child,
+    Probe,
 }
 
 fn validate_trusted_executable(path: &Path, role: ExecutableRole) -> Result<()> {
@@ -201,25 +201,25 @@ fn validate_basic_executable(path: &Path, role: ExecutableRole) -> Result<()> {
 
 fn invalid(path: &Path, role: ExecutableRole) -> NiralisdError {
     match role {
-        ExecutableRole::SessionWorker => NiralisdError::InvalidWorkerPath(path.to_path_buf()),
-        ExecutableRole::SessionChild => NiralisdError::InvalidSessionChildPath(path.to_path_buf()),
-        ExecutableRole::SessionProbe => NiralisdError::InvalidSessionProbePath(path.to_path_buf()),
+        ExecutableRole::Worker => NiralisdError::InvalidWorkerPath(path.to_path_buf()),
+        ExecutableRole::Child => NiralisdError::InvalidSessionChildPath(path.to_path_buf()),
+        ExecutableRole::Probe => NiralisdError::InvalidSessionProbePath(path.to_path_buf()),
     }
 }
 
 fn unavailable(path: &Path, role: ExecutableRole) -> NiralisdError {
     match role {
-        ExecutableRole::SessionWorker => NiralisdError::WorkerUnavailable(path.to_path_buf()),
-        ExecutableRole::SessionChild => NiralisdError::SessionChildUnavailable(path.to_path_buf()),
-        ExecutableRole::SessionProbe => NiralisdError::SessionProbeUnavailable(path.to_path_buf()),
+        ExecutableRole::Worker => NiralisdError::WorkerUnavailable(path.to_path_buf()),
+        ExecutableRole::Child => NiralisdError::SessionChildUnavailable(path.to_path_buf()),
+        ExecutableRole::Probe => NiralisdError::SessionProbeUnavailable(path.to_path_buf()),
     }
 }
 
 fn untrusted(path: &Path, role: ExecutableRole) -> NiralisdError {
     match role {
-        ExecutableRole::SessionWorker => NiralisdError::WorkerUntrusted(path.to_path_buf()),
-        ExecutableRole::SessionChild => NiralisdError::SessionChildUntrusted(path.to_path_buf()),
-        ExecutableRole::SessionProbe => NiralisdError::SessionProbeUntrusted(path.to_path_buf()),
+        ExecutableRole::Worker => NiralisdError::WorkerUntrusted(path.to_path_buf()),
+        ExecutableRole::Child => NiralisdError::SessionChildUntrusted(path.to_path_buf()),
+        ExecutableRole::Probe => NiralisdError::SessionProbeUntrusted(path.to_path_buf()),
     }
 }
 

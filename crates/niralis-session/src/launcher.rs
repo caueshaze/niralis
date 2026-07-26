@@ -1,6 +1,12 @@
 mod recovery;
 mod recovery_admin_host;
 #[cfg(any(
+    test,
+    feature = "integration-test-control",
+    feature = "supervisor-test-fixtures"
+))]
+use crate::worker_attempt;
+#[cfg(any(
     feature = "integration-test-control",
     feature = "supervisor-test-fixtures"
 ))]
@@ -15,6 +21,7 @@ pub use recovery::{
 #[cfg(feature = "supervisor-test-fixtures")]
 use std::os::fd::AsRawFd;
 include!("launcher/contracts.rs");
+mod login_transaction;
 mod supervisor_loop;
 #[cfg(test)]
 use supervisor_loop::support::finalize_clean_worker_exit;

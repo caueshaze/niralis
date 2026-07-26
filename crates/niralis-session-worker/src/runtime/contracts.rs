@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 #[cfg(feature = "worker-test-fixtures")]
+use std::fs::File;
+#[cfg(feature = "worker-test-fixtures")]
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use niralis_auth::{AuthError, Authenticator, PamAuthenticator};
@@ -161,6 +163,8 @@ static FIXTURE_GRACE_MILLIS: AtomicU64 = AtomicU64::new(5_000);
 static FIXTURE_WATCHDOG_AUTHORIZED: AtomicBool = AtomicBool::new(false);
 #[cfg(feature = "worker-test-fixtures")]
 static FIXTURE_CONTROL_UID: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "worker-test-fixtures")]
+static FIXTURE_ALLOW_UNVALIDATED_SUPERVISOR_PEER: AtomicBool = AtomicBool::new(false);
 
 #[cfg(feature = "worker-test-fixtures")]
 pub(crate) fn set_fixture_grace_period(duration: Duration) {
@@ -176,6 +180,21 @@ pub(crate) fn authorize_fixture_launch_watchdog() {
 #[cfg(feature = "worker-test-fixtures")]
 pub(crate) fn set_fixture_control_uid(uid: u32) {
     FIXTURE_CONTROL_UID.store(u64::from(uid), Ordering::SeqCst);
+}
+
+#[cfg(feature = "worker-test-fixtures")]
+pub(crate) fn allow_unvalidated_supervisor_peer_for_test(allowed: bool) {
+    FIXTURE_ALLOW_UNVALIDATED_SUPERVISOR_PEER.store(allowed, Ordering::SeqCst);
+}
+
+#[cfg(feature = "worker-test-fixtures")]
+fn fixture_allows_unvalidated_supervisor_peer() -> bool {
+    FIXTURE_ALLOW_UNVALIDATED_SUPERVISOR_PEER.load(Ordering::SeqCst)
+}
+
+#[cfg(not(feature = "worker-test-fixtures"))]
+fn fixture_allows_unvalidated_supervisor_peer() -> bool {
+    false
 }
 
 fn internal_control_peer_uid() -> u32 {

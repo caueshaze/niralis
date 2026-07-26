@@ -6,39 +6,123 @@ impl WorkerSessionLauncher {
         install_control: bool,
     ) -> Result<(StartedSession, RuntimeSessionId), SessionError> {
         let (control_dir, control_path, worker_id) = create_control_endpoint()?;
-        let requires_pending_lifecycle = matches!(&request, WorkerRequest::PamSession { .. });
+        let requires_pending_lifecycle = matches!(&request, WorkerRequest::PamSession(_));
+        let registered_control_path = control_path.clone();
         if install_control {
             install_control_request(&mut request, control_path.clone(), worker_id.clone());
         }
         let mut seat_reservation = if requires_pending_lifecycle {
-            let previous_vt = self.supervisor.reserve_seat(&worker_id)?;
+            let lease = self.supervisor.reserve_seat(&worker_id)?;
             Some((
                 SeatReservationGuard {
                     supervisor: self.supervisor.clone(),
-                    worker_id: worker_id.clone(),
-                    armed: true,
+                    lease: Some(lease),
                 },
-                previous_vt,
             ))
         } else {
             None
         };
         let deadline = Instant::now() + self.timeout;
+        let transaction_generation = seat_reservation
+            .as_ref()
+            .and_then(|guard| guard.0.lease.as_ref())
+            .map_or(0, |lease| lease.generation());
+        let transaction_attempt_id = seat_reservation
+            .as_ref()
+            .and_then(|guard| guard.0.lease.as_ref())
+            .map_or(0, |lease| lease.attempt_id());
+        if requires_pending_lifecycle {
+            if let WorkerRequest::PamSession(request) = &mut request {
+                *request.transaction = crate::WorkerTransactionIdentity {
+                    transaction_id: worker_id.clone(),
+                    admission_attempt_id: transaction_attempt_id,
+                    lifecycle_id: worker_id.clone(),
+                    seat: "seat0".to_owned(),
+                    seat_generation: transaction_generation,
+                    stage: "reserved".to_owned(),
+                };
+            }
+        }
         let mut attempt =
-            WorkerAttempt::spawn(&self.worker_path, &self.worker_environment, request)?;
+            WorkerAttempt::spawn(
+                &self.worker_path,
+                &self.worker_environment,
+                request,
+                #[cfg(any(test, feature = "integration-test-control", feature = "supervisor-test-fixtures"))]
+                self.fixture_supervisor_transport,
+                #[cfg(not(any(test, feature = "integration-test-control", feature = "supervisor-test-fixtures")))]
+                false,
+            )?;
         let worker_pid = attempt.child_id();
+        let mut transaction = if requires_pending_lifecycle {
+            let lease = seat_reservation
+                .as_mut()
+                .expect("PAM launch seat reservation")
+                .0
+                .lease
+                .take()
+                .expect("seat reservation owns admission lease");
+            let identity = login_transaction::GreeterConnectionIdentity::private(worker_id.clone());
+            let tx = login_transaction::LoginTransaction::from_admission(
+                lease,
+                identity,
+                expected.session.id.clone(),
+                deadline,
+            );
+            let backend = match tx.attach_backend(
+                login_transaction::UnboundLocalLoginBackend::private(),
+                login_transaction::ValidatedWorkerChannel::private(worker_id.clone(), worker_pid),
+            ) {
+                Ok(backend) => backend,
+                Err(error) => {
+                    let (error, mut transaction) = *error;
+                    let lease = transaction.take_lease().map_err(|_| SessionError::WorkerProtocolFailed)?;
+                    seat_reservation.as_mut().expect("PAM launch seat reservation").0.lease = Some(lease);
+                    return Err(error);
+                }
+            };
+            let authenticated = match backend.authentication() {
+                Ok(permit) => permit.authenticated(),
+                Err(error) => {
+                    let (error, mut backend) = *error;
+                    let lease = backend
+                        .take_lease()
+                        .map_err(|_| SessionError::WorkerProtocolFailed)?;
+                    seat_reservation
+                        .as_mut()
+                        .expect("PAM launch seat reservation")
+                        .0
+                        .lease = Some(lease);
+                    return Err(error);
+                }
+            };
+            let prepared = authenticated.prepare();
+            if !prepared.validate_expected(&worker_id, &expected.session.id) {
+                let (_, lease) = prepared
+                    .take_admission_lease()
+                    .map_err(|_| SessionError::WorkerProtocolFailed)?;
+                seat_reservation
+                    .as_mut()
+                    .expect("PAM launch seat reservation")
+                    .0
+                    .lease = Some(lease);
+                return Err(SessionError::WorkerProtocolFailed);
+            }
+            Some(prepared)
+        } else {
+            None
+        };
         let mut pending_guard = if requires_pending_lifecycle {
-            self.supervisor.begin_pending(
-                &worker_id,
+            let (prepared, lease) = transaction
+                .take()
+                .expect("PAM launch transaction")
+                .take_admission_lease()?;
+            let pending_lease = self.supervisor.begin_pending(
+                lease,
                 worker_pid,
                 std::process::id(),
                 expected.clone(),
                 attempt.shared_child(),
-                seat_reservation
-                    .as_ref()
-                    .expect("PAM launch seat reservation")
-                    .1
-                    .clone(),
             )?;
             seat_reservation
                 .as_mut()
@@ -47,7 +131,7 @@ impl WorkerSessionLauncher {
                 .consume();
             Some(PendingSupervisorGuard {
                 supervisor: self.supervisor.clone(),
-                worker_id: worker_id.clone(),
+                transaction: Some(prepared.pending(pending_lease)),
                 expected_clean: false,
                 worker_exit_status: None,
             })
@@ -55,8 +139,14 @@ impl WorkerSessionLauncher {
             None
         };
         let writer_result = attempt.wait_writer(deadline);
-        let (response_result, phase) =
-            self.wait_launch_response(&mut attempt, deadline, worker_id.clone(), worker_pid)?;
+        let (response_result, phase) = self.wait_launch_response(
+            &mut attempt,
+            deadline,
+            worker_id.clone(),
+            worker_pid,
+            transaction_generation,
+            transaction_attempt_id,
+        )?;
         let started_response = response_result
             .as_ref()
             .ok()
@@ -76,10 +166,12 @@ impl WorkerSessionLauncher {
                     fixture_version,
                     worker_id: started_worker_id,
                     logind_session_id,
+                    transaction,
                 } if session == expected
                     && matches!(fixture_version, 1 | 2)
                     && (started_worker_id == worker_id || started_worker_id.is_empty())
-                    && session_pgid == session_pid =>
+                    && session_pgid == session_pid
+                    && valid_transaction(&transaction, &worker_id, transaction_generation, transaction_attempt_id, "started") =>
                 {
                     let (payload_scope, registration_nonce) = if let PendingLaunchPhase::ScopeRegistered {
                         identity,
@@ -99,10 +191,20 @@ impl WorkerSessionLauncher {
                     }
                     attempt.finish();
                     let supervisor_channel = attempt.take_supervisor_channel();
+                    #[cfg(any(test, feature = "integration-test-control", feature = "supervisor-test-fixtures"))]
+                    let fixture_supervisor_transport = attempt.take_fixture_supervisor_transport();
                     let child = attempt.shared_child();
                     let runtime_id = self.supervisor.register(
+                        pending_guard
+                            .as_mut()
+                            .expect("PAM launch owns pending login transaction")
+                            .take_transaction(),
                         child,
                         supervisor_channel,
+                        #[cfg(any(test, feature = "integration-test-control", feature = "supervisor-test-fixtures"))]
+                        fixture_supervisor_transport,
+                        #[cfg(any(test, feature = "integration-test-control", feature = "supervisor-test-fixtures"))]
+                        self.fixture_inherited_supervisor_control,
                         expected.clone(),
                         session_pid,
                         session_pgid,
@@ -110,9 +212,10 @@ impl WorkerSessionLauncher {
                         logind_session_id,
                         payload_scope,
                         registration_nonce,
-                        control_path,
+                        registered_control_path,
                         control_dir,
                     )?;
+                    pending_guard.take();
                     attempt.retain_by_supervisor();
                     return Ok((expected, runtime_id));
                 }

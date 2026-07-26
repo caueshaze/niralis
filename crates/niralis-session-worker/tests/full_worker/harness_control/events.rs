@@ -1,5 +1,28 @@
 impl FullWorker {
+    fn poll_harness(&self, events: libc::c_short, context: &str) {
+        let mut pollfd = libc::pollfd {
+            fd: self.harness.get_ref().as_raw_fd(),
+            events,
+            revents: 0,
+        };
+        assert_eq!(
+            unsafe {
+                libc::poll(
+                    &mut pollfd,
+                    1,
+                    i32::try_from(HARNESS_TIMEOUT.as_millis()).unwrap(),
+                )
+            },
+            1,
+            "{context}; events={:?}",
+            self.events
+        );
+    }
+
     fn read_event(&mut self) -> String {
+        if self.harness.buffer().is_empty() {
+            self.poll_harness(libc::POLLIN, "bounded harness event poll timed out");
+        }
         let mut bytes = Vec::new();
         let count = self
             .harness
@@ -57,6 +80,7 @@ impl FullWorker {
 
     fn send_harness_command(&mut self, command: &str) {
         assert!(command.len() <= 63 && !command.as_bytes().contains(&b'\n'));
+        self.poll_harness(libc::POLLOUT, "bounded harness command poll timed out");
         let stream = self.harness.get_mut();
         stream
             .write_all(command.as_bytes())

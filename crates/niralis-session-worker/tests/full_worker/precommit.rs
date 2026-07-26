@@ -1,3 +1,18 @@
+use std::{sync::Arc, time::Instant};
+
+#[derive(Debug)]
+struct ReleasedVerifier;
+
+impl niralis_session::PayloadScopeReleaseVerifier for ReleasedVerifier {
+    fn verify(
+        &self,
+        _: &niralis_session::PayloadScopeIdentity,
+        _: Instant,
+    ) -> niralis_session::ScopeReleaseVerification {
+        niralis_session::ScopeReleaseVerification::Released
+    }
+}
+
 #[test]
 fn real_launcher_stdin_eof_is_benign_and_dedicated_ack_allows_commit() {
     let mut launcher = WorkerSessionLauncher::new(
@@ -12,6 +27,7 @@ fn real_launcher_stdin_eof_is_benign_and_dedicated_ack_allows_commit() {
     )
     .unwrap();
     launcher.use_supervisor_test_fixture_for_test();
+    launcher.set_payload_scope_release_verifier_for_test(Arc::new(ReleasedVerifier));
     let request = SessionRequest {
         username: "fixture-user".into(),
         session: SessionInfo {
@@ -73,8 +89,8 @@ fn phase_gate_is_not_runtime_selectable() {
     assert!(!production_main.contains("NIRALIS_TEST_PHASE"));
     assert!(!runtime.contains("NIRALIS_TEST_PHASE"));
     assert!(!protocol.contains("WorkerLaunchPhase"));
-    assert_eq!(niralis_session::WORKER_PROTOCOL_VERSION, 12);
-    assert_eq!(niralis_session::WORKER_CONTROL_PROTOCOL_VERSION, 4);
+    assert_eq!(niralis_session::WORKER_PROTOCOL_VERSION, 13);
+    assert_eq!(niralis_session::WORKER_CONTROL_PROTOCOL_VERSION, 6);
     assert_eq!(niralis_session_worker::SESSION_CHILD_PROTOCOL_VERSION, 9);
     assert_eq!(niralis_session_worker::SESSION_EXEC_PROBE_VERSION, 2);
 }

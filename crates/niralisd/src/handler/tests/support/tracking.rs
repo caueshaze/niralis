@@ -4,7 +4,10 @@ use std::sync::{Arc, Mutex};
 use niralis_auth::{
     AuthError, AuthSessionError, AuthenticatedTransaction, AuthenticatedUser, Authenticator,
 };
-use niralis_session::{SessionError, SessionLauncher, SessionRequest, StartedSession};
+use niralis_session::{
+    LoginBackendFactory, SessionError, SessionLauncher, SessionRequest, StartedSession,
+    UnauthenticatedLoginRequest,
+};
 
 use crate::login_backend::{LoginAttempt, LoginBackend, LoginBackendError};
 
@@ -111,8 +114,18 @@ pub(crate) struct CountingSessionLauncher {
 }
 
 impl SessionLauncher for CountingSessionLauncher {
-    fn start_session(&self, request: SessionRequest) -> Result<StartedSession, SessionError> {
+    fn begin_login(
+        &self,
+        request: UnauthenticatedLoginRequest,
+        secret: niralis_session::LoginSecret,
+        factory: &dyn LoginBackendFactory,
+    ) -> Result<StartedSession, SessionError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        let username = factory.create_unbound()?.authenticate(&request, secret)?;
+        let request = SessionRequest {
+            username,
+            session: request.session,
+        };
         *self
             .last_request
             .lock()
@@ -153,15 +166,21 @@ impl TrackingSessionLauncher {
 }
 
 impl SessionLauncher for TrackingSessionLauncher {
-    fn start_session(&self, request: SessionRequest) -> Result<StartedSession, SessionError> {
+    fn begin_login(
+        &self,
+        request: UnauthenticatedLoginRequest,
+        secret: niralis_session::LoginSecret,
+        factory: &dyn LoginBackendFactory,
+    ) -> Result<StartedSession, SessionError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        let username = factory.create_unbound()?.authenticate(&request, secret)?;
         self.active_during_launch
             .store(self.state.active.load(Ordering::SeqCst), Ordering::SeqCst);
         if self.fail {
             Err(SessionError::StartFailed)
         } else {
             Ok(StartedSession {
-                username: request.username,
+                username,
                 session: request.session,
             })
         }

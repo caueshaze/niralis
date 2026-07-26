@@ -1,6 +1,6 @@
     #[test]
     fn production_loop_cooperates_for_real_worker_signals() {
-        let _lock = SIGNAL_TEST_LOCK.lock().unwrap();
+        let _lock = lock_signal_tests();
         run_signal_case(
             libc::SIGTERM,
             crate::termination::WorkerTerminationSignal::Sigterm,
@@ -17,7 +17,7 @@
 
     #[test]
     fn production_loop_deadline_and_infrastructure_retain_ownership() {
-        let _lock = SIGNAL_TEST_LOCK.lock().unwrap();
+        let _lock = lock_signal_tests();
         let signals = crate::termination::WorkerSignalFd::install().unwrap();
         set_worker_signal_fd(signals.as_raw_fd());
         for failure in [
@@ -37,14 +37,16 @@
                 0
             );
             let result = wait_for_session_with_grace(
-                None,
-                &runner,
-                "worker".into(),
-                1,
-                1,
-                &scope,
+                SessionWaitContext {
+                    listener: None,
+                    child_runner: &runner,
+                    worker_id: "worker".into(),
+                    session_pid: 1,
+                    session_pgid: 1,
+                    authoritative_scope: &scope,
+                    expected_control_uid: unsafe { libc::getuid() },
+                },
                 Duration::from_millis(1),
-                unsafe { libc::getuid() },
             )
             .unwrap();
             if failure.is_some() {
@@ -70,7 +72,7 @@
 
     #[test]
     fn simultaneous_boundary_and_deadline_prefers_revalidated_candidate() {
-        let _lock = SIGNAL_TEST_LOCK.lock().unwrap();
+        let _lock = lock_signal_tests();
         let signals = crate::termination::WorkerSignalFd::install().unwrap();
         set_worker_signal_fd(signals.as_raw_fd());
         let runner = EventRunner {
@@ -80,14 +82,16 @@
         let scope = EventScope::new(runner.pidfd.as_raw_fd(), true, None);
         unsafe { libc::pthread_kill(libc::pthread_self(), libc::SIGTERM) };
         let result = wait_for_session_with_grace(
-            None,
-            &runner,
-            "worker".into(),
-            1,
-            1,
-            &scope,
+            SessionWaitContext {
+                listener: None,
+                child_runner: &runner,
+                worker_id: "worker".into(),
+                session_pid: 1,
+                session_pgid: 1,
+                authoritative_scope: &scope,
+                expected_control_uid: unsafe { libc::getuid() },
+            },
             Duration::from_nanos(1),
-            unsafe { libc::getuid() },
         )
         .unwrap();
         assert!(matches!(
@@ -104,7 +108,7 @@
 
     #[test]
     fn replacement_during_observation_is_recovery_required() {
-        let _lock = SIGNAL_TEST_LOCK.lock().unwrap();
+        let _lock = lock_signal_tests();
         let signals = crate::termination::WorkerSignalFd::install().unwrap();
         set_worker_signal_fd(signals.as_raw_fd());
         let runner = EventRunner {
@@ -115,14 +119,16 @@
         scope.observe_fail = Some(crate::payload_scope::PayloadScopeError::UnitReplaced);
         unsafe { libc::pthread_kill(libc::pthread_self(), libc::SIGTERM) };
         let result = wait_for_session_with_grace(
-            None,
-            &runner,
-            "worker".into(),
-            1,
-            1,
-            &scope,
+            SessionWaitContext {
+                listener: None,
+                child_runner: &runner,
+                worker_id: "worker".into(),
+                session_pid: 1,
+                session_pgid: 1,
+                authoritative_scope: &scope,
+                expected_control_uid: unsafe { libc::getuid() },
+            },
             Duration::from_millis(100),
-            unsafe { libc::getuid() },
         )
         .unwrap();
         assert!(
@@ -133,7 +139,7 @@
 
     #[test]
     fn simultaneous_supervisor_disconnect_and_signal_is_single_lifecycle() {
-        let _lock = SIGNAL_TEST_LOCK.lock().unwrap();
+        let _lock = lock_signal_tests();
         let signals = crate::termination::WorkerSignalFd::install().unwrap();
         set_worker_signal_fd(signals.as_raw_fd());
         let supervisor = event_fd();
@@ -146,14 +152,16 @@
         let scope = EventScope::new(runner.pidfd.as_raw_fd(), true, None);
         unsafe { libc::pthread_kill(libc::pthread_self(), libc::SIGTERM) };
         let result = wait_for_session_with_grace(
-            None,
-            &runner,
-            "worker".into(),
-            1,
-            1,
-            &scope,
+            SessionWaitContext {
+                listener: None,
+                child_runner: &runner,
+                worker_id: "worker".into(),
+                session_pid: 1,
+                session_pgid: 1,
+                authoritative_scope: &scope,
+                expected_control_uid: unsafe { libc::getuid() },
+            },
             Duration::from_millis(100),
-            unsafe { libc::getuid() },
         )
         .unwrap();
         assert!(matches!(
@@ -171,4 +179,3 @@
         set_supervisor_channel_fd(-1);
         set_worker_signal_fd(-1);
     }
-

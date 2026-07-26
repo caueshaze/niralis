@@ -149,7 +149,7 @@ fn launcher_receives_validated_session_and_rate_limit_still_behaves() {
 }
 
 #[test]
-fn authenticated_transaction_stays_alive_during_successful_launch() {
+fn launcher_owns_authentication_during_successful_login() {
     let auth = TrackingAuthenticator::succeeds();
     let state = auth.state.clone();
     let launcher = TrackingSessionLauncher::succeeds(state.clone());
@@ -167,13 +167,13 @@ fn authenticated_transaction_stays_alive_during_successful_launch() {
         NiralisResponse::LoginOk { .. }
     ));
     assert_eq!(launch_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(alive_during_launch.load(Ordering::SeqCst), 1);
+    assert_eq!(alive_during_launch.load(Ordering::SeqCst), 0);
     assert_eq!(state.active.load(Ordering::SeqCst), 0);
     assert_eq!(state.drops.load(Ordering::SeqCst), 1);
 }
 
 #[test]
-fn authenticated_transaction_is_dropped_after_launcher_error() {
+fn launcher_drops_authentication_before_reporting_launch_error() {
     let auth = TrackingAuthenticator::succeeds();
     let state = auth.state.clone();
     let launcher = TrackingSessionLauncher::fails(state.clone());
@@ -193,13 +193,13 @@ fn authenticated_transaction_is_dropped_after_launcher_error() {
         }
     );
     assert_eq!(launch_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(alive_during_launch.load(Ordering::SeqCst), 1);
+    assert_eq!(alive_during_launch.load(Ordering::SeqCst), 0);
     assert_eq!(state.active.load(Ordering::SeqCst), 0);
     assert_eq!(state.drops.load(Ordering::SeqCst), 1);
 }
 
 #[test]
-fn authentication_failure_does_not_create_transaction() {
+fn authentication_failure_returns_from_launcher_without_leaking_state() {
     let auth = TrackingAuthenticator::fails();
     let state = auth.state.clone();
     let launcher = TrackingSessionLauncher::succeeds(state.clone());
@@ -212,7 +212,7 @@ fn authentication_failure_does_not_create_transaction() {
     );
 
     assert_eq!(handler.handle(login_request("bad", "niri")), login_failed());
-    assert_eq!(launch_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(launch_calls.load(Ordering::SeqCst), 1);
     assert_eq!(state.active.load(Ordering::SeqCst), 0);
     assert_eq!(state.drops.load(Ordering::SeqCst), 0);
 }

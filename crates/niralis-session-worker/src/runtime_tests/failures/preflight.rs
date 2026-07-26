@@ -62,7 +62,7 @@ fn pam_worker_rejects_an_inherited_logind_session_before_pam_or_vt() {
             logind_resolver: &ExistingSessionLogind,
             virtual_terminal_allocator: &StubVtAllocator,
             runtime_dir_validator: &StubRuntimeDirValidator,
-            selinux_context_manager: &StubSelinux::default(),
+            selinux_context_manager: &StubSelinux,
             payload_scope_manager: &StubPayloadScopeManager,
             launch_phase_gate: &crate::runtime::NoopLaunchPhaseGate,
         },

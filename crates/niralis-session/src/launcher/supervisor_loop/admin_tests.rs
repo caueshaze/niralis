@@ -187,7 +187,7 @@ fn controlled_success_removes_record_and_publishes_free_last() {
         crate::RecoveryAdminResponse::RetryAccepted { .. }
     ));
     assert!(ledger.lock().unwrap().records.is_empty());
-    assert!(matches!(state.seat, SeatLifecycle::Free));
+    assert!(state.admission.is_free());
     assert_eq!(
         host.events().last(),
         Some(&ControlledRecoveryAdminEvent::RuntimeRelease)
@@ -214,7 +214,7 @@ fn controlled_runtime_failure_keeps_resolved_record_and_quarantine() {
         record.operation_ledger.runtime_release,
         DurableOperationState::Failed { .. }
     ));
-    assert!(!matches!(state.seat, SeatLifecycle::Free));
+    assert!(!state.admission.is_free());
     assert_eq!(
         host.events().last(),
         Some(&ControlledRecoveryAdminEvent::RuntimeRelease)

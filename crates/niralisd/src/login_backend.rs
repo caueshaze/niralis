@@ -4,7 +4,8 @@ mod pam_worker;
 use niralis_auth::MockAuthenticator;
 use niralis_discovery::ResolvedSessionLaunchSpec;
 use niralis_protocol::SessionInfo;
-use niralis_session::{RecoveryAdminRequest, RecoveryAdminResponse, StartedSession, WorkerSecret};
+use niralis_session::{RecoveryAdminRequest, RecoveryAdminResponse, StartedSession};
+use std::sync::atomic::{AtomicU64, Ordering};
 use thiserror::Error;
 use zeroize::Zeroizing;
 
@@ -12,7 +13,7 @@ use crate::config::{AuthBackend, Config, SessionLauncherBackend};
 use crate::error::{NiralisdError, Result};
 use crate::session_launcher::{build_session_launcher, build_worker_session_launcher};
 
-pub use local::LocalLoginBackend;
+pub use local::{LocalLoginBackend, LocalLoginBackendFactory};
 pub use pam_worker::PamWorkerLoginBackend;
 
 pub struct LoginAttempt {
@@ -20,6 +21,18 @@ pub struct LoginAttempt {
     pub password: Zeroizing<String>,
     pub session: SessionInfo,
     pub launch_spec: ResolvedSessionLaunchSpec,
+    pub attempt_id: u64,
+}
+
+static NEXT_LOGIN_ATTEMPT_ID: AtomicU64 = AtomicU64::new(1);
+
+pub(crate) fn next_login_attempt_id() -> u64 {
+    let id = NEXT_LOGIN_ATTEMPT_ID.fetch_add(1, Ordering::Relaxed);
+    if id == 0 {
+        NEXT_LOGIN_ATTEMPT_ID.fetch_add(1, Ordering::Relaxed)
+    } else {
+        id
+    }
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -116,9 +129,4 @@ pub(crate) fn map_session_error(error: niralis_session::SessionError) -> LoginBa
         }
         _ => LoginBackendError::InfrastructureFailed,
     }
-}
-
-pub(crate) fn into_worker_secret(password: Zeroizing<String>) -> WorkerSecret {
-    let mut password = password;
-    WorkerSecret::new(std::mem::take(&mut *password))
 }

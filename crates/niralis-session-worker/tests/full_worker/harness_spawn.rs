@@ -15,15 +15,11 @@ impl FullWorker {
     }
 
     fn spawn_process(mode: &str, with_control: bool) -> Self {
+        const HARNESS_FD: libc::c_int = 6;
+        const SUPERVISOR_FD: libc::c_int = 4;
         let (parent_harness, child_harness) = UnixStream::pair().expect("harness socketpair");
         let (parent_supervisor, child_supervisor) =
             UnixStream::pair().expect("supervisor socketpair");
-        parent_harness
-            .set_read_timeout(Some(HARNESS_TIMEOUT))
-            .expect("bounded harness timeout");
-        parent_harness
-            .set_write_timeout(Some(HARNESS_TIMEOUT))
-            .expect("bounded harness write timeout");
         let inherited_harness = duplicate_inherited_fd(child_harness.as_raw_fd());
         let inherited_supervisor = duplicate_inherited_fd(child_supervisor.as_raw_fd());
         drop(child_harness);
@@ -36,22 +32,34 @@ impl FullWorker {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
-            .env("NIRALIS_FULL_WORKER_HARNESS_FD", "3")
-            .env(niralis_session::WORKER_SUPERVISOR_FD_ENV, "4");
+            .env("NIRALIS_FULL_WORKER_HARNESS_FD", HARNESS_FD.to_string())
+            .env(
+                niralis_session::WORKER_SUPERVISOR_FD_ENV,
+                SUPERVISOR_FD.to_string(),
+            );
         unsafe {
             command.pre_exec(move || {
-                if harness_fd != 3 && libc::dup2(harness_fd, 3) < 0 {
+                if harness_fd != HARNESS_FD && libc::dup2(harness_fd, HARNESS_FD) < 0 {
                     return Err(std::io::Error::last_os_error());
                 }
-                let flags = libc::fcntl(3, libc::F_GETFD);
-                if flags < 0 || libc::fcntl(3, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+                let flags = libc::fcntl(HARNESS_FD, libc::F_GETFD);
+                if flags < 0
+                    || libc::fcntl(HARNESS_FD, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0
+                {
                     return Err(std::io::Error::last_os_error());
                 }
-                if libc::dup2(supervisor_fd, 4) < 0 {
+                if supervisor_fd != SUPERVISOR_FD && libc::dup2(supervisor_fd, SUPERVISOR_FD) < 0
+                {
                     return Err(std::io::Error::last_os_error());
                 }
-                let flags = libc::fcntl(4, libc::F_GETFD);
-                if flags < 0 || libc::fcntl(4, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+                let flags = libc::fcntl(SUPERVISOR_FD, libc::F_GETFD);
+                if flags < 0
+                    || libc::fcntl(
+                        SUPERVISOR_FD,
+                        libc::F_SETFD,
+                        flags & !libc::FD_CLOEXEC,
+                    ) < 0
+                {
                     return Err(std::io::Error::last_os_error());
                 }
                 Ok(())
@@ -100,7 +108,7 @@ impl FullWorker {
     fn send_request(&mut self, mut stdin: ChildStdin) {
         let request = WorkerEnvelope {
             version: niralis_session::WORKER_PROTOCOL_VERSION,
-            message: WorkerRequest::PamSession {
+            message: WorkerRequest::PamSession(niralis_session::WorkerPamSessionRequest {
                 request: SessionRequest {
                     username: "fixture-user".into(),
                     session: SessionInfo {
@@ -109,19 +117,20 @@ impl FullWorker {
                         kind: SessionKind::Wayland,
                     },
                 },
-                launch_plan: SessionExecPlan {
+                launch_plan: Box::new(SessionExecPlan {
                     source_path: b"/fixture.desktop".to_vec(),
                     executable: b"/bin/true".to_vec(),
                     argv: vec![b"true".to_vec()],
-                },
+                }),
                 pam_service: "niralis-fixture".into(),
                 password: WorkerSecret::new("fixture-secret".into()),
-                session_child_path: "/fixture/session-child".into(),
-                session_probe_path: "/fixture/session-probe".into(),
-                control_path: self.control_path.clone(),
+                session_child_path: Box::new("/fixture/session-child".into()),
+                session_probe_path: Box::new("/fixture/session-probe".into()),
+                control_path: Box::new(self.control_path.clone()),
                 worker_id: "fixture-worker".into(),
                 launcher_pid: std::process::id(),
-            },
+                transaction: Box::new(niralis_session::WorkerTransactionIdentity { transaction_id: "fixture-worker".into(), admission_attempt_id: 1, lifecycle_id: "fixture-worker".into(), seat: "seat0".into(), seat_generation: 1, stage: "reserved".into() }),
+            }),
         };
         serde_json::to_writer(&mut stdin, &request).expect("serialize worker request");
         stdin.write_all(b"\n").expect("frame worker request");
@@ -168,7 +177,7 @@ impl FullWorker {
         assert_eq!(envelope.version, niralis_session::WORKER_PROTOCOL_VERSION);
         assert!(matches!(
             envelope.message,
-            WorkerResponse::Preparing { ref worker_id } if worker_id == "fixture-worker"
+            WorkerResponse::Preparing { ref worker_id, .. } if worker_id == "fixture-worker"
         ));
     }
 
@@ -199,6 +208,11 @@ impl FullWorker {
         niralis_session::write_control_request(
             stream,
             WorkerControlRequest::PayloadScopeRegistered {
+                transaction: niralis_session::ControlTransactionIdentity {
+                    transaction_id: "fixture-worker".into(), admission_attempt_id: 1,
+                    lifecycle_id: "fixture-worker".into(), seat: "seat0".into(),
+                    seat_generation: 1, stage: "scope_registered".into(), sequence: 1,
+                },
                 worker_id: "fixture-worker".into(),
                 expected_worker_pid: self.child.id(),
                 registration_nonce: registration_nonce.to_owned(),

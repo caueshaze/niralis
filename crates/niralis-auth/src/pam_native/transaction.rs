@@ -33,7 +33,7 @@ impl NativePamTransaction {
             return Err(());
         }
         let item = pam::get_item(transaction.handle_mut(), PamItemType::User).map_err(|_| ())?;
-        let user_ptr: *const libc::c_char = unsafe { std::mem::transmute(item) };
+        let user_ptr = item as *const libc::c_void as *const libc::c_char;
         let username = unsafe { CStr::from_ptr(user_ptr) }
             .to_str()
             .map_err(|_| ())?

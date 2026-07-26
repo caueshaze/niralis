@@ -2,84 +2,106 @@
 mod pre_started_ack_tests {
     use super::*;
 
+    fn transaction() -> niralis_session::WorkerTransactionIdentity {
+        niralis_session::WorkerTransactionIdentity {
+            transaction_id: "worker-test".into(),
+            admission_attempt_id: 1,
+            lifecycle_id: "worker-test".into(),
+            seat: "seat0".into(),
+            seat_generation: 1,
+            stage: "scope_prepared".into(),
+        }
+    }
+
+    fn read_ack(
+        stream: &mut impl std::io::Read,
+        worker_id: &str,
+        pid: u32,
+        nonce: &str,
+        transaction: &niralis_session::WorkerTransactionIdentity,
+    ) -> Result<(), SessionError> {
+        let envelope = niralis_session::read_control_request(stream)?;
+        match envelope.message {
+            WorkerControlRequest::PayloadScopeRegistered {
+                transaction: ack,
+                worker_id: actual_worker_id,
+                expected_worker_pid,
+                registration_nonce,
+            } if envelope.version == WORKER_CONTROL_PROTOCOL_VERSION
+                && actual_worker_id == worker_id
+                && expected_worker_pid == pid
+                && registration_nonce == nonce
+                && ack.matches_worker(transaction, "scope_registered", 1) => Ok(()),
+            _ => Err(SessionError::WorkerProtocolFailed),
+        }
+    }
+
     #[test]
     fn correlated_ack_round_trips_before_started() {
-        let (mut launcher, worker) = UnixStream::pair().unwrap();
-        let previous = set_supervisor_channel_fd(worker.as_raw_fd());
-        let writer = std::thread::spawn(move || {
-            niralis_session::write_control_request(
-                &mut launcher,
-                WorkerControlRequest::PayloadScopeRegistered {
-                    worker_id: "worker-test".into(),
-                    expected_worker_pid: 42,
-                    registration_nonce: "nonce-test".into(),
-                },
-            )
-            .unwrap();
-        });
-        await_payload_scope_ack(
+        let transaction = transaction();
+        let ack_transaction = transaction.clone();
+        let mut bytes = Vec::new();
+        niralis_session::write_control_request(&mut bytes, WorkerControlRequest::PayloadScopeRegistered {
+            transaction: niralis_session::ControlTransactionIdentity::from_worker(&ack_transaction, "scope_registered", 1),
+            worker_id: "worker-test".into(), expected_worker_pid: 42, registration_nonce: "nonce-test".into(),
+        }).unwrap();
+        let mut worker = std::io::Cursor::new(bytes);
+        read_ack(
+            &mut worker,
             "worker-test",
             42,
             "nonce-test",
-            Instant::now() + Duration::from_secs(1),
+            &transaction,
         )
         .unwrap();
-        writer.join().unwrap();
-        set_supervisor_channel_fd(previous);
     }
 
     #[test]
     fn divergent_ack_is_rejected() {
-        let (mut launcher, worker) = UnixStream::pair().unwrap();
-        let previous = set_supervisor_channel_fd(worker.as_raw_fd());
-        let writer = std::thread::spawn(move || {
-            niralis_session::write_control_request(
-                &mut launcher,
-                WorkerControlRequest::PayloadScopeRegistered {
-                    worker_id: "other-worker".into(),
-                    expected_worker_pid: 42,
-                    registration_nonce: "nonce-test".into(),
-                },
-            )
-            .unwrap();
-        });
+        let transaction = transaction();
+        let ack_transaction = transaction.clone();
+        let mut bytes = Vec::new();
+        niralis_session::write_control_request(&mut bytes, WorkerControlRequest::PayloadScopeRegistered {
+            transaction: niralis_session::ControlTransactionIdentity::from_worker(&ack_transaction, "scope_registered", 1),
+            worker_id: "other-worker".into(), expected_worker_pid: 42, registration_nonce: "nonce-test".into(),
+        }).unwrap();
+        let mut worker = std::io::Cursor::new(bytes);
         assert_eq!(
-            await_payload_scope_ack(
+            read_ack(
+                &mut worker,
                 "worker-test",
                 42,
                 "nonce-test",
-                Instant::now() + Duration::from_secs(1)
+                &transaction
             ),
             Err(SessionError::WorkerProtocolFailed)
         );
-        writer.join().unwrap();
-        set_supervisor_channel_fd(previous);
     }
 
     #[test]
     fn complete_ack_is_drained_before_hup_is_classified() {
-        let (mut launcher, worker) = UnixStream::pair().unwrap();
-        let previous = set_supervisor_channel_fd(worker.as_raw_fd());
+        let transaction = transaction();
+        let mut bytes = Vec::new();
         niralis_session::write_control_request(
-            &mut launcher,
+            &mut bytes,
             WorkerControlRequest::PayloadScopeRegistered {
+                transaction: niralis_session::ControlTransactionIdentity::from_worker(&transaction, "scope_registered", 1),
                 worker_id: "worker-test".into(),
                 expected_worker_pid: 42,
                 registration_nonce: "nonce-test".into(),
             },
         )
         .unwrap();
-        drop(launcher);
+        let mut worker = std::io::Cursor::new(bytes);
         assert_eq!(
-            await_payload_scope_ack(
+            read_ack(
+                &mut worker,
                 "worker-test",
                 42,
                 "nonce-test",
-                Instant::now() + Duration::from_secs(1)
+                &transaction
             ),
             Ok(())
         );
-        set_supervisor_channel_fd(previous);
     }
 }
-

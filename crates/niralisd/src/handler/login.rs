@@ -6,7 +6,7 @@ use tracing::{debug, info};
 use zeroize::Zeroizing;
 
 use super::DaemonHandler;
-use crate::login_backend::{LoginAttempt, LoginBackend, LoginBackendError};
+use crate::login_backend::{next_login_attempt_id, LoginAttempt, LoginBackend, LoginBackendError};
 
 pub(super) fn handle_login<L, U, D>(
     handler: &DaemonHandler<L, U, D>,
@@ -43,6 +43,7 @@ where
         password,
         session: session.clone(),
         launch_spec,
+        attempt_id: next_login_attempt_id(),
     }) {
         Ok(_started) => {
             reset_rate_limit(handler, &username);

@@ -70,8 +70,8 @@ fn main() {
     groups.sort_unstable();
     groups.dedup();
     let gid = unsafe { libc::getgid() as u32 };
-    groups.retain(|group| *group as u32 != gid);
-    let groups: Vec<u32> = groups.into_iter().map(|group| group as u32).collect();
+    groups.retain(|group| *group != gid);
+    let groups: Vec<u32> = groups;
     let (mut ruid, mut euid, mut suid) = (0, 0, 0);
     let (mut rgid, mut egid, mut sgid) = (0, 0, 0);
     if unsafe { libc::getresuid(&mut ruid, &mut euid, &mut suid) } != 0
@@ -170,9 +170,9 @@ fn main() {
                 saved_gid: sgid,
                 supplementary_gids: groups,
             },
-            isolation_proof: SessionChildIsolationProof::from(&audit),
+            isolation_proof: Box::new(SessionChildIsolationProof::from(&audit)),
             process_identity: SessionProcessIdentityProof { pid, sid, pgid },
-            runtime_environment: SessionRuntimeEnvironmentProof {
+            runtime_environment: Box::new(SessionRuntimeEnvironmentProof {
                 home,
                 user: match std::env::var("USER") {
                     Ok(value) => value,
@@ -200,9 +200,9 @@ fn main() {
                 user_bus_connected: true,
                 cwd,
                 exec_plan: handoff.exec_plan.clone(),
-            },
+            }),
             exec_probe_version: SESSION_EXEC_PROBE_VERSION,
-            terminal_proof,
+            terminal_proof: Box::new(terminal_proof),
         },
     };
     let mut out = std::io::stdout().lock();

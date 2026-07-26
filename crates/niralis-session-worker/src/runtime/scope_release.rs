@@ -10,6 +10,7 @@ fn request_payload_scope_release<W: Write>(
     worker_id: &str,
     registration_nonce: &str,
     identity: &niralis_session::PayloadScopeIdentity,
+    transaction: &niralis_session::WorkerTransactionIdentity,
     local_cleanup_succeeded: bool,
     deadline: Instant,
 ) -> Result<PayloadScopeReleaseOutcome, SessionError> {
@@ -25,6 +26,11 @@ fn request_payload_scope_release<W: Write>(
     niralis_session::write_control_request(
         &mut stream,
         WorkerControlRequest::PayloadScopeReleaseRequested {
+            transaction: niralis_session::ControlTransactionIdentity::from_worker(
+                transaction,
+                "scope_release_requested",
+                2,
+            ),
             worker_id: worker_id.to_owned(),
             expected_worker_pid: std::process::id(),
             registration_nonce: registration_nonce.to_owned(),
@@ -64,19 +70,13 @@ fn request_payload_scope_release<W: Write>(
         }
         return Err(SessionError::WorkerIoFailed);
     }
-    let read_timeout = deadline
-        .checked_duration_since(Instant::now())
-        .filter(|timeout| !timeout.is_zero())
-        .ok_or(SessionError::WorkerTimedOut)?;
-    stream
-        .set_read_timeout(Some(read_timeout))
-        .map_err(|_| SessionError::WorkerIoFailed)?;
     let response = read_control_request(&mut stream)?;
     if response.version != WORKER_CONTROL_PROTOCOL_VERSION {
         return Err(SessionError::WorkerProtocolFailed);
     }
     match response.message {
         WorkerControlRequest::PayloadScopeReleased {
+            transaction: response_transaction,
             worker_id: response_worker_id,
             expected_worker_pid,
             registration_nonce: response_registration_nonce,
@@ -84,12 +84,14 @@ fn request_payload_scope_release<W: Write>(
         } if response_worker_id == worker_id
             && expected_worker_pid == std::process::id()
             && response_registration_nonce == registration_nonce
-            && response_release_nonce == release_nonce =>
+            && response_release_nonce == release_nonce
+            && response_transaction.matches_worker(transaction, "scope_released", 3) =>
         {
             info!(unit = %identity.unit_name, "payload scope release independently verified and acknowledged");
             Ok(PayloadScopeReleaseOutcome::Released)
         }
         WorkerControlRequest::PayloadScopeRecoveryRequired {
+            transaction: response_transaction,
             worker_id: response_worker_id,
             expected_worker_pid,
             registration_nonce: response_registration_nonce,
@@ -98,7 +100,8 @@ fn request_payload_scope_release<W: Write>(
         } if response_worker_id == worker_id
             && expected_worker_pid == std::process::id()
             && response_registration_nonce == registration_nonce
-            && response_release_nonce == release_nonce =>
+            && response_release_nonce == release_nonce
+            && response_transaction.matches_worker(transaction, "scope_recovery_required", 3) =>
         {
             warn!(?reason, unit = %identity.unit_name, "supervisor could not prove payload scope cleanup; recovery required");
             Ok(PayloadScopeReleaseOutcome::RecoveryRequired)

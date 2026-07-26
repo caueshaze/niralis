@@ -1,6 +1,6 @@
     #[test]
     fn forced_observer_and_timer_ready_prefers_reap_and_empty_proof() {
-        let _lock = SIGNAL_TEST_LOCK.lock().unwrap();
+        let _lock = lock_signal_tests();
         let signals = crate::termination::WorkerSignalFd::install().unwrap();
         set_worker_signal_fd(signals.as_raw_fd());
         set_supervisor_channel_fd(-1);
@@ -36,7 +36,7 @@
 
     #[test]
     fn forced_leader_and_timer_ready_preserves_exit_without_false_proof() {
-        let _lock = SIGNAL_TEST_LOCK.lock().unwrap();
+        let _lock = lock_signal_tests();
         let signals = crate::termination::WorkerSignalFd::install().unwrap();
         set_worker_signal_fd(signals.as_raw_fd());
         set_supervisor_channel_fd(-1);

@@ -49,6 +49,8 @@ pub fn emit_fixture_event(event: &str) {
             let _ = stream.write_all(b"\n");
             let _ = stream.flush();
         }
+    } else {
+        eprintln!("fixture event={event}");
     }
 }
 
@@ -79,6 +81,7 @@ pub fn run_full_worker_fixture(
     crate::runtime::set_fixture_grace_period(Duration::from_millis(250));
     crate::runtime::authorize_fixture_launch_watchdog();
     crate::runtime::set_fixture_control_uid(unsafe { libc::getuid() });
+    crate::runtime::allow_unvalidated_supervisor_peer_for_test(true);
 
     let mode = match mode {
         "cooperative" => FixtureMode::Cooperative,

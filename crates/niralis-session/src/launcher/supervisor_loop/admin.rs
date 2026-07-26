@@ -126,6 +126,9 @@ impl SupervisorLoopState {
                         Some(record.sequence.saturating_add(1)),
                     ));
                 }
+                self.admission
+                    .enter_quarantine_for_admin(&record_id)
+                    .map_err(|_| SessionError::SessionSeatUnavailable)?;
                 let id = next_attempt_id(&record);
                 ledger
                     .append_vt_recovery_attempt(
@@ -166,7 +169,7 @@ impl SupervisorLoopState {
                             .map_err(|_| SessionError::PersistentRecoveryUnavailable)?;
                         if let Err(reason) = finalize_admin_success(
                             &self.recovery_admin_host,
-                            &mut self.seat,
+                            &mut self.admission,
                             &mut ledger,
                             &record_id,
                             id,

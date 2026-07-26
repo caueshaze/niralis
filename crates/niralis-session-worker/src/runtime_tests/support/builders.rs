@@ -13,7 +13,7 @@ impl UnixIdentityResolver for StubIdentityResolver {
 pub(super) fn request() -> WorkerEnvelope<WorkerRequest> {
     WorkerEnvelope {
         version: niralis_session::WORKER_PROTOCOL_VERSION,
-        message: WorkerRequest::PamSession {
+        message: WorkerRequest::PamSession(niralis_session::WorkerPamSessionRequest {
             request: SessionRequest {
                 username: "login-alias".to_owned(),
                 session: SessionInfo {
@@ -24,17 +24,18 @@ pub(super) fn request() -> WorkerEnvelope<WorkerRequest> {
             },
             pam_service: "niralis".to_owned(),
             password: WorkerSecret::new("secret".to_owned()),
-            session_child_path: "/usr/libexec/niralis-session-child".into(),
-            session_probe_path: "/usr/libexec/niralis-session-probe".into(),
-            control_path: std::path::PathBuf::new(),
+            session_child_path: Box::new("/usr/libexec/niralis-session-child".into()),
+            session_probe_path: Box::new("/usr/libexec/niralis-session-probe".into()),
+            control_path: Box::new(std::path::PathBuf::new()),
             worker_id: String::new(),
             launcher_pid: 0,
-            launch_plan: niralis_session::SessionExecPlan {
+            transaction: Box::new(niralis_session::WorkerTransactionIdentity { transaction_id: String::new(), admission_attempt_id: 1, lifecycle_id: String::new(), seat: "seat0".into(), seat_generation: 1, stage: "reserved".into() }),
+            launch_plan: Box::new(niralis_session::SessionExecPlan {
                 source_path: b"/source.desktop".to_vec(),
                 executable: b"/bin/true".to_vec(),
                 argv: vec![b"true".to_vec()],
-            },
-        },
+            }),
+        }),
     }
 }
 

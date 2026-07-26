@@ -1,9 +1,24 @@
+use super::admission::AdmissionRollbackLease;
 use super::*;
 use tracing::{debug, warn};
 
 pub(super) struct RunningRegistration {
+    pub(super) admission_transaction: crate::launcher::login_transaction::PendingLaunchTransaction,
     pub(super) runtime_id: RuntimeSessionId,
     pub(super) supervisor_channel: UnixStream,
+    #[cfg(any(
+        test,
+        feature = "integration-test-control",
+        feature = "supervisor-test-fixtures"
+    ))]
+    pub(super) fixture_supervisor_transport:
+        Option<crate::worker_attempt::FixtureSupervisorTransportHandle>,
+    #[cfg(any(
+        test,
+        feature = "integration-test-control",
+        feature = "supervisor-test-fixtures"
+    ))]
+    pub(super) fixture_inherited_supervisor_control: bool,
     pub(super) session: StartedSession,
     pub(super) session_pid: u32,
     pub(super) session_pgid: u32,
@@ -22,8 +37,21 @@ impl SupervisorLoopState {
         registration: RunningRegistration,
     ) -> Result<(), SessionError> {
         let RunningRegistration {
+            mut admission_transaction,
             runtime_id,
             supervisor_channel,
+            #[cfg(any(
+                test,
+                feature = "integration-test-control",
+                feature = "supervisor-test-fixtures"
+            ))]
+            fixture_supervisor_transport,
+            #[cfg(any(
+                test,
+                feature = "integration-test-control",
+                feature = "supervisor-test-fixtures"
+            ))]
+            fixture_inherited_supervisor_control,
             session,
             session_pid,
             session_pgid,
@@ -35,22 +63,28 @@ impl SupervisorLoopState {
             control_dir,
             control_sender,
         } = registration;
-        let index = self
-            .pending
-            .iter()
-            .position(|entry| {
-                entry.record.lifecycle_id == worker_id
-                    && entry.record.worker_pid
-                        == entry.child.lock().ok().map(|child| child.id()).unwrap_or(0)
-                    && entry.record.payload_identity() == Some(&payload_scope)
-                    && matches!(entry.release, PendingReleaseState::NotRequested)
-                    && !entry.terminal_before_started
-                    && matches!(
-                        entry.record.state,
-                        SupervisorRecoveryState::PayloadRegistered { .. }
-                    )
-            })
-            .ok_or(SessionError::WorkerProtocolFailed)?;
+        let lifecycle_id = admission_transaction.lifecycle_id().to_owned();
+        if lifecycle_id != worker_id {
+            return Err(SessionError::WorkerProtocolFailed);
+        }
+        let index = self.pending.iter().position(|entry| {
+            entry.record.lifecycle_id == worker_id
+                && entry.record.worker_pid
+                    == entry.child.lock().ok().map(|child| child.id()).unwrap_or(0)
+                && entry.record.payload_identity() == Some(&payload_scope)
+                && matches!(entry.release, PendingReleaseState::NotRequested)
+                && !entry.terminal_before_started
+                && matches!(
+                    entry.record.state,
+                    SupervisorRecoveryState::PayloadRegistered { .. }
+                )
+        });
+        let Some(index) = index else {
+            let _ = self.admission.cancel(AdmissionRollbackLease::Pending(
+                admission_transaction.pending_lease()?,
+            ));
+            return Err(SessionError::WorkerProtocolFailed);
+        };
         let mut entry = self.pending.swap_remove(index);
         let state = entry.record.take_state_for_transition();
         let SupervisorRecoveryState::PayloadRegistered { payload, .. } = state else {
@@ -64,11 +98,11 @@ impl SupervisorLoopState {
                     payload: Box::new(payload),
                 },
             };
-            self.seat = SeatLifecycle::Quarantined {
-                lifecycle_id: worker_id,
-                stage: EmergencyRecoveryStage::RecoveryRecordValidation,
-                reason: SupervisorRecoveryError::InvalidRecord,
-            };
+            let _ = self.admission.enter_quarantine_from_pending(
+                admission_transaction.pending_lease()?,
+                EmergencyRecoveryStage::RecoveryRecordValidation,
+                SupervisorRecoveryError::InvalidRecord,
+            );
             self.quarantined.push(entry.record);
             kill_shared_worker(&entry.child);
             return Err(SessionError::WorkerProtocolFailed);
@@ -79,14 +113,30 @@ impl SupervisorLoopState {
         };
         self.persist_transition(&worker_id, "started")?;
         info!(worker_id, "worker reached durable started state");
+        let recovery = self.recovery_admission_state("seat0");
+        let receipt = admission_transaction.commit(&mut self.admission, recovery)?;
+        let admission = self.admission.promote_committed_to_running(receipt)?;
         self.children.push(SupervisedWorker {
+            admission,
             record: entry.record,
             child: entry.child,
-            _supervisor_channel: supervisor_channel,
+            supervisor_channel,
+            #[cfg(any(
+                test,
+                feature = "integration-test-control",
+                feature = "supervisor-test-fixtures"
+            ))]
+            fixture_supervisor_transport,
+            #[cfg(any(
+                test,
+                feature = "integration-test-control",
+                feature = "supervisor-test-fixtures"
+            ))]
+            fixture_inherited_supervisor_control,
             session,
             session_pid,
             session_pgid,
-            worker_id,
+            worker_id: worker_id.clone(),
             registration_nonce,
             control_path,
             _control_dir: control_dir,
@@ -96,7 +146,7 @@ impl SupervisorLoopState {
             .children
             .last()
             .expect("just pushed")
-            ._supervisor_channel
+            .supervisor_channel
             .try_clone()
             .map_err(|_| SessionError::WorkerIoFailed)?;
         super::running_control::spawn_running_control_reader(reader, control_sender);
@@ -137,64 +187,6 @@ impl SupervisorLoopState {
             }
         }
     }
-
-    pub(super) fn finish_exited_worker(&mut self, index: usize, status: ExitStatus) {
-        let mut worker = self.children.swap_remove(index);
-        if worker.terminal_vt_reported_busy {
-            info!(worker_id = %worker.worker_id, "worker reported durable VT EBUSY; preserving quarantine without emergency recovery");
-            self.seat = SeatLifecycle::Quarantined {
-                lifecycle_id: worker.record.lifecycle_id.clone(),
-                stage: EmergencyRecoveryStage::VtRecovery,
-                reason: SupervisorRecoveryError::VtDisallocateBusy,
-            };
-            self.quarantined.push(worker.record);
-            return;
-        }
-        if status.success()
-            && finalize_clean_worker_exit(
-                &mut worker.record,
-                status,
-                self.recovery_provider.as_ref(),
-            )
-            .is_ok()
-            && self
-                .resolve_clean_worker_record(&worker.record.lifecycle_id)
-                .is_ok()
-        {
-            debug!(?status, username = %worker.session.username, session_pid = worker.session_pid, "session worker exited and was reaped after verified clean finalization");
-            self.seat = SeatLifecycle::Free;
-            return;
-        }
-        warn!(worker_pid = worker.record.worker_pid, status = %exit_status_label(status), phase = worker.record.phase_name(), session = %worker.record.session_name, username = %worker.record.requested_username, "session worker exited unexpectedly");
-        let classification = mark_worker_exited_unexpectedly(&mut worker.record, status);
-        let _ = self.persist_transition(&worker.record.lifecycle_id, "worker_exited_unexpectedly");
-        self.seat = SeatLifecycle::Recovering {
-            lifecycle_id: worker.record.lifecycle_id.clone(),
-            phase: worker.record.phase_name(),
-            reason: classification,
-        };
-        match SupervisorEmergencyRecoveryCoordinator::new(self.recovery_provider.as_ref())
-            .recover(&mut worker.record, status)
-        {
-            outcome @ SupervisorEmergencyRecoveryOutcome::Recovered { .. } => {
-                worker.record.state = SupervisorRecoveryState::Recovered { outcome };
-                self.seat = SeatLifecycle::Free;
-            }
-            SupervisorEmergencyRecoveryOutcome::Quarantined { stage, reason } => {
-                if matches!(reason, SupervisorRecoveryError::VtDisallocateBusy) {
-                    let _ = self.persist_transition(
-                        &worker.record.lifecycle_id,
-                        "vt_disallocate_failed_busy",
-                    );
-                }
-                worker.record.quarantine(stage, reason.clone());
-                self.seat = SeatLifecycle::Quarantined {
-                    lifecycle_id: worker.record.lifecycle_id.clone(),
-                    stage,
-                    reason,
-                };
-                self.quarantined.push(worker.record);
-            }
-        }
-    }
 }
+
+include!("running/exit_handling.rs");

@@ -42,7 +42,7 @@ where
     let mut reader = BufReader::new(stream);
     let mut line = Zeroizing::new(String::new());
 
-    reader.read_line(&mut *line)?;
+    reader.read_line(&mut line)?;
     debug!("received ipc request");
 
     let response = if line.trim().is_empty() {

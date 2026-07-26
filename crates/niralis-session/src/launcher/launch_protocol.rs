@@ -5,6 +5,8 @@ impl WorkerSessionLauncher {
         deadline: Instant,
         worker_id: String,
         worker_pid: u32,
+        transaction_generation: u64,
+        transaction_attempt_id: u64,
     ) -> Result<
         (
             Result<crate::WorkerEnvelope<WorkerResponse>, SessionError>,
@@ -13,6 +15,7 @@ impl WorkerSessionLauncher {
         SessionError,
     > {
         let mut phase = PendingLaunchPhase::Spawned;
+        let mut control_transaction = None;
         let response_result = loop {
             let event = attempt.wait_reader(deadline);
             match event {
@@ -23,10 +26,13 @@ impl WorkerSessionLauncher {
                     message:
                         WorkerResponse::Preparing {
                             worker_id: event_worker_id,
+                            transaction,
                         },
                     ..
                 }) => {
-                    if !matches!(phase, PendingLaunchPhase::Spawned) || event_worker_id != worker_id
+                    if !matches!(phase, PendingLaunchPhase::Spawned)
+                        || event_worker_id != worker_id
+                        || !valid_transaction(&transaction, &worker_id, transaction_generation, transaction_attempt_id, "preparing")
                     {
                         break Err(SessionError::WorkerProtocolFailed);
                     }
@@ -36,6 +42,7 @@ impl WorkerSessionLauncher {
                     message:
                         WorkerResponse::PayloadScopePrepared {
                             worker_id: event_worker_id,
+                            transaction,
                             expected_worker_pid,
                             session_pid,
                             registration_nonce,
@@ -50,6 +57,7 @@ impl WorkerSessionLauncher {
                         || registration_nonce.is_empty()
                         || registration_nonce.len() > 128
                         || !scope_identity.validate()
+                        || !valid_transaction(&transaction, &worker_id, transaction_generation, transaction_attempt_id, "scope_prepared")
                     {
                         break Err(SessionError::WorkerProtocolFailed);
                     }
@@ -66,14 +74,18 @@ impl WorkerSessionLauncher {
                         identity: scope_identity,
                         registration_nonce: registration_nonce.clone(),
                     };
-                    if write_control_request(
-                        attempt.supervisor_channel_mut(),
-                        WorkerControlRequest::PayloadScopeRegistered {
+                    control_transaction = Some(transaction.clone());
+                    if attempt
+                        .send_supervisor_control_request(WorkerControlRequest::PayloadScopeRegistered {
+                            transaction: crate::ControlTransactionIdentity::from_worker(
+                                &transaction,
+                                "scope_registered",
+                                1,
+                            ),
                             worker_id: worker_id.clone(),
                             expected_worker_pid: worker_pid,
                             registration_nonce,
-                        },
-                    )
+                        })
                     .is_err()
                     {
                         break Err(SessionError::WorkerIoFailed);
@@ -97,17 +109,19 @@ impl WorkerSessionLauncher {
                         }
                         _ => break Err(SessionError::WorkerProtocolFailed),
                     };
-                    let request =
-                        match crate::read_control_request(attempt.supervisor_channel_mut()) {
-                            Ok(request)
-                                if request.version == crate::WORKER_CONTROL_PROTOCOL_VERSION =>
-                            {
-                                request.message
-                            }
-                            _ => break Err(SessionError::WorkerProtocolFailed),
-                        };
+                    let request = match attempt.read_supervisor_control_request() {
+                        Ok(request) if request.version == crate::WORKER_CONTROL_PROTOCOL_VERSION => {
+                            request.message
+                        }
+                        _ => break Err(SessionError::WorkerProtocolFailed),
+                    };
+                    let transaction = match control_transaction.as_ref() {
+                        Some(transaction) => transaction,
+                        None => break Err(SessionError::WorkerProtocolFailed),
+                    };
                     let (release_nonce, local_cleanup_succeeded) = match request {
                         WorkerControlRequest::PayloadScopeReleaseRequested {
+                            transaction: request_transaction,
                             worker_id: requested_worker_id,
                             expected_worker_pid,
                             registration_nonce: requested_registration_nonce,
@@ -118,6 +132,11 @@ impl WorkerSessionLauncher {
                             && expected_worker_pid == worker_pid
                             && requested_registration_nonce == registration_nonce
                             && scope_identity == identity
+                            && request_transaction.matches_worker(
+                                transaction,
+                                "scope_release_requested",
+                                2,
+                            )
                             && !release_nonce.is_empty()
                             && release_nonce.len() <= 128 =>
                         {
@@ -143,6 +162,11 @@ impl WorkerSessionLauncher {
                         crate::ScopeReleaseVerification::Released => {
                             debug!(unit = %identity.unit_name, "payload scope release acknowledged");
                             WorkerControlRequest::PayloadScopeReleased {
+                                transaction: crate::ControlTransactionIdentity::from_worker(
+                                    transaction,
+                                    "scope_released",
+                                    3,
+                                ),
                                 worker_id: worker_id.clone(),
                                 expected_worker_pid: worker_pid,
                                 registration_nonce,
@@ -152,6 +176,11 @@ impl WorkerSessionLauncher {
                         crate::ScopeReleaseVerification::RecoveryRequired(reason) => {
                             debug!(?reason, unit = %identity.unit_name, "payload scope cleanup could not be proven; lifecycle marked recovery required");
                             WorkerControlRequest::PayloadScopeRecoveryRequired {
+                                transaction: crate::ControlTransactionIdentity::from_worker(
+                                    transaction,
+                                    "scope_recovery_required",
+                                    3,
+                                ),
                                 worker_id: worker_id.clone(),
                                 expected_worker_pid: worker_pid,
                                 registration_nonce,
@@ -160,7 +189,7 @@ impl WorkerSessionLauncher {
                             }
                         }
                     };
-                    if write_control_request(attempt.supervisor_channel_mut(), response).is_err() {
+                    if attempt.send_supervisor_control_request(response).is_err() {
                         break Err(SessionError::WorkerIoFailed);
                     }
                 }
@@ -170,4 +199,19 @@ impl WorkerSessionLauncher {
         Ok((response_result, phase))
     }
 
+}
+
+fn valid_transaction(
+    identity: &crate::WorkerTransactionIdentity,
+    worker_id: &str,
+    generation: u64,
+    attempt_id: u64,
+    stage: &str,
+) -> bool {
+    identity.transaction_id == worker_id
+        && identity.lifecycle_id == worker_id
+        && identity.admission_attempt_id == attempt_id
+        && identity.seat == "seat0"
+        && identity.seat_generation == generation
+        && identity.stage == stage
 }

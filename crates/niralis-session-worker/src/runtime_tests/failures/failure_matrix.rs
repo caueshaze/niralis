@@ -164,7 +164,7 @@ fn pam_worker_distinguishes_auth_identity_and_session_failures() {
                 logind_resolver: &StubLogind::default(),
                 virtual_terminal_allocator: &StubVtAllocator,
                 runtime_dir_validator: &StubRuntimeDirValidator,
-                selinux_context_manager: &StubSelinux::default(),
+                selinux_context_manager: &StubSelinux,
                 payload_scope_manager: &StubPayloadScopeManager,
                 launch_phase_gate: &crate::runtime::NoopLaunchPhaseGate,
             },

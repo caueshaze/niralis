@@ -143,8 +143,10 @@ fn removal_journal_resumes_without_recreating_record() {
         inode: Some(2),
         links: Some(1),
     };
-    let mut journal = HistoricalFinalizationJournal::default();
-    journal.version = 1;
+    let mut journal = HistoricalFinalizationJournal {
+        version: 1,
+        ..HistoricalFinalizationJournal::default()
+    };
     journal.entries.push(entry);
     journal.persist(&ledger).unwrap();
     assert_eq!(

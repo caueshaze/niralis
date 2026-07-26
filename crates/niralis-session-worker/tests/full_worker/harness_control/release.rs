@@ -17,6 +17,7 @@ impl FullWorker {
         let request = niralis_session::read_control_request(&mut stream)
             .expect("read authenticated release request");
         let (
+            transaction,
             worker_id,
             expected_worker_pid,
             registration_nonce,
@@ -25,6 +26,7 @@ impl FullWorker {
             local_cleanup_succeeded,
         ) = match request.message {
             WorkerControlRequest::PayloadScopeReleaseRequested {
+                transaction,
                 worker_id,
                 expected_worker_pid,
                 registration_nonce,
@@ -32,6 +34,7 @@ impl FullWorker {
                 scope_identity,
                 local_cleanup_succeeded,
             } => (
+                transaction,
                 worker_id,
                 expected_worker_pid,
                 registration_nonce,
@@ -48,6 +51,9 @@ impl FullWorker {
         self.expect("PayloadScopeReleaseRequested:count=1");
         let response = if recovery {
             WorkerControlRequest::PayloadScopeRecoveryRequired {
+                transaction: niralis_session::ControlTransactionIdentity {
+                    stage: "scope_recovery_required".into(), sequence: 3, ..transaction
+                },
                 worker_id,
                 expected_worker_pid,
                 registration_nonce,
@@ -56,6 +62,9 @@ impl FullWorker {
             }
         } else {
             WorkerControlRequest::PayloadScopeReleased {
+                transaction: niralis_session::ControlTransactionIdentity {
+                    stage: "scope_released".into(), sequence: 3, ..transaction
+                },
                 worker_id,
                 expected_worker_pid,
                 registration_nonce,

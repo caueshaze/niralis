@@ -4,6 +4,10 @@
                     writer,
                     WorkerResponse::PayloadScopePrepared {
                         worker_id: worker_id.clone(),
+                        transaction: {
+                            login_identity.stage = "scope_prepared".to_owned();
+                            login_identity.clone()
+                        },
                         expected_worker_pid: std::process::id(),
                         session_pid: pending_handoff.report().child_pid,
                         registration_nonce: registration_nonce.clone(),
@@ -29,6 +33,7 @@
                     &worker_id,
                     std::process::id(),
                     &registration_nonce,
+                    &login_identity,
                     launch_watchdog_deadline,
                 ) {
                     warn!(?error, "payload scope registration acknowledgement failed");
@@ -46,6 +51,7 @@
                         &worker_id,
                         &registration_nonce,
                         &scope_identity,
+                        &login_identity,
                         local_cleanup_succeeded,
                         launch_watchdog_deadline,
                     );

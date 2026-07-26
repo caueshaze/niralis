@@ -193,14 +193,16 @@
             0
         );
         let result = wait_for_session_with_grace(
-            None,
-            &runner,
-            "worker".into(),
-            1,
-            1,
-            &scope,
+            SessionWaitContext {
+                listener: None,
+                child_runner: &runner,
+                worker_id: "worker".into(),
+                session_pid: 1,
+                session_pgid: 1,
+                authoritative_scope: &scope,
+                expected_control_uid: unsafe { libc::getuid() },
+            },
             Duration::from_millis(100),
-            unsafe { libc::getuid() },
         )
         .unwrap();
         assert!(

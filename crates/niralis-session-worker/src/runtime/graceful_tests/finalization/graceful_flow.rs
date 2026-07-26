@@ -1,6 +1,13 @@
     #[test]
     fn authenticated_pidfd_and_terminate_share_one_poll_cycle() {
-        let _lock = SIGNAL_TEST_LOCK.lock().unwrap();
+        let _lock = lock_signal_tests();
+        if !matches!(
+            crate::probe_af_unix_environment_support(),
+            crate::AfUnixEnvironmentProbe::Supported
+        ) {
+            eprintln!("skipping graceful control-listener validation: AF_UNIX bind denied by environment");
+            return;
+        }
         let signals = crate::termination::WorkerSignalFd::install().unwrap();
         set_worker_signal_fd(signals.as_raw_fd());
         set_supervisor_channel_fd(-1);
@@ -10,7 +17,7 @@
         };
         write_event(runner.pidfd.as_raw_fd());
         let scope = EventScope::new(runner.pidfd.as_raw_fd(), true, None);
-        let path = std::env::temp_dir().join(format!("n-a326-{}.sock", std::process::id()));
+        let path = unique_control_socket_path("graceful-flow");
         let _ = std::fs::remove_file(&path);
         let listener = bind_control_listener(&path).unwrap();
         let mut stream = UnixStream::connect(&path).unwrap();
@@ -25,14 +32,16 @@
         )
         .unwrap();
         let result = wait_for_session_with_grace(
-            Some(&listener),
-            &runner,
-            "worker".into(),
-            1,
-            1,
-            &scope,
+            SessionWaitContext {
+                listener: Some(&listener),
+                child_runner: &runner,
+                worker_id: "worker".into(),
+                session_pid: 1,
+                session_pgid: 1,
+                authoritative_scope: &scope,
+                expected_control_uid: unsafe { libc::getuid() },
+            },
             Duration::from_millis(100),
-            unsafe { libc::getuid() },
         )
         .unwrap();
         assert!(matches!(
@@ -98,7 +107,7 @@
 
     #[test]
     fn production_loop_candidate_is_consumed_and_cooperative_finalizer_returns() {
-        let _lock = SIGNAL_TEST_LOCK.lock().unwrap();
+        let _lock = lock_signal_tests();
         let signals = crate::termination::WorkerSignalFd::install().unwrap();
         set_worker_signal_fd(signals.as_raw_fd());
         let runner = EventRunner {
@@ -108,14 +117,16 @@
         let mut scope = EventScope::new(runner.pidfd.as_raw_fd(), true, None);
         unsafe { libc::pthread_kill(libc::pthread_self(), libc::SIGTERM) };
         let outcome = match wait_for_session_with_grace(
-            None,
-            &runner,
-            "worker".into(),
-            1,
-            1,
-            &scope,
+            SessionWaitContext {
+                listener: None,
+                child_runner: &runner,
+                worker_id: "worker".into(),
+                session_pid: 1,
+                session_pgid: 1,
+                authoritative_scope: &scope,
+                expected_control_uid: unsafe { libc::getuid() },
+            },
             Duration::from_millis(100),
-            unsafe { libc::getuid() },
         )
         .unwrap()
         {
@@ -152,4 +163,3 @@
         );
         set_worker_signal_fd(-1);
     }
-

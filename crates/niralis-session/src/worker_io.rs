@@ -16,13 +16,12 @@ pub fn write_envelope<T: Serialize, W: Write>(
         version: WORKER_PROTOCOL_VERSION,
         message,
     };
-    let payload =
-        Zeroizing::new(serde_json::to_vec(&envelope).map_err(|_| SessionError::WorkerIoFailed)?);
+    let payload = serde_json::to_vec(&envelope).map_err(|_| SessionError::WorkerIoFailed)?;
     if payload.len() + 1 > MAX_WORKER_MESSAGE_BYTES {
         return Err(SessionError::WorkerProtocolFailed);
     }
     writer
-        .write_all(payload.as_slice())
+        .write_all(&payload)
         .and_then(|_| writer.write_all(b"\n"))
         .and_then(|_| writer.flush())
         .map_err(|_| SessionError::WorkerIoFailed)
@@ -43,12 +42,13 @@ pub fn write_control_request<W: Write>(
         version: WORKER_CONTROL_PROTOCOL_VERSION,
         message: request,
     };
-    let payload = serde_json::to_vec(&envelope).map_err(|_| SessionError::WorkerIoFailed)?;
+    let payload =
+        Zeroizing::new(serde_json::to_vec(&envelope).map_err(|_| SessionError::WorkerIoFailed)?);
     if payload.len() + 1 > MAX_WORKER_CONTROL_MESSAGE_BYTES {
         return Err(SessionError::WorkerProtocolFailed);
     }
     writer
-        .write_all(&payload)
+        .write_all(payload.as_slice())
         .and_then(|_| writer.write_all(b"\n"))
         .and_then(|_| writer.flush())
         .map_err(|_| SessionError::WorkerIoFailed)
@@ -135,6 +135,14 @@ mod tests {
             version: WORKER_PROTOCOL_VERSION,
             message: WorkerResponse::Preparing {
                 worker_id: "w".into(),
+                transaction: crate::WorkerTransactionIdentity {
+                    transaction_id: "w".into(),
+                    admission_attempt_id: 1,
+                    lifecycle_id: "w".into(),
+                    seat: "seat0".into(),
+                    seat_generation: 1,
+                    stage: "preparing".into(),
+                },
             },
         })
         .unwrap();

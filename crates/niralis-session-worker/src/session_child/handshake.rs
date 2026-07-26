@@ -117,9 +117,8 @@ fn parse_response(
 }
 
 fn kill_and_reap(child: &mut Child) {
-    match child.try_wait() {
-        Ok(Some(_)) => return,
-        Ok(None) | Err(_) => {}
+    if let Ok(Some(_)) = child.try_wait() {
+        return;
     }
     let _ = child.kill();
     let _ = child.wait();

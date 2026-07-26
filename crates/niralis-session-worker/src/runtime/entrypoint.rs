@@ -45,17 +45,20 @@ pub fn run_worker_process_with_dependencies<
                 },
             )
         }
-        WorkerRequest::PamSession {
-            request,
-            launch_plan,
-            pam_service,
-            password,
-            session_child_path,
-            session_probe_path,
-            control_path,
-            worker_id,
-            launcher_pid,
-        } => {
+        WorkerRequest::PamSession(request) => {
+            let niralis_session::WorkerPamSessionRequest {
+                request,
+                launch_plan,
+                pam_service,
+                password,
+                session_child_path,
+                session_probe_path,
+                control_path,
+                worker_id,
+                launcher_pid,
+                transaction: login_identity,
+            } = request;
+            let control_path = *control_path;
             if !control_path.as_os_str().is_empty()
                 && !supervisor_peer_matches(internal_control_peer_uid(), launcher_pid)
             {
@@ -68,34 +71,40 @@ pub fn run_worker_process_with_dependencies<
                     writer,
                     WorkerResponse::Preparing {
                         worker_id: worker_id.clone(),
+                        transaction: {
+                            let mut identity = (*login_identity).clone();
+                            identity.stage = "preparing".to_owned();
+                            identity
+                        },
                     },
                 )?;
             }
-            run_pam_session(
-                writer,
-                dependencies.authenticator_factory,
-                dependencies.identity_resolver,
-                dependencies.supplementary_groups_resolver,
-                dependencies.session_child_runner_factory,
-                dependencies.logind_resolver,
+            run_pam_session(writer, PamSessionLaunch {
+                factory: dependencies.authenticator_factory,
+                identity_resolver: dependencies.identity_resolver,
+                supplementary_groups_resolver: dependencies.supplementary_groups_resolver,
+                session_child_runner_factory: dependencies.session_child_runner_factory,
+                logind_resolver: dependencies.logind_resolver,
                 request,
                 pam_service,
                 password,
-                session_child_path,
-                session_probe_path,
+                session_child_path: *session_child_path,
+                session_probe_path: *session_probe_path,
                 control_path,
                 worker_id,
                 launcher_pid,
-                dependencies.virtual_terminal_allocator,
-                dependencies.runtime_dir_validator,
-                dependencies.selinux_context_manager,
-                dependencies.payload_scope_manager,
-                dependencies.launch_phase_gate,
-                launch_plan,
-            )
+                virtual_terminal_allocator: dependencies.virtual_terminal_allocator,
+                runtime_dir_validator: dependencies.runtime_dir_validator,
+                selinux_context_manager: dependencies.selinux_context_manager,
+                payload_scope_manager: dependencies.payload_scope_manager,
+                launch_phase_gate: dependencies.launch_phase_gate,
+                launch_plan: *launch_plan,
+                login_identity: *login_identity,
+            })
         }
     }
 }
+
 
 include!("pam_session.rs");
 
@@ -113,7 +122,7 @@ fn valid_logind_identity(
         && identity
             .desktop
             .as_deref()
-            .map_or(true, |value| value == desktop)
+            .is_none_or(|value| value == desktop)
         && identity.seat.as_deref() == Some(expected_seat)
         && identity.vtnr == Some(expected_vtnr)
 }
@@ -166,13 +175,15 @@ fn wait_for_session(
     authoritative_scope: &dyn crate::payload_scope::AuthoritativePayloadScope,
 ) -> Result<SessionWaitResult, SessionError> {
     wait_for_session_with_grace(
-        listener,
-        child_runner,
-        worker_id,
-        session_pid,
-        session_pgid,
-        authoritative_scope,
+        SessionWaitContext {
+            listener,
+            child_runner,
+            worker_id,
+            session_pid,
+            session_pgid,
+            authoritative_scope,
+            expected_control_uid: 0,
+        },
         configured_session_termination_grace(),
-        0,
     )
 }

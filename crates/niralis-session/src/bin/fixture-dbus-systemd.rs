@@ -79,6 +79,19 @@ fn run() -> Result<(), ()> {
 #[derive(Clone)]
 struct FakeManager(Arc<Mutex<State>>);
 
+type UnitListEntry = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    zbus::zvariant::OwnedObjectPath,
+    u32,
+    String,
+    zbus::zvariant::OwnedObjectPath,
+);
+
 #[zbus::interface(name = "org.freedesktop.systemd1.Manager")]
 impl FakeManager {
     #[zbus(name = "GetUnitByInvocationID")]
@@ -102,22 +115,7 @@ impl FakeManager {
             .map_err(|_| zbus::fdo::Error::Failed("object path".into()))
     }
 
-    fn list_units(
-        &self,
-    ) -> zbus::fdo::Result<
-        Vec<(
-            String,
-            String,
-            String,
-            String,
-            String,
-            String,
-            zbus::zvariant::OwnedObjectPath,
-            u32,
-            String,
-            zbus::zvariant::OwnedObjectPath,
-        )>,
-    > {
+    fn list_units(&self) -> zbus::fdo::Result<Vec<UnitListEntry>> {
         let state = self
             .0
             .lock()
@@ -159,8 +157,7 @@ impl FakeUnit {
             .0
             .lock()
             .map_err(|_| zbus::fdo::Error::Failed("state".into()))?;
-        Ok(parse_hex(&state.invocation)
-            .ok_or_else(|| zbus::fdo::Error::Failed("invocation".into()))?)
+        parse_hex(&state.invocation).ok_or_else(|| zbus::fdo::Error::Failed("invocation".into()))
     }
     #[zbus(property)]
     fn transient(&self) -> bool {

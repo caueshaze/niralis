@@ -160,8 +160,10 @@ fn truncated_journal_is_fail_closed_without_reconstruction() {
 fn unfinished_journal_restores_seat_quarantine_on_reopen() {
     let (root, mut ledger) = open_ledger();
     ledger.create(record("durable")).unwrap();
-    let mut journal = HistoricalFinalizationJournal::default();
-    journal.version = 1;
+    let mut journal = HistoricalFinalizationJournal {
+        version: 1,
+        ..HistoricalFinalizationJournal::default()
+    };
     journal
         .entries
         .push(entry(&ledger, HistoricalFinalizationStage::NotReplayed));
