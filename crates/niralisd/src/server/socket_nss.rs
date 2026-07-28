@@ -3,7 +3,7 @@ use std::fs;
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::FileTypeExt;
+use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -115,7 +115,12 @@ where
     }
 
     let listener = UnixListener::bind(socket_path)?;
-    if let Err(error) = configure_socket(listener.as_raw_fd(), greeter, ownership_setter) {
+    if let Err(error) = configure_socket(
+        listener.as_raw_fd(),
+        socket_path,
+        greeter,
+        ownership_setter,
+    ) {
         drop(listener);
         let _ = fs::remove_file(socket_path);
         return Err(error);
@@ -147,6 +152,7 @@ fn secure_runtime_dir(runtime_dir: &Path) -> Result<()> {
 
 fn configure_socket<F>(
     socket_fd: RawFd,
+    socket_path: &Path,
     greeter: &GreeterIdentity,
     ownership_setter: F,
 ) -> Result<()>
@@ -159,6 +165,21 @@ where
     let status = unsafe { libc::fchmod(socket_fd, 0o660) };
     if status != 0 {
         return Err(io::Error::last_os_error().into());
+    }
+
+    // Linux does not consistently expose permission changes made through an
+    // AF_UNIX socket descriptor on the directory entry returned by
+    // `metadata`. Apply the same explicit mode to the bound pathname as well;
+    // the runtime directory is daemon-owned and mode 0700, so an unrelated
+    // peer cannot replace the entry between bind and this operation.
+    let metadata = fs::symlink_metadata(socket_path)?;
+    if !metadata.file_type().is_socket() {
+        return Err(NiralisdError::InvalidSocketPath(socket_path.to_path_buf()));
+    }
+    fs::set_permissions(socket_path, fs::Permissions::from_mode(0o660))?;
+    let mode = fs::symlink_metadata(socket_path)?.permissions().mode() & 0o777;
+    if mode != 0o660 {
+        return Err(NiralisdError::InvalidSocketPath(socket_path.to_path_buf()));
     }
     Ok(())
 }
