@@ -15,7 +15,21 @@ impl SupervisorLoopState {
             .capture_previous_vt("seat0")
             .map_err(|_| SessionError::WorkerIoFailed)?;
         let recovery = self.recovery_admission_state("seat0");
-        self.admission.reserve(lifecycle_id, recovery, previous_vt)
+        let mut lease = self.admission.reserve(lifecycle_id.clone(), recovery, previous_vt)?;
+        if let Some(store) = &self.precommit_store {
+            let binding = store
+                .lock()
+                .map_err(|_| SessionError::PersistentRecoveryUnavailable)?
+                .create_reserved(
+                    &lifecycle_id,
+                    lease.attempt_id(),
+                    lease.seat(),
+                    lease.generation(),
+                )
+                .map_err(|_| SessionError::PersistentRecoveryUnavailable)?;
+            lease.attach_precommit_runtime(binding)?;
+        }
+        Ok(lease)
     }
 
     pub(super) fn cancel_admission(

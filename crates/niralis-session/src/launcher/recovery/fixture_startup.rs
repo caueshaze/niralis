@@ -160,13 +160,14 @@ pub(crate) fn reconcile_fixture_worker(
     if let PersistedProcessIdentity::OriginalStillAlive { pidfd } = identity {
         fixture_event(provider, "worker_alive");
         let attempt = record.sequence.saturating_add(1);
-        if ledger
-            .operation_intent(&record.lifecycle_id, "runtime_release", attempt)
-            .is_ok()
-        {
+        if ledger.operation_intent(&record.lifecycle_id, "runtime_release", attempt).is_ok() {
             fixture_event(provider, "worker_sigterm");
             let _ = signal_validated_worker(&authority, record, pidfd.as_raw_fd());
-            let _ = wait_for_pidfd(pidfd.as_raw_fd(), 1000);
+            if !wait_for_pidfd(pidfd.as_raw_fd(), 50).unwrap_or(false) {
+                fixture_event(provider, "worker_sigkill");
+                let _ = force_validated_worker_exit(&authority, record, pidfd.as_raw_fd());
+                let _ = wait_for_pidfd(pidfd.as_raw_fd(), 1000);
+            }
             let _ = ledger.operation_confirmed(&record.lifecycle_id, "runtime_release", attempt);
         }
     } else {

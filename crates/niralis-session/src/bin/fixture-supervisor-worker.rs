@@ -16,6 +16,11 @@ fn main() {
 }
 
 fn run() -> Result<(), ()> {
+    if std::env::var_os("NIRALIS_FIXTURE_WORKER_IGNORE_SIGTERM").is_some() {
+        unsafe {
+            libc::signal(libc::SIGTERM, libc::SIG_IGN);
+        }
+    }
     let request: WorkerEnvelope<WorkerRequest> =
         read_envelope(&mut std::io::stdin().lock()).map_err(|_| fail("request"))?;
     let WorkerRequest::PamSession(WorkerPamSessionRequest {

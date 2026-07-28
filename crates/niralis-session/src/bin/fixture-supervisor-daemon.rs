@@ -49,16 +49,23 @@ fn main() {
         Some("real-dbus-logind-owner") => SupervisorFixtureBoundaryMode::RealDbusLogindOwnerChange,
         _ => SupervisorFixtureBoundaryMode::PopulatedThenRecovered,
     };
+    let mut worker_environment = vec![(
+        "NIRALIS_SUPERVISOR_FIXTURE_SOCKET".to_owned(),
+        report_socket.clone(),
+    )];
+    if let Some(value) = std::env::var_os("NIRALIS_FIXTURE_WORKER_IGNORE_SIGTERM") {
+        worker_environment.push((
+            "NIRALIS_FIXTURE_WORKER_IGNORE_SIGTERM".to_owned(),
+            value.to_string_lossy().into_owned(),
+        ));
+    }
     let launcher = WorkerSessionLauncher::new_persistent_supervisor_fixture_for_test(
         PersistentSupervisorFixtureOptions {
             worker_path: worker,
             session_child_path: PathBuf::from("/fixture/session-child"),
             session_probe_path: PathBuf::from("/fixture/session-probe"),
             timeout: Duration::from_secs(5),
-            worker_environment: vec![(
-                "NIRALIS_SUPERVISOR_FIXTURE_SOCKET".to_owned(),
-                report_socket.clone(),
-            )],
+            worker_environment,
             recovery_dir: recovery.clone(),
             recovery_lock: lock,
             mode,

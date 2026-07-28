@@ -85,6 +85,66 @@ fn same_boot_worker_alive_handoff_completes() {
 }
 
 #[test]
+fn same_boot_worker_alive_handoff_escalates_after_sigterm() {
+    let mut daemon_a = DaemonFixture::spawn_with_env(
+        "worker-alive",
+        &[("NIRALIS_FIXTURE_WORKER_IGNORE_SIGTERM", "1")],
+    );
+    assert!(daemon_a.receive_barrier().starts_with("ready "));
+    daemon_a.start();
+    let processes = daemon_a.receive_processes();
+    assert!(daemon_a.receive_barrier().starts_with("started "));
+    let worker = pidfd_open(processes[0]);
+    let leader = pidfd_open(processes[1]);
+    let member = pidfd_open(processes[2]);
+    daemon_a.kill_exact();
+
+    let mut daemon_b = DaemonFixture::spawn_reusing_storage("worker-alive", &daemon_a.recovery);
+    assert!(daemon_b.receive_barrier().starts_with("ready "));
+    wait_pidfd(&worker);
+    let events = daemon_b.events();
+    assert!(events.contains("worker_sigterm\n"));
+    assert!(events.contains("worker_sigkill\n"));
+    assert!(fs::read_dir(&daemon_a.recovery)
+        .expect("recovery directory")
+        .next()
+        .is_none());
+    kill_pidfd(&leader);
+    kill_pidfd(&member);
+    daemon_b.kill_exact();
+}
+
+#[test]
+fn same_boot_worker_alive_handoff_retries_persisted_runtime_release() {
+    let mut daemon_a = DaemonFixture::spawn("worker-alive");
+    assert!(daemon_a.receive_barrier().starts_with("ready "));
+    daemon_a.start();
+    let processes = daemon_a.receive_processes();
+    assert!(daemon_a.receive_barrier().starts_with("started "));
+    let worker = pidfd_open(processes[0]);
+    let leader = pidfd_open(processes[1]);
+    let member = pidfd_open(processes[2]);
+    daemon_a.kill_exact();
+    rewrite_runtime_release(
+        &daemon_a.recovery,
+        serde_json::json!({ "IntentPersisted": { "attempt_id": 41 } }),
+        None,
+    );
+
+    let mut daemon_b = DaemonFixture::spawn_reusing_storage("worker-alive", &daemon_a.recovery);
+    assert!(daemon_b.receive_barrier().starts_with("ready "));
+    wait_pidfd(&worker);
+    assert!(daemon_b.events().contains("worker_sigterm\n"));
+    assert!(fs::read_dir(&daemon_a.recovery)
+        .expect("recovery directory")
+        .next()
+        .is_none());
+    kill_pidfd(&leader);
+    kill_pidfd(&member);
+    daemon_b.kill_exact();
+}
+
+#[test]
 fn same_boot_worker_gone_payload_is_recovered() {
     let mut daemon_a = DaemonFixture::spawn("payload-recovered");
     assert!(daemon_a.receive_barrier().starts_with("ready "));
@@ -130,4 +190,3 @@ fn same_boot_worker_gone_payload_is_recovered() {
     kill_pidfd(&member);
     daemon_b.kill_exact();
 }
-

@@ -9,6 +9,7 @@ pub(in crate::launcher) struct AdmissionLease {
     lifecycle_id: String,
     generation: u64,
     previous_vt: PreviousVtIdentity,
+    precommit_runtime: Option<PreCommitRuntimeBinding>,
 }
 
 #[derive(Debug)]
@@ -17,6 +18,7 @@ pub(in crate::launcher) struct PendingLifecycleLease {
     attempt_id: u64,
     lifecycle_id: String,
     generation: u64,
+    precommit_runtime: Option<PreCommitRuntimeBinding>,
 }
 
 #[derive(Debug)]
@@ -25,6 +27,7 @@ pub(in crate::launcher) struct LaunchCommitReceipt {
     attempt_id: u64,
     lifecycle_id: String,
     generation: u64,
+    precommit_runtime: Option<PreCommitRuntimeBinding>,
 }
 
 #[derive(Debug)]
@@ -138,6 +141,7 @@ impl SeatAdmissionController {
             lifecycle_id,
             generation,
             previous_vt,
+            precommit_runtime: None,
         })
     }
 
@@ -159,6 +163,7 @@ impl SeatAdmissionController {
             attempt_id: lease.attempt_id,
             lifecycle_id: lease.lifecycle_id.clone(),
             generation: lease.generation,
+            precommit_runtime: lease.precommit_runtime,
         };
         Ok((pending, lease.previous_vt))
     }
@@ -181,12 +186,13 @@ impl SeatAdmissionController {
             attempt_id: lease.attempt_id,
             lifecycle_id: lease.lifecycle_id,
             generation: lease.generation,
+            precommit_runtime: lease.precommit_runtime,
         })
     }
 
     pub(super) fn promote_committed_to_running(
         &mut self,
-        receipt: LaunchCommitReceipt,
+        mut receipt: LaunchCommitReceipt,
     ) -> Result<RunningSeatReceipt, SessionError> {
         let AdmissionPhase::LaunchCommitted {
             attempt_id,
@@ -204,6 +210,7 @@ impl SeatAdmissionController {
         {
             return Err(SessionError::WorkerProtocolFailed);
         }
+        receipt.remove_precommit_runtime()?;
         self.phase = AdmissionPhase::Free;
         self.lifecycle = SeatLifecycle::Active {
             lifecycle_id: receipt.lifecycle_id.clone(),
@@ -434,7 +441,7 @@ impl SeatAdmissionController {
 
     pub(in crate::launcher) fn cancel(
         &mut self,
-        lease: AdmissionRollbackLease,
+        mut lease: AdmissionRollbackLease,
     ) -> Result<(), SessionError> {
         let matches = match &lease {
             AdmissionRollbackLease::Reserved(value) => self.matches_reserved(value),
@@ -442,6 +449,10 @@ impl SeatAdmissionController {
         };
         if !matches {
             return Err(SessionError::SessionSeatUnavailable);
+        }
+        match &mut lease {
+            AdmissionRollbackLease::Reserved(value) => value.remove_precommit_runtime()?,
+            AdmissionRollbackLease::Pending(value) => value.remove_precommit_runtime()?,
         }
         self.phase = AdmissionPhase::Free;
         Ok(())
@@ -478,11 +489,94 @@ impl AdmissionLease {
     pub(in crate::launcher) fn attempt_id(&self) -> u64 {
         self.attempt_id
     }
+
+    pub(in crate::launcher) fn attach_precommit_runtime(
+        &mut self,
+        binding: PreCommitRuntimeBinding,
+    ) -> Result<(), SessionError> {
+        if binding.lifecycle_id() != self.lifecycle_id {
+            return Err(SessionError::WorkerProtocolFailed);
+        }
+        self.precommit_runtime = Some(binding);
+        Ok(())
+    }
+
+    pub(in crate::launcher) fn update_precommit_runtime(
+        &mut self,
+        stage: &'static str,
+        worker_id: Option<&str>,
+        worker_pid: Option<u32>,
+    ) -> Result<(), SessionError> {
+        let Some(binding) = self.precommit_runtime.take() else {
+            return Ok(());
+        };
+        let store = process_runtime_store().ok_or(SessionError::PersistentRecoveryUnavailable)?;
+        let mut store = store.lock().map_err(|_| SessionError::PersistentRecoveryUnavailable)?;
+        let binding = store
+            .update_stage(binding, stage, worker_id, worker_pid)
+            .map_err(|_| SessionError::PersistentRecoveryUnavailable)?;
+        self.precommit_runtime = Some(binding);
+        Ok(())
+    }
+
+    fn remove_precommit_runtime(&mut self) -> Result<(), SessionError> {
+        let Some(binding) = self.precommit_runtime.take() else {
+            return Ok(());
+        };
+        let store = process_runtime_store().ok_or(SessionError::PersistentRecoveryUnavailable)?;
+        store
+            .lock()
+            .map_err(|_| SessionError::PersistentRecoveryUnavailable)?
+            .remove(&binding)
+            .map_err(|_| SessionError::PersistentRecoveryUnavailable)
+    }
 }
 
 impl PendingLifecycleLease {
     pub(super) fn lifecycle_id(&self) -> &str {
         &self.lifecycle_id
+    }
+
+    fn remove_precommit_runtime(&mut self) -> Result<(), SessionError> {
+        let Some(binding) = self.precommit_runtime.take() else {
+            return Ok(());
+        };
+        let store = process_runtime_store().ok_or(SessionError::PersistentRecoveryUnavailable)?;
+        store
+            .lock()
+            .map_err(|_| SessionError::PersistentRecoveryUnavailable)?
+            .remove(&binding)
+            .map_err(|_| SessionError::PersistentRecoveryUnavailable)
+    }
+}
+
+impl LaunchCommitReceipt {
+    pub(in crate::launcher) fn mark_precommit_handoff_committed(
+        &mut self,
+    ) -> Result<(), SessionError> {
+        let Some(binding) = self.precommit_runtime.take() else {
+            return Ok(());
+        };
+        let store = process_runtime_store().ok_or(SessionError::PersistentRecoveryUnavailable)?;
+        let binding = store
+            .lock()
+            .map_err(|_| SessionError::PersistentRecoveryUnavailable)?
+            .mark_handoff_committed(binding)
+            .map_err(|_| SessionError::PersistentRecoveryUnavailable)?;
+        self.precommit_runtime = Some(binding);
+        Ok(())
+    }
+
+    fn remove_precommit_runtime(&mut self) -> Result<(), SessionError> {
+        let Some(binding) = self.precommit_runtime.take() else {
+            return Ok(());
+        };
+        let store = process_runtime_store().ok_or(SessionError::PersistentRecoveryUnavailable)?;
+        store
+            .lock()
+            .map_err(|_| SessionError::PersistentRecoveryUnavailable)?
+            .remove(&binding)
+            .map_err(|_| SessionError::PersistentRecoveryUnavailable)
     }
 }
 

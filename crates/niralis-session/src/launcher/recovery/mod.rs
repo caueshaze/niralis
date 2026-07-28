@@ -131,6 +131,8 @@ mod startup_same_boot_payload;
 mod startup_same_boot_support;
 #[cfg(test)]
 mod startup_tests;
+#[cfg(test)]
+mod startup_runtime_release_tests;
 mod startup_vt_recovery;
 mod systemd_dbus;
 mod systemd_pin;

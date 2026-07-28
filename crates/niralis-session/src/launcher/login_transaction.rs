@@ -116,7 +116,7 @@ impl LoginTransaction {
     }
 
     pub(super) fn attach_backend(
-        self,
+        mut self,
         backend: UnboundLocalLoginBackend,
         channel: ValidatedWorkerChannel,
     ) -> Result<TransactionOwnedLoginBackend, Box<(SessionError, LoginTransaction)>> {
@@ -125,6 +125,15 @@ impl LoginTransaction {
             || channel.worker_id != self.lifecycle_id
         {
             return Err(Box::new((SessionError::WorkerProtocolFailed, self)));
+        }
+        if let Some(lease) = self.lease.as_mut() {
+            if let Err(error) = lease.update_precommit_runtime(
+                "worker_attached",
+                Some(&channel.worker_id),
+                Some(channel.worker_pid),
+            ) {
+                return Err(Box::new((error, self)));
+            }
         }
         Ok(TransactionOwnedLoginBackend {
             transaction: self,
@@ -153,7 +162,7 @@ impl ValidatedWorkerChannel {
 
 impl TransactionOwnedLoginBackend {
     pub(super) fn authentication(
-        self,
+        mut self,
     ) -> Result<AuthenticationPermit, Box<(SessionError, TransactionOwnedLoginBackend)>> {
         if self.transaction.deadline <= Instant::now()
             || self.expected_stage != "reserved"
@@ -161,6 +170,13 @@ impl TransactionOwnedLoginBackend {
             || self.channel.worker_id != self.transaction.lifecycle_id
         {
             return Err(Box::new((SessionError::WorkerTimedOut, self)));
+        }
+        if let Some(lease) = self.transaction.lease.as_mut() {
+            if let Err(error) =
+                lease.update_precommit_runtime("authentication_inflight", None, None)
+            {
+                return Err(Box::new((error, self)));
+            }
         }
         Ok(AuthenticationPermit { backend: self })
     }
@@ -178,6 +194,9 @@ impl GreeterConnectionIdentity {
 
 impl AuthenticationPermit {
     pub(super) fn authenticated(mut self) -> AuthenticatedTransaction {
+        if let Some(lease) = self.backend.transaction.lease.as_mut() {
+            let _ = lease.update_precommit_runtime("authenticated", None, None);
+        }
         self.backend.transaction.phase = TransactionPhase::Authenticated;
         self.backend.expected_stage = "authenticated";
         self.backend.expected_sequence = 1;
@@ -189,6 +208,9 @@ impl AuthenticationPermit {
 
 impl AuthenticatedTransaction {
     pub(super) fn prepare(mut self) -> SessionPreparationPermit {
+        if let Some(lease) = self.backend.transaction.lease.as_mut() {
+            let _ = lease.update_precommit_runtime("preparing_launch", None, None);
+        }
         self.backend.transaction.phase = TransactionPhase::Prepared;
         self.backend.expected_stage = "prepared";
         self.backend.expected_sequence = 2;
@@ -255,6 +277,8 @@ impl PendingLaunchTransaction {
                 return Err(error);
             }
         };
+        let mut receipt = receipt;
+        receipt.mark_precommit_handoff_committed()?;
         self.transaction.phase = TransactionPhase::Committed;
         Ok(receipt)
     }

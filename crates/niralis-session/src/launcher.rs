@@ -1,5 +1,6 @@
 mod recovery;
 mod recovery_admin_host;
+mod precommit_runtime;
 #[cfg(any(
     test,
     feature = "integration-test-control",
@@ -14,6 +15,7 @@ pub use recovery::SupervisorFixtureBoundaryMode;
 #[cfg(feature = "supervisor-test-fixtures")]
 pub use recovery::SupervisorFixtureSnapshot;
 use recovery::*;
+use precommit_runtime::*;
 #[cfg(feature = "supervisor-test-fixtures")]
 pub use recovery::{
     PhysicalPreviousBootSmoke, PhysicalPreviousBootSmokeFailpoint, PhysicalPreviousBootSmokePaths,

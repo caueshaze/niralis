@@ -1,6 +1,10 @@
 use super::*;
 use std::os::fd::AsRawFd;
 
+const RUNTIME_RELEASE_SIGTERM_WAIT_MS: i32 = 250;
+const RUNTIME_RELEASE_SIGKILL_WAIT_MS: i32 = 1_000;
+const RUNTIME_RELEASE_STAGE_SIGTERM_INSUFFICIENT: u8 = 1;
+
 /// Recovery-only signal adapter. The pidfd is produced by a successful
 /// SameBoot process rehydration; primitive PIDs never reach this boundary.
 pub(crate) fn signal_validated_worker(
@@ -17,8 +21,30 @@ pub(crate) fn signal_validated_worker(
     raw_send_sigterm(fd)
 }
 
+pub(crate) fn force_validated_worker_exit(
+    authority: &SameBootRecoveryAuthority,
+    record: &PersistentRecoveryRecord,
+    fd: i32,
+) -> Result<(), ()> {
+    if !authority.validates(record)
+        || record.worker_starttime.is_none()
+        || record.worker_executable.is_none()
+    {
+        return Err(());
+    }
+    raw_send_sigkill(fd)
+}
+
 fn raw_send_sigterm(fd: i32) -> Result<(), ()> {
-    if unsafe { libc::syscall(libc::SYS_pidfd_send_signal, fd, libc::SIGTERM, 0, 0) } < 0 {
+    raw_send_signal(fd, libc::SIGTERM)
+}
+
+fn raw_send_sigkill(fd: i32) -> Result<(), ()> {
+    raw_send_signal(fd, libc::SIGKILL)
+}
+
+fn raw_send_signal(fd: i32, signal: i32) -> Result<(), ()> {
+    if unsafe { libc::syscall(libc::SYS_pidfd_send_signal, fd, signal, 0, 0) } < 0 {
         Err(())
     } else {
         Ok(())
@@ -36,6 +62,82 @@ pub(crate) fn wait_for_pidfd(fd: i32, timeout_ms: i32) -> Result<bool, ()> {
     } else {
         Ok(result > 0 && p.revents & libc::POLLIN != 0)
     }
+}
+
+pub(crate) fn recover_validated_runtime_release(
+    authority: &SameBootRecoveryAuthority,
+    record: &PersistentRecoveryRecord,
+    ledger: &mut PersistentRecoveryLedger,
+    pidfd: OwnedFd,
+) -> Result<(), StartupRecoveryFailure> {
+    info!(
+        lifecycle_id = %record.lifecycle_id,
+        "validated worker still alive after supervisor restart"
+    );
+    let (attempt_id, skip_sigterm) = match record.operation_ledger.runtime_release {
+        DurableOperationState::NotStarted => {
+            let attempt_id = record.sequence.saturating_add(1);
+            ledger
+                .operation_intent(&record.lifecycle_id, "runtime_release", attempt_id)
+                .map_err(|_| StartupRecoveryFailure::UnsupportedRehydration)?;
+            (attempt_id, false)
+        }
+        DurableOperationState::IntentPersisted { attempt_id } => (attempt_id, false),
+        DurableOperationState::Indeterminate { attempt_id, .. } => (attempt_id, true),
+        DurableOperationState::Confirmed { .. } | DurableOperationState::Failed { .. } => {
+            return Err(StartupRecoveryFailure::WorkerIdentityIndeterminate);
+        }
+    };
+    if !skip_sigterm {
+        info!(lifecycle_id = %record.lifecycle_id, attempt_id, "runtime_release sigterm sent");
+        let _ = signal_validated_worker(authority, record, pidfd.as_raw_fd());
+        if wait_for_pidfd(pidfd.as_raw_fd(), RUNTIME_RELEASE_SIGTERM_WAIT_MS).unwrap_or(false) {
+            info!(lifecycle_id = %record.lifecycle_id, attempt_id, "runtime_release confirmed");
+            return ledger
+                .operation_confirmed(&record.lifecycle_id, "runtime_release", attempt_id)
+                .map_err(|_| StartupRecoveryFailure::UnsupportedRehydration);
+        }
+        ledger
+            .transition_with_operation(
+                &record.lifecycle_id,
+                "started",
+                "runtime_release",
+                DurableOperationState::Indeterminate {
+                    attempt_id,
+                    stage: RUNTIME_RELEASE_STAGE_SIGTERM_INSUFFICIENT,
+                },
+            )
+            .map_err(|_| StartupRecoveryFailure::UnsupportedRehydration)?;
+    }
+    let worker = rehydrate_process_identity(
+        record.worker_pid,
+        record.worker_starttime,
+        record.worker_executable,
+        record.worker_cgroup.as_deref(),
+    );
+    let pidfd = match worker {
+        PersistedProcessIdentity::OriginalGone => {
+            info!(lifecycle_id = %record.lifecycle_id, attempt_id, "runtime_release confirmed");
+            return ledger
+                .operation_confirmed(&record.lifecycle_id, "runtime_release", attempt_id)
+                .map_err(|_| StartupRecoveryFailure::UnsupportedRehydration);
+        }
+        PersistedProcessIdentity::OriginalStillAlive { pidfd } => pidfd,
+        PersistedProcessIdentity::PidReused | PersistedProcessIdentity::Indeterminate => {
+            warn!(lifecycle_id = %record.lifecycle_id, attempt_id, "runtime_release quarantined");
+            return Err(StartupRecoveryFailure::WorkerIdentityIndeterminate);
+        }
+    };
+    info!(lifecycle_id = %record.lifecycle_id, attempt_id, "runtime_release escalated");
+    let _ = force_validated_worker_exit(authority, record, pidfd.as_raw_fd());
+    if !wait_for_pidfd(pidfd.as_raw_fd(), RUNTIME_RELEASE_SIGKILL_WAIT_MS).unwrap_or(false) {
+        warn!(lifecycle_id = %record.lifecycle_id, attempt_id, "runtime_release quarantined");
+        return Err(StartupRecoveryFailure::WorkerIdentityIndeterminate);
+    }
+    info!(lifecycle_id = %record.lifecycle_id, attempt_id, "runtime_release confirmed");
+    ledger
+        .operation_confirmed(&record.lifecycle_id, "runtime_release", attempt_id)
+        .map_err(|_| StartupRecoveryFailure::UnsupportedRehydration)
 }
 pub(crate) fn wait_for_boundary_empty(
     pin: &RecoveryPinnedInvocationUnit,

@@ -2,6 +2,7 @@ use super::*;
 use crate::launcher::recovery_admin_host::{LinuxRecoveryAdminHost, RecoveryAdminHostRef};
 
 mod messages;
+mod construction;
 mod pending;
 mod release;
 mod running;
@@ -27,44 +28,10 @@ pub(super) struct SupervisorLoopState {
     recovery_provider: Arc<dyn SupervisorRecoveryProvider>,
     recovery_admin_host: RecoveryAdminHostRef,
     ledger: Option<Arc<Mutex<PersistentRecoveryLedger>>>,
+    precommit_store: Option<Arc<Mutex<PreCommitRuntimeStore>>>,
 }
 
 impl SupervisorLoopState {
-    fn new(
-        recovery_provider: Arc<dyn SupervisorRecoveryProvider>,
-        recovery_admin_host: RecoveryAdminHostRef,
-        ledger: Option<Arc<Mutex<PersistentRecoveryLedger>>>,
-    ) -> Self {
-        let seat = ledger
-            .as_ref()
-            .and_then(|ledger| ledger.lock().ok())
-            .map(|ledger| {
-                let blocked = ledger.startup_quarantined()
-                    || ledger.record_set_classification().global_quarantine
-                    || ledger.seat_startup_quarantined("seat0")
-                    || ledger.record_set_classification().seat_blocked("seat0");
-                if blocked {
-                    SeatLifecycle::Quarantined {
-                        lifecycle_id: "consolidated-recovery-seat0".to_owned(),
-                        stage: EmergencyRecoveryStage::RecoveryRecordValidation,
-                        reason: SupervisorRecoveryError::UnknownPayloadScope,
-                    }
-                } else {
-                    SeatLifecycle::Free
-                }
-            })
-            .unwrap_or(SeatLifecycle::Free);
-        Self {
-            children: Vec::new(),
-            pending: Vec::new(),
-            quarantined: Vec::new(),
-            admission: SeatAdmissionController::new("seat0", seat),
-            recovery_provider,
-            recovery_admin_host,
-            ledger,
-        }
-    }
-
     fn run(mut self, receiver: mpsc::Receiver<WorkerSupervisorMessage>) {
         loop {
             match receiver.recv_timeout(Duration::from_millis(25)) {
@@ -100,6 +67,24 @@ impl SupervisorLoopState {
                 reason: "recovery_global_quarantine",
             };
         }
+        if let Some(store) = &self.precommit_store {
+            let Ok(store) = store.lock() else {
+                return RecoveryAdmissionState::GloballyBlocked {
+                    reason: "precommit_runtime_unavailable",
+                };
+            };
+            if store.startup_quarantined() {
+                return RecoveryAdmissionState::GloballyBlocked {
+                    reason: "precommit_runtime_quarantine",
+                };
+            }
+            if store.seat_startup_quarantined(seat) {
+                return RecoveryAdmissionState::SeatBlocked {
+                    seat: seat.to_owned(),
+                    reason: "precommit_runtime_seat_blocked",
+                };
+            }
+        }
         if ledger.seat_startup_quarantined(seat)
             || ledger.record_set_classification().seat_blocked(seat)
         {
@@ -126,6 +111,7 @@ pub(crate) fn dispatch_recovery_admin_for_test(
         Arc::new(LinuxSupervisorRecoveryProvider),
         host,
         Some(ledger.clone()),
+        None,
     );
     let response = state.recovery_admin(request).expect("fixture coordinator");
     let published_free = state.admission.is_free();
@@ -135,75 +121,6 @@ pub(crate) fn dispatch_recovery_admin_for_test(
         .into_inner()
         .expect("fixture ledger mutex");
     (response, published_free, ledger)
-}
-
-impl WorkerSupervisor {
-    pub(super) fn new() -> Self {
-        Self::new_with_recovery_provider(Arc::new(LinuxSupervisorRecoveryProvider))
-    }
-
-    pub(super) fn new_with_recovery_provider(
-        recovery_provider: Arc<dyn SupervisorRecoveryProvider>,
-    ) -> Self {
-        let (sender, receiver) = mpsc::channel();
-        let join = thread::spawn(move || {
-            SupervisorLoopState::new(recovery_provider, Arc::new(LinuxRecoveryAdminHost), None)
-                .run(receiver)
-        });
-        Self {
-            sender,
-            join: Mutex::new(Some(join)),
-        }
-    }
-
-    pub(super) fn new_with_persistent_ledger(
-        recovery_provider: Arc<dyn SupervisorRecoveryProvider>,
-        mut ledger: PersistentRecoveryLedger,
-    ) -> Self {
-        StartupRecoveryCoordinator::new(recovery_provider.as_ref()).reconcile(&mut ledger);
-        let (sender, receiver) = mpsc::channel();
-        let ledger = Arc::new(Mutex::new(ledger));
-        let join = thread::spawn(move || {
-            SupervisorLoopState::new(
-                recovery_provider,
-                Arc::new(LinuxRecoveryAdminHost),
-                Some(ledger),
-            )
-            .run(receiver)
-        });
-        Self {
-            sender,
-            join: Mutex::new(Some(join)),
-        }
-    }
-
-    #[cfg(all(test, feature = "supervisor-test-fixtures"))]
-    pub(super) fn new_with_persistent_ledger_and_admin_host(
-        recovery_provider: Arc<dyn SupervisorRecoveryProvider>,
-        mut ledger: PersistentRecoveryLedger,
-        recovery_admin_host: RecoveryAdminHostRef,
-    ) -> Self {
-        StartupRecoveryCoordinator::new(recovery_provider.as_ref()).reconcile(&mut ledger);
-        let (sender, receiver) = mpsc::channel();
-        let ledger = Arc::new(Mutex::new(ledger));
-        let join = thread::spawn(move || {
-            SupervisorLoopState::new(recovery_provider, recovery_admin_host, Some(ledger))
-                .run(receiver)
-        });
-        Self {
-            sender,
-            join: Mutex::new(Some(join)),
-        }
-    }
-}
-
-#[cfg(all(test, feature = "supervisor-test-fixtures"))]
-mod admin_host_construction_tests {
-    use super::*;
-    #[test]
-    fn fixture_constructor_accepts_an_explicit_admin_host() {
-        let _ = WorkerSupervisor::new_with_persistent_ledger_and_admin_host;
-    }
 }
 
 #[cfg(all(test, feature = "supervisor-test-fixtures"))]

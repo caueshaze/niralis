@@ -1,9 +1,13 @@
 impl DaemonFixture {
     fn spawn(mode: &str) -> Self {
+        Self::spawn_with_env(mode, &[])
+    }
+
+    fn spawn_with_env(mode: &str, environment: &[(&str, &str)]) -> Self {
         let directory = tempfile::tempdir().expect("fixture directory");
         let recovery = directory.path().join("recovery");
         let lock = directory.path().join("recovery.lock");
-        Self::spawn_with_storage(mode, directory, recovery, lock)
+        Self::spawn_with_storage_and_env(mode, directory, recovery, lock, environment)
     }
 
     fn spawn_reusing_storage(mode: &str, recovery: &Path) -> Self {
@@ -163,3 +167,32 @@ fn rewrite_record(recovery: &Path, state: &str, payload_intent: bool) -> PathBuf
     path
 }
 
+fn rewrite_runtime_release(
+    recovery: &Path,
+    runtime_release: serde_json::Value,
+    worker_cgroup: Option<&str>,
+) -> PathBuf {
+    let path = record_path(recovery);
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&fs::read(&path).expect("record bytes")).expect("record JSON");
+    value["sequence"] = serde_json::Value::from(value["sequence"].as_u64().unwrap() + 1);
+    value["operation_ledger"]["runtime_release"] = runtime_release;
+    if let Some(cgroup) = worker_cgroup {
+        value["worker_cgroup"] = serde_json::Value::String(cgroup.to_owned());
+    }
+    let temporary = recovery.join(".fixture-record.tmp");
+    let bytes = serde_json::to_vec(&value).expect("record encoding");
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&temporary)
+        .expect("temporary record");
+    file.write_all(&bytes).expect("temporary record write");
+    file.sync_all().expect("temporary record sync");
+    drop(file);
+    fs::rename(&temporary, &path).expect("record replacement");
+    let directory = fs::File::open(recovery).expect("recovery directory fd");
+    directory.sync_all().expect("recovery directory sync");
+    path
+}

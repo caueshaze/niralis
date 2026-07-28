@@ -19,45 +19,12 @@ pub(crate) fn reconcile_same_boot_record(
         record.worker_cgroup.as_deref(),
     ) {
         PersistedProcessIdentity::OriginalStillAlive { pidfd } => {
-            info!(lifecycle_id = %record.lifecycle_id, "surviving worker observed after supervisor restart");
-            if wait_for_pidfd(pidfd.as_raw_fd(), 1000).unwrap_or(false) {
-                PersistedProcessIdentity::OriginalGone
-            } else {
-                if matches!(
-                    record.operation_ledger.runtime_release,
-                    DurableOperationState::IntentPersisted { .. }
-                        | DurableOperationState::Indeterminate { .. }
-                ) {
-                    return StartupRecoveryOutcome::Quarantined(
-                        StartupRecoveryFailure::WorkerIdentityIndeterminate,
-                    );
-                }
-                let attempt = record.sequence.saturating_add(1);
-                if ledger
-                    .operation_intent(&record.lifecycle_id, "runtime_release", attempt)
-                    .is_err()
-                {
-                    return StartupRecoveryOutcome::Quarantined(
-                        StartupRecoveryFailure::UnsupportedRehydration,
-                    );
-                }
-                if signal_validated_worker(authority, record, pidfd.as_raw_fd()).is_err()
-                    || !wait_for_pidfd(pidfd.as_raw_fd(), 1000).unwrap_or(false)
-                {
-                    return StartupRecoveryOutcome::Quarantined(
-                        StartupRecoveryFailure::WorkerIdentityIndeterminate,
-                    );
-                }
-                if ledger
-                    .operation_confirmed(&record.lifecycle_id, "runtime_release", attempt)
-                    .is_err()
-                {
-                    return StartupRecoveryOutcome::Quarantined(
-                        StartupRecoveryFailure::UnsupportedRehydration,
-                    );
-                }
-                PersistedProcessIdentity::OriginalGone
+            if let Err(reason) =
+                recover_validated_runtime_release(authority, record, ledger, pidfd)
+            {
+                return StartupRecoveryOutcome::Quarantined(reason);
             }
+            PersistedProcessIdentity::OriginalGone
         }
         PersistedProcessIdentity::OriginalGone => PersistedProcessIdentity::OriginalGone,
         PersistedProcessIdentity::PidReused | PersistedProcessIdentity::Indeterminate => {
