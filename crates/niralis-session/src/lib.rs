@@ -44,7 +44,8 @@ pub use secret::{LoginSecret, WorkerSecret};
 #[cfg(any(test, feature = "integration-test-control"))]
 pub use types::RuntimeSessionId;
 pub use types::{
-    LoginBackendFactory, LoginStartError, LoginStartOutcome, LogindSessionId, SessionLauncher,
-    SessionRequest, StartedSession, UnauthenticatedLoginRequest, UnboundLoginBackend,
+    LoginBackendFactory, LoginRequestBinding, LoginStartError, LoginStartOutcome, LogindSessionId,
+    SessionLauncher, SessionRequest, StartedSession, UnauthenticatedLoginRequest,
+    UnboundLoginBackend,
 };
 pub use worker_io::{read_control_request, read_envelope, write_control_request, write_envelope};

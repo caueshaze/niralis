@@ -38,6 +38,17 @@ pub struct SessionRequest {
     pub session: SessionInfo,
 }
 
+/// Internal binding issued by niralisd after peer validation. It is metadata
+/// only; it never contains credentials and is not reconstructed from a
+/// greeter payload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoginRequestBinding {
+    pub connection_id: String,
+    pub connection_epoch: u64,
+    pub request_id: u64,
+    pub seat: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnauthenticatedLoginRequest {
     pub username: String,
@@ -45,6 +56,7 @@ pub struct UnauthenticatedLoginRequest {
     pub attempt_id: u64,
     pub launch_plan: Option<crate::SessionExecPlan>,
     pub pam_service: Option<String>,
+    pub connection: Option<LoginRequestBinding>,
 }
 
 impl UnauthenticatedLoginRequest {

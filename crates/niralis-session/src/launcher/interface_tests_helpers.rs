@@ -6,12 +6,19 @@ impl SessionLauncher for WorkerSessionLauncher {
         _factory: &dyn crate::LoginBackendFactory,
     ) -> Result<crate::LoginStartOutcome, crate::SessionError> {
         request.validate()?;
-        let plan = request.launch_plan.ok_or(crate::SessionError::WorkerProtocolFailed)?;
+        let connection = request.connection.clone();
+        let plan = request
+            .launch_plan
+            .ok_or(crate::SessionError::WorkerProtocolFailed)?;
         self.start_pam_session(
-            crate::SessionRequest { username: request.username, session: request.session },
+            crate::SessionRequest {
+                username: request.username,
+                session: request.session,
+            },
             plan,
             request.pam_service.unwrap_or_else(|| "niralis".to_owned()),
             secret.into(),
+            connection,
         )
     }
 }
@@ -75,8 +82,7 @@ fn prepare_control_root(root: &Path) -> Result<(), SessionError> {
 }
 
 fn install_control_request(request: &mut WorkerRequest, path: PathBuf, worker_id: String) {
-    if let WorkerRequest::PamSession(request) = request
-    {
+    if let WorkerRequest::PamSession(request) = request {
         *request.control_path = path;
         request.worker_id = worker_id;
         request.launcher_pid = std::process::id();

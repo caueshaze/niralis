@@ -19,8 +19,7 @@ pub(crate) fn reconcile_same_boot_record(
         record.worker_cgroup.as_deref(),
     ) {
         PersistedProcessIdentity::OriginalStillAlive { pidfd } => {
-            if let Err(reason) =
-                recover_validated_runtime_release(authority, record, ledger, pidfd)
+            if let Err(reason) = recover_validated_runtime_release(authority, record, ledger, pidfd)
             {
                 return StartupRecoveryOutcome::Quarantined(reason);
             }

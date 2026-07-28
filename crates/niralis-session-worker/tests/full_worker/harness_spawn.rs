@@ -117,6 +117,7 @@ impl FullWorker {
                         kind: SessionKind::Wayland,
                     },
                 },
+                connection: None,
                 launch_plan: Box::new(SessionExecPlan {
                     source_path: b"/fixture.desktop".to_vec(),
                     executable: b"/bin/true".to_vec(),

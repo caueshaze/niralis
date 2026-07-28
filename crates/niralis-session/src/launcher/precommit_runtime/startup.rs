@@ -23,9 +23,8 @@ impl PreCommitRuntimeStore {
         let records = self.records.values().cloned().collect::<Vec<_>>();
         for record in records {
             if record.boot_id != current_boot {
-                summary.cleared += usize::from(
-                    self.remove_record_by_id(&record.lifecycle_id).is_ok(),
-                );
+                summary.cleared +=
+                    usize::from(self.remove_record_by_id(&record.lifecycle_id).is_ok());
                 if !self.records.contains_key(&record.lifecycle_id) {
                     continue;
                 }

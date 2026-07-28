@@ -207,7 +207,10 @@ fn validated_runtime_release_quarantines_when_identity_changes_after_indetermina
         &mut ledger,
         child_pidfd(&record, &cgroup),
     );
-    assert_eq!(result, Err(StartupRecoveryFailure::WorkerIdentityIndeterminate));
+    assert_eq!(
+        result,
+        Err(StartupRecoveryFailure::WorkerIdentityIndeterminate)
+    );
     let _ = child.kill();
     let _ = child.wait();
 }

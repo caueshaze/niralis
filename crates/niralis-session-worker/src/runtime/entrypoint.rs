@@ -1,4 +1,3 @@
-
 pub fn run_worker_process_with_dependencies<
     R: Read,
     W: Write,
@@ -57,6 +56,7 @@ pub fn run_worker_process_with_dependencies<
                 worker_id,
                 launcher_pid,
                 transaction: login_identity,
+                ..
             } = request;
             let control_path = *control_path;
             if !control_path.as_os_str().is_empty()
@@ -79,32 +79,34 @@ pub fn run_worker_process_with_dependencies<
                     },
                 )?;
             }
-            run_pam_session(writer, PamSessionLaunch {
-                factory: dependencies.authenticator_factory,
-                identity_resolver: dependencies.identity_resolver,
-                supplementary_groups_resolver: dependencies.supplementary_groups_resolver,
-                session_child_runner_factory: dependencies.session_child_runner_factory,
-                logind_resolver: dependencies.logind_resolver,
-                request,
-                pam_service,
-                password,
-                session_child_path: *session_child_path,
-                session_probe_path: *session_probe_path,
-                control_path,
-                worker_id,
-                launcher_pid,
-                virtual_terminal_allocator: dependencies.virtual_terminal_allocator,
-                runtime_dir_validator: dependencies.runtime_dir_validator,
-                selinux_context_manager: dependencies.selinux_context_manager,
-                payload_scope_manager: dependencies.payload_scope_manager,
-                launch_phase_gate: dependencies.launch_phase_gate,
-                launch_plan: *launch_plan,
-                login_identity: *login_identity,
-            })
+            run_pam_session(
+                writer,
+                PamSessionLaunch {
+                    factory: dependencies.authenticator_factory,
+                    identity_resolver: dependencies.identity_resolver,
+                    supplementary_groups_resolver: dependencies.supplementary_groups_resolver,
+                    session_child_runner_factory: dependencies.session_child_runner_factory,
+                    logind_resolver: dependencies.logind_resolver,
+                    request,
+                    pam_service,
+                    password,
+                    session_child_path: *session_child_path,
+                    session_probe_path: *session_probe_path,
+                    control_path,
+                    worker_id,
+                    launcher_pid,
+                    virtual_terminal_allocator: dependencies.virtual_terminal_allocator,
+                    runtime_dir_validator: dependencies.runtime_dir_validator,
+                    selinux_context_manager: dependencies.selinux_context_manager,
+                    payload_scope_manager: dependencies.payload_scope_manager,
+                    launch_phase_gate: dependencies.launch_phase_gate,
+                    launch_plan: *launch_plan,
+                    login_identity: *login_identity,
+                },
+            )
         }
     }
 }
-
 
 include!("pam_session.rs");
 

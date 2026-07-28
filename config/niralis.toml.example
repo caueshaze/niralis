@@ -1,6 +1,7 @@
 [daemon]
 socket = "/run/niralis/niralisd.sock"
 log_level = "info"
+seat = "seat0"
 
 [greeter]
 command = "/usr/bin/niralis-greeter"

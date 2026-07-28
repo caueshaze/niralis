@@ -13,12 +13,10 @@ impl WorkerSessionLauncher {
         }
         let mut seat_reservation = if requires_pending_lifecycle {
             let lease = self.supervisor.reserve_seat(&worker_id)?;
-            Some((
-                SeatReservationGuard {
-                    supervisor: self.supervisor.clone(),
-                    lease: Some(lease),
-                },
-            ))
+            Some((SeatReservationGuard {
+                supervisor: self.supervisor.clone(),
+                lease: Some(lease),
+            },))
         } else {
             None
         };
@@ -43,16 +41,27 @@ impl WorkerSessionLauncher {
                 };
             }
         }
-        let mut attempt =
-            WorkerAttempt::spawn(
-                &self.worker_path,
-                &self.worker_environment,
-                request,
-                #[cfg(any(test, feature = "integration-test-control", feature = "supervisor-test-fixtures"))]
-                self.fixture_supervisor_transport,
-                #[cfg(not(any(test, feature = "integration-test-control", feature = "supervisor-test-fixtures")))]
-                false,
-            )?;
+        let connection_binding = match &request {
+            WorkerRequest::PamSession(request) => request.connection.clone(),
+            WorkerRequest::PrepareSession { .. } => None,
+        };
+        let mut attempt = WorkerAttempt::spawn(
+            &self.worker_path,
+            &self.worker_environment,
+            request,
+            #[cfg(any(
+                test,
+                feature = "integration-test-control",
+                feature = "supervisor-test-fixtures"
+            ))]
+            self.fixture_supervisor_transport,
+            #[cfg(not(any(
+                test,
+                feature = "integration-test-control",
+                feature = "supervisor-test-fixtures"
+            )))]
+            false,
+        )?;
         let worker_pid = attempt.child_id();
         let mut transaction = if requires_pending_lifecycle {
             let lease = seat_reservation
@@ -62,7 +71,16 @@ impl WorkerSessionLauncher {
                 .lease
                 .take()
                 .expect("seat reservation owns admission lease");
-            let identity = login_transaction::GreeterConnectionIdentity::private(worker_id.clone());
+            let identity = connection_binding
+                .map(|binding| {
+                    login_transaction::GreeterConnectionIdentity::from_binding(
+                        binding,
+                        worker_id.clone(),
+                    )
+                })
+                .unwrap_or_else(|| {
+                    login_transaction::GreeterConnectionIdentity::private(worker_id.clone())
+                });
             let tx = login_transaction::LoginTransaction::from_admission(
                 lease,
                 identity,
@@ -76,8 +94,14 @@ impl WorkerSessionLauncher {
                 Ok(backend) => backend,
                 Err(error) => {
                     let (error, mut transaction) = *error;
-                    let lease = transaction.take_lease().map_err(|_| SessionError::WorkerProtocolFailed)?;
-                    seat_reservation.as_mut().expect("PAM launch seat reservation").0.lease = Some(lease);
+                    let lease = transaction
+                        .take_lease()
+                        .map_err(|_| SessionError::WorkerProtocolFailed)?;
+                    seat_reservation
+                        .as_mut()
+                        .expect("PAM launch seat reservation")
+                        .0
+                        .lease = Some(lease);
                     return Err(error);
                 }
             };
@@ -171,27 +195,38 @@ impl WorkerSessionLauncher {
                     && matches!(fixture_version, 1 | 2)
                     && (started_worker_id == worker_id || started_worker_id.is_empty())
                     && session_pgid == session_pid
-                    && valid_transaction(&transaction, &worker_id, transaction_generation, transaction_attempt_id, "started") =>
+                    && valid_transaction(
+                        &transaction,
+                        &worker_id,
+                        transaction_generation,
+                        transaction_attempt_id,
+                        "started",
+                    ) =>
                 {
-                    let (payload_scope, registration_nonce) = if let PendingLaunchPhase::ScopeRegistered {
-                        identity,
-                        registration_nonce,
-                    } = &phase
-                    {
-                        debug!(unit = %identity.unit_name, nonce_len = registration_nonce.len(), "promoting pre-Started payload scope registration");
-                        if identity.logind_session_id != logind_session_id {
+                    let (payload_scope, registration_nonce) =
+                        if let PendingLaunchPhase::ScopeRegistered {
+                            identity,
+                            registration_nonce,
+                        } = &phase
+                        {
+                            debug!(unit = %identity.unit_name, nonce_len = registration_nonce.len(), "promoting pre-Started payload scope registration");
+                            if identity.logind_session_id != logind_session_id {
+                                return Err(SessionError::WorkerProtocolFailed);
+                            }
+                            (identity.clone(), registration_nonce.clone())
+                        } else {
                             return Err(SessionError::WorkerProtocolFailed);
-                        }
-                        (identity.clone(), registration_nonce.clone())
-                    } else {
-                        return Err(SessionError::WorkerProtocolFailed);
-                    };
+                        };
                     if !attempt.is_alive()? {
                         return Err(SessionError::WorkerExitedAfterStart);
                     }
                     attempt.finish();
                     let supervisor_channel = attempt.take_supervisor_channel();
-                    #[cfg(any(test, feature = "integration-test-control", feature = "supervisor-test-fixtures"))]
+                    #[cfg(any(
+                        test,
+                        feature = "integration-test-control",
+                        feature = "supervisor-test-fixtures"
+                    ))]
                     let fixture_supervisor_transport = attempt.take_fixture_supervisor_transport();
                     let child = attempt.shared_child();
                     let runtime_id = self.supervisor.register(
@@ -201,9 +236,17 @@ impl WorkerSessionLauncher {
                             .take_transaction(),
                         child,
                         supervisor_channel,
-                        #[cfg(any(test, feature = "integration-test-control", feature = "supervisor-test-fixtures"))]
+                        #[cfg(any(
+                            test,
+                            feature = "integration-test-control",
+                            feature = "supervisor-test-fixtures"
+                        ))]
                         fixture_supervisor_transport,
-                        #[cfg(any(test, feature = "integration-test-control", feature = "supervisor-test-fixtures"))]
+                        #[cfg(any(
+                            test,
+                            feature = "integration-test-control",
+                            feature = "supervisor-test-fixtures"
+                        ))]
                         self.fixture_inherited_supervisor_control,
                         expected.clone(),
                         session_pid,
@@ -253,14 +296,14 @@ impl WorkerSessionLauncher {
         }
         if !writer_failed {
             if let Err(error) = writer_result {
-            if let Some(guard) = pending_guard.take() {
-                return Err(if guard.complete().is_ok() {
-                    error
-                } else {
-                    SessionError::WorkerRecoveryIncomplete
-                });
-            }
-            return Err(error);
+                if let Some(guard) = pending_guard.take() {
+                    return Err(if guard.complete().is_ok() {
+                        error
+                    } else {
+                        SessionError::WorkerRecoveryIncomplete
+                    });
+                }
+                return Err(error);
             }
         }
         let response = response_result?;

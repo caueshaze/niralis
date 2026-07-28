@@ -23,6 +23,12 @@ pub struct Config {
 pub struct DaemonConfig {
     pub socket: PathBuf,
     pub log_level: String,
+    #[serde(default = "default_seat")]
+    pub seat: String,
+}
+
+fn default_seat() -> String {
+    "seat0".to_owned()
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -161,6 +167,7 @@ impl Default for Config {
             daemon: DaemonConfig {
                 socket: PathBuf::from(DEFAULT_SOCKET_PATH),
                 log_level: "info".to_owned(),
+                seat: default_seat(),
             },
             greeter: GreeterConfig {
                 command: "/usr/bin/niralis-greeter".to_owned(),

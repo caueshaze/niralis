@@ -174,9 +174,11 @@ impl PreCommitRuntimeStore {
         mut apply: impl FnMut(&mut PreCommitRuntimeRecord),
     ) -> io::Result<PreCommitRuntimeBinding> {
         self.ensure_current_authority(&binding)?;
-        let mut current = self.records.get(&binding.record.lifecycle_id).cloned().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::NotFound, "precommit runtime record")
-        })?;
+        let mut current = self
+            .records
+            .get(&binding.record.lifecycle_id)
+            .cloned()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "precommit runtime record"))?;
         current.sequence = current.sequence.checked_add(1).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidData, "precommit sequence overflow")
         })?;
@@ -188,7 +190,10 @@ impl PreCommitRuntimeStore {
         })
     }
 
-    fn binding_for(&self, record: &PreCommitRuntimeRecord) -> io::Result<PreCommitRuntimeAuthority> {
+    fn binding_for(
+        &self,
+        record: &PreCommitRuntimeRecord,
+    ) -> io::Result<PreCommitRuntimeAuthority> {
         let metadata = fs::symlink_metadata(self.record_path(&record.lifecycle_id)?)?;
         Ok(PreCommitRuntimeAuthority {
             lifecycle_id: record.lifecycle_id.clone(),
@@ -204,9 +209,10 @@ impl PreCommitRuntimeStore {
     }
 
     fn ensure_current_authority(&self, binding: &PreCommitRuntimeBinding) -> io::Result<()> {
-        let current = self.records.get(&binding.record.lifecycle_id).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::NotFound, "precommit runtime record")
-        })?;
+        let current = self
+            .records
+            .get(&binding.record.lifecycle_id)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "precommit runtime record"))?;
         if current.sequence != binding.authority.sequence
             || current.seat_generation != binding.authority.seat_generation
             || current.boot_id != binding.authority.boot_id

@@ -96,6 +96,7 @@ where
                     .collect(),
             }),
             pam_service: None,
+            connection: attempt.connection,
         };
         self.session_launcher
             .begin_login(

@@ -145,6 +145,7 @@ impl SeatAdmissionController {
         })
     }
 
+    #[allow(clippy::result_large_err)]
     pub(in crate::launcher) fn promote(
         &mut self,
         lease: AdmissionLease,
@@ -168,6 +169,7 @@ impl SeatAdmissionController {
         Ok((pending, lease.previous_vt))
     }
 
+    #[allow(clippy::result_large_err)]
     pub(in crate::launcher) fn commit(
         &mut self,
         lease: PendingLifecycleLease,
@@ -511,7 +513,9 @@ impl AdmissionLease {
             return Ok(());
         };
         let store = process_runtime_store().ok_or(SessionError::PersistentRecoveryUnavailable)?;
-        let mut store = store.lock().map_err(|_| SessionError::PersistentRecoveryUnavailable)?;
+        let mut store = store
+            .lock()
+            .map_err(|_| SessionError::PersistentRecoveryUnavailable)?;
         let binding = store
             .update_stage(binding, stage, worker_id, worker_pid)
             .map_err(|_| SessionError::PersistentRecoveryUnavailable)?;

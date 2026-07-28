@@ -62,15 +62,97 @@ fn read_password_line(mut reader: impl BufRead) -> Result<String, CliError> {
 
 fn send_request(socket: &PathBuf, request: &NiralisRequest) -> Result<NiralisResponse, CliError> {
     let mut stream = UnixStream::connect(socket)?;
-    serde_json::to_writer(&mut stream, request)?;
+    serde_json::to_writer(
+        &mut stream,
+        &GreeterHandshake {
+            protocol_version: GREETER_PROTOCOL_VERSION,
+            message_type: "handshake".to_owned(),
+        },
+    )?;
     stream.write_all(b"\n")?;
     stream.flush()?;
 
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
-    reader.read_line(&mut line)?;
+    read_greeter_line(&mut reader, &mut line)?;
+    let handshake: GreeterHandshakeResponse = serde_json::from_str(line.trim_end())?;
+    if handshake.protocol_version != GREETER_PROTOCOL_VERSION
+        || handshake.connection_epoch == 0
+        || handshake.connection_id.as_str().is_empty()
+        || handshake.seat.as_str().is_empty()
+    {
+        return Err(CliError::GreeterProtocol(
+            "invalid handshake response".to_owned(),
+        ));
+    }
+    line.clear();
+    let payload = match request {
+        NiralisRequest::Status => GreeterRequest::Status,
+        NiralisRequest::GetUsers => GreeterRequest::GetUsers,
+        NiralisRequest::GetSessions => GreeterRequest::GetSessions,
+        NiralisRequest::Login {
+            username,
+            password,
+            session,
+        } => GreeterRequest::Login {
+            username: username.clone(),
+            session: session.clone(),
+            secret: LoginSecret::new(password.clone()),
+        },
+        NiralisRequest::Shutdown | NiralisRequest::Reboot => {
+            return Ok(NiralisResponse::Error {
+                message: "not implemented".to_owned(),
+            });
+        }
+    };
+    let payload_len = serde_json::to_vec(&payload)?.len();
+    let message_type = match &payload {
+        GreeterRequest::Status => "status",
+        GreeterRequest::GetUsers => "get_users",
+        GreeterRequest::GetSessions => "get_sessions",
+        GreeterRequest::Login { .. } => "login",
+        GreeterRequest::Cancel { .. } => "cancel",
+    };
+    let envelope = GreeterRequestEnvelope {
+        protocol_version: GREETER_PROTOCOL_VERSION,
+        message_type: message_type.to_owned(),
+        connection_id: handshake.connection_id,
+        connection_epoch: handshake.connection_epoch,
+        request_id: RequestId(1),
+        sequence: 1,
+        seat: handshake.seat,
+        payload_len,
+        payload,
+    };
+    serde_json::to_writer(reader.get_mut(), &envelope)?;
+    reader.get_mut().write_all(b"\n")?;
+    reader.get_mut().flush()?;
+    line.clear();
+    read_greeter_line(&mut reader, &mut line)?;
 
-    Ok(serde_json::from_str(line.trim_end())?)
+    let response: GreeterResponseEnvelope = serde_json::from_str(line.trim_end())?;
+    if response.request_id != RequestId(1)
+        || response.connection_epoch != handshake.connection_epoch
+    {
+        return Err(CliError::GreeterProtocol(
+            "response correlation mismatch".to_owned(),
+        ));
+    }
+    Ok(response.result)
+}
+
+fn read_greeter_line(
+    reader: &mut BufReader<UnixStream>,
+    line: &mut String,
+) -> Result<(), CliError> {
+    let bytes = reader.read_line(line)?;
+    if bytes == 0 {
+        return Err(CliError::GreeterProtocol("unexpected end of stream".to_owned()));
+    }
+    if bytes > MAX_GREETER_FRAME_BYTES || !line.ends_with('\n') {
+        return Err(CliError::GreeterProtocol("invalid frame".to_owned()));
+    }
+    Ok(())
 }
 
 fn print_response(response: &NiralisResponse) {
@@ -114,4 +196,3 @@ fn print_response(response: &NiralisResponse) {
         }
     }
 }
-

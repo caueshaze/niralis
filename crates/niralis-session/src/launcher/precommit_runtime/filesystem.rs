@@ -5,7 +5,9 @@ use std::io;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-pub(crate) fn load_records(directory: &Path) -> io::Result<BTreeMap<String, PreCommitRuntimeRecord>> {
+pub(crate) fn load_records(
+    directory: &Path,
+) -> io::Result<BTreeMap<String, PreCommitRuntimeRecord>> {
     let mut records = BTreeMap::new();
     for entry in fs::read_dir(directory)? {
         let entry = entry?;

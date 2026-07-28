@@ -125,14 +125,14 @@ mod startup_absent_boundary;
 mod startup_linux;
 mod startup_process;
 mod startup_quarantine;
+#[cfg(test)]
+mod startup_runtime_release_tests;
 mod startup_same_boot;
 mod startup_same_boot_logind;
 mod startup_same_boot_payload;
 mod startup_same_boot_support;
 #[cfg(test)]
 mod startup_tests;
-#[cfg(test)]
-mod startup_runtime_release_tests;
 mod startup_vt_recovery;
 mod systemd_dbus;
 mod systemd_pin;

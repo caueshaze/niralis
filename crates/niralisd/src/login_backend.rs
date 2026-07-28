@@ -4,7 +4,9 @@ mod pam_worker;
 use niralis_auth::MockAuthenticator;
 use niralis_discovery::ResolvedSessionLaunchSpec;
 use niralis_protocol::SessionInfo;
-use niralis_session::{RecoveryAdminRequest, RecoveryAdminResponse, StartedSession};
+use niralis_session::{
+    LoginRequestBinding, RecoveryAdminRequest, RecoveryAdminResponse, StartedSession,
+};
 use std::sync::atomic::{AtomicU64, Ordering};
 use thiserror::Error;
 use zeroize::Zeroizing;
@@ -22,6 +24,7 @@ pub struct LoginAttempt {
     pub session: SessionInfo,
     pub launch_spec: ResolvedSessionLaunchSpec,
     pub attempt_id: u64,
+    pub connection: Option<LoginRequestBinding>,
 }
 
 static NEXT_LOGIN_ATTEMPT_ID: AtomicU64 = AtomicU64::new(1);
@@ -59,6 +62,10 @@ pub trait LoginBackend: Send + Sync {
 
     fn shutdown_sessions(&self) {}
 
+    fn cancel_login(&self, _binding: &LoginRequestBinding) -> bool {
+        false
+    }
+
     fn recovery_admin(
         &self,
         _request: RecoveryAdminRequest,
@@ -80,6 +87,10 @@ where
 
     fn shutdown_sessions(&self) {
         (**self).shutdown_sessions();
+    }
+
+    fn cancel_login(&self, binding: &LoginRequestBinding) -> bool {
+        (**self).cancel_login(binding)
     }
 
     fn recovery_admin(

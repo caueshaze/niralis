@@ -20,11 +20,22 @@ impl WorkerSessionLauncher {
             worker_environment,
             supervisor: Arc::new(WorkerSupervisor::new()),
             release_verifier: Arc::new(crate::SystemdPayloadScopeReleaseVerifier),
-            #[cfg(any(test, feature = "integration-test-control", feature = "supervisor-test-fixtures"))]
+            #[cfg(any(
+                test,
+                feature = "integration-test-control",
+                feature = "supervisor-test-fixtures"
+            ))]
             fixture_supervisor_transport: false,
-            #[cfg(any(test, feature = "integration-test-control", feature = "supervisor-test-fixtures"))]
+            #[cfg(any(
+                test,
+                feature = "integration-test-control",
+                feature = "supervisor-test-fixtures"
+            ))]
             fixture_inherited_supervisor_control: false,
-            #[cfg(any(feature = "integration-test-control", feature = "supervisor-test-fixtures"))]
+            #[cfg(any(
+                feature = "integration-test-control",
+                feature = "supervisor-test-fixtures"
+            ))]
             fixture_recovery_provider: None,
         })
     }
@@ -55,11 +66,22 @@ impl WorkerSessionLauncher {
                 ledger,
             )),
             release_verifier: Arc::new(crate::SystemdPayloadScopeReleaseVerifier),
-            #[cfg(any(test, feature = "integration-test-control", feature = "supervisor-test-fixtures"))]
+            #[cfg(any(
+                test,
+                feature = "integration-test-control",
+                feature = "supervisor-test-fixtures"
+            ))]
             fixture_supervisor_transport: false,
-            #[cfg(any(test, feature = "integration-test-control", feature = "supervisor-test-fixtures"))]
+            #[cfg(any(
+                test,
+                feature = "integration-test-control",
+                feature = "supervisor-test-fixtures"
+            ))]
             fixture_inherited_supervisor_control: false,
-            #[cfg(any(feature = "integration-test-control", feature = "supervisor-test-fixtures"))]
+            #[cfg(any(
+                feature = "integration-test-control",
+                feature = "supervisor-test-fixtures"
+            ))]
             fixture_recovery_provider: None,
         })
     }
@@ -72,7 +94,10 @@ impl WorkerSessionLauncher {
         self.release_verifier = verifier;
     }
 
-    #[cfg(any(feature = "integration-test-control", feature = "supervisor-test-fixtures"))]
+    #[cfg(any(
+        feature = "integration-test-control",
+        feature = "supervisor-test-fixtures"
+    ))]
     pub fn use_supervisor_test_fixture_for_test(&mut self) {
         self.use_supervisor_test_fixture_mode_for_test(
             SupervisorFixtureBoundaryMode::AlreadyEmpty,
@@ -80,7 +105,10 @@ impl WorkerSessionLauncher {
         );
     }
 
-    #[cfg(any(feature = "integration-test-control", feature = "supervisor-test-fixtures"))]
+    #[cfg(any(
+        feature = "integration-test-control",
+        feature = "supervisor-test-fixtures"
+    ))]
     pub fn use_supervisor_test_fixture_mode_for_test(
         &mut self,
         mode: SupervisorFixtureBoundaryMode,
@@ -96,12 +124,20 @@ impl WorkerSessionLauncher {
         self.fixture_recovery_provider = Some(provider);
     }
 
-    #[cfg(any(test, feature = "integration-test-control", feature = "supervisor-test-fixtures"))]
+    #[cfg(any(
+        test,
+        feature = "integration-test-control",
+        feature = "supervisor-test-fixtures"
+    ))]
     pub fn use_fixture_supervisor_transport_for_test(&mut self) {
         self.fixture_supervisor_transport = true;
     }
 
-    #[cfg(any(test, feature = "integration-test-control", feature = "supervisor-test-fixtures"))]
+    #[cfg(any(
+        test,
+        feature = "integration-test-control",
+        feature = "supervisor-test-fixtures"
+    ))]
     pub fn use_inherited_supervisor_control_for_test(&mut self) {
         self.fixture_inherited_supervisor_control = true;
     }
@@ -183,10 +219,7 @@ impl WorkerSessionLauncher {
             emergency_kills: provider.counters.emergency_kills.load(Ordering::SeqCst),
             proofs: provider.counters.proofs.load(Ordering::SeqCst),
             unrefs: provider.counters.unrefs.load(Ordering::SeqCst),
-            logind_terminations: provider
-                .counters
-                .logind_terminations
-                .load(Ordering::SeqCst),
+            logind_terminations: provider.counters.logind_terminations.load(Ordering::SeqCst),
             vt_recoveries: provider.counters.vt_recoveries.load(Ordering::SeqCst),
         })
     }
@@ -220,10 +253,12 @@ impl WorkerSessionLauncher {
         launch_plan: crate::SessionExecPlan,
         pam_service: String,
         password: WorkerSecret,
+        connection: Option<crate::LoginRequestBinding>,
     ) -> Result<StartedSession, SessionError> {
         self.start_worker(
             WorkerRequest::PamSession(crate::WorkerPamSessionRequest {
                 request: request.clone(),
+                connection,
                 launch_plan: Box::new(launch_plan),
                 pam_service,
                 password,
@@ -233,7 +268,12 @@ impl WorkerSessionLauncher {
                 worker_id: String::new(),
                 launcher_pid: 0,
                 transaction: Box::new(crate::WorkerTransactionIdentity {
-                    transaction_id: String::new(), admission_attempt_id: 0, lifecycle_id: String::new(), seat: String::new(), seat_generation: 0, stage: "reserved".into(),
+                    transaction_id: String::new(),
+                    admission_attempt_id: 0,
+                    lifecycle_id: String::new(),
+                    seat: String::new(),
+                    seat_generation: 0,
+                    stage: "reserved".into(),
                 }),
             }),
             expected_started_session(&request),
@@ -253,6 +293,7 @@ impl WorkerSessionLauncher {
         self.start_worker(
             WorkerRequest::PamSession(crate::WorkerPamSessionRequest {
                 request: request.clone(),
+                connection: None,
                 launch_plan: Box::new(launch_plan),
                 pam_service,
                 password,
@@ -262,12 +303,16 @@ impl WorkerSessionLauncher {
                 worker_id: String::new(),
                 launcher_pid: 0,
                 transaction: Box::new(crate::WorkerTransactionIdentity {
-                    transaction_id: String::new(), admission_attempt_id: 0, lifecycle_id: String::new(), seat: String::new(), seat_generation: 0, stage: "reserved".into(),
+                    transaction_id: String::new(),
+                    admission_attempt_id: 0,
+                    lifecycle_id: String::new(),
+                    seat: String::new(),
+                    seat_generation: 0,
+                    stage: "reserved".into(),
                 }),
             }),
             expected_started_session(&request),
             true,
         )
     }
-
 }

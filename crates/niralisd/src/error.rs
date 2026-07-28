@@ -18,6 +18,20 @@ pub enum NiralisdError {
     Io(#[from] std::io::Error),
     #[error("ipc json error: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("peer credentials unavailable")]
+    PeerCredentialsUnavailable,
+    #[error("peer credentials rejected")]
+    PeerCredentialsRejected,
+    #[error("connection authority rejected")]
+    ConnectionAuthorityRejected,
+    #[error("connection generation unavailable")]
+    ConnectionGenerationUnavailable,
+    #[error("greeter frame is oversized")]
+    FrameTooLarge,
+    #[error("greeter frame is truncated")]
+    FrameTruncated,
+    #[error("greeter protocol rejected: {0}")]
+    ProtocolRejected(&'static str),
     #[error("invalid socket path: {0}")]
     InvalidSocketPath(PathBuf),
     #[error("greeter user name contains a NUL byte")]

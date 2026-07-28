@@ -74,6 +74,7 @@ fn authentication_failed_is_reported() {
             plan(),
             "niralis".to_owned(),
             WorkerSecret::new("secret".to_owned()),
+            None,
         )
         .expect_err("auth failure should fail");
     assert_eq!(error, SessionError::AuthenticationFailed);
@@ -88,6 +89,7 @@ fn session_failed_is_reported() {
             plan(),
             "niralis".to_owned(),
             WorkerSecret::new("secret".to_owned()),
+            None,
         )
         .expect_err("session failure should fail");
     assert_eq!(error, SessionError::AuthenticatedSessionFailed);

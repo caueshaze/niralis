@@ -8,6 +8,7 @@ fn auth_failure_with_exit_zero_is_protocol_error() {
             plan(),
             "niralis".to_owned(),
             WorkerSecret::new("secret".to_owned()),
+            None,
         )
         .expect_err("exit zero auth failure should fail");
     assert_eq!(error, SessionError::WorkerProtocolFailed);

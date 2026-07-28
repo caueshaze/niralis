@@ -31,7 +31,7 @@ type niralis_var_run_t;
 files_pid_file(niralis_var_run_t)
 
 # Root-only recovery control plane.  It is deliberately distinct from the
-# greeter's runtime tree: only niralisd creates the directory and seqpacket
+# greeter's runtime tree: only niralisd creates the directory and stream
 # socket, and no authenticated session is granted pathname access to it.
 type niralis_recovery_admin_var_run_t;
 files_pid_file(niralis_recovery_admin_var_run_t)
@@ -60,9 +60,8 @@ gen_require(`
 ')
 allow unconfined_t niralis_recovery_admin_var_run_t:dir search;
 allow unconfined_t niralis_recovery_admin_var_run_t:sock_file write;
-# SELinux models local Unix stream and seqpacket connect permissions through
-# the unix_stream_socket class; transport framing remains SOCK_SEQPACKET in
-# the daemon implementation.
+# SELinux models local Unix stream permissions through the unix_stream_socket
+# class; the daemon uses bounded framed stream messages.
 allow unconfined_t niralis_t:unix_stream_socket connectto;
 manage_dirs_pattern(niralis_t, niralis_var_lib_t, niralis_var_lib_t)
 manage_files_pattern(niralis_t, niralis_var_lib_t, niralis_var_lib_t)

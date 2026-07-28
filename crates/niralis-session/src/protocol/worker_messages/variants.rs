@@ -1,6 +1,7 @@
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkerPamSessionRequest {
     pub request: SessionRequest,
+    pub connection: Option<crate::LoginRequestBinding>,
     pub launch_plan: Box<SessionExecPlan>,
     pub pam_service: String,
     pub password: WorkerSecret,
@@ -14,9 +15,7 @@ pub struct WorkerPamSessionRequest {
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WorkerRequest {
-    PrepareSession {
-        request: SessionRequest,
-    },
+    PrepareSession { request: SessionRequest },
     PamSession(WorkerPamSessionRequest),
 }
 

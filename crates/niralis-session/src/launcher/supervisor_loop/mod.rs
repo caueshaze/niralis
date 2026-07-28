@@ -1,8 +1,8 @@
 use super::*;
 use crate::launcher::recovery_admin_host::{LinuxRecoveryAdminHost, RecoveryAdminHostRef};
 
-mod messages;
 mod construction;
+mod messages;
 mod pending;
 mod release;
 mod running;

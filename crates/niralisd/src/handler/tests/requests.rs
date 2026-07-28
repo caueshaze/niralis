@@ -81,13 +81,13 @@ fn discovery_errors_return_structured_error_response() {
     assert_eq!(
         handler.handle(NiralisRequest::GetUsers),
         NiralisResponse::Error {
-            message: "failed to discover users: failed to enumerate users".to_owned(),
+            message: "failed to discover users".to_owned(),
         }
     );
     assert_eq!(
         handler.handle(NiralisRequest::GetSessions),
         NiralisResponse::Error {
-            message: "failed to discover sessions: failed to enumerate users".to_owned(),
+            message: "failed to discover sessions".to_owned(),
         }
     );
 }

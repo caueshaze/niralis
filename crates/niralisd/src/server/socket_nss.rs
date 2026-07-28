@@ -1,23 +1,30 @@
 use std::ffi::{CStr, CString};
 use std::fs;
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, Read, Write};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+use std::os::unix::fs::FileTypeExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use niralis_protocol::{NiralisRequest, NiralisResponse};
-use tracing::{debug, info, warn};
-use zeroize::{Zeroize, Zeroizing};
+use niralis_protocol::{
+    GreeterHandshake, GreeterHandshakeResponse, GreeterRequest,
+    GreeterRequestEnvelope, GreeterResponseEnvelope, NiralisRequest,
+    GREETER_PROTOCOL_VERSION, MAX_GREETER_FRAME_BYTES,
+};
+use tracing::{info, warn};
 
 use crate::config::Config;
+use crate::connection::GreeterConnectionAuthority;
 use crate::error::{NiralisdError, Result};
 use crate::handler::{RecoveryAdminHandler, RequestHandler};
 
 const NSS_BUFFER_FALLBACK: usize = 1024;
 const NSS_BUFFER_MAX: usize = 1024 * 1024;
-
+const MAX_GREETER_CONNECTIONS: usize = 32;
+static ACTIVE_CONNECTIONS: AtomicUsize = AtomicUsize::new(0);
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct GreeterIdentity {
     username: String,
@@ -47,10 +54,21 @@ where
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
-                let handler = Arc::clone(&handler);
-                if let Err(error) = handle_client(stream, handler.as_ref()) {
-                    warn!(%error, "failed to handle ipc client");
+                if ACTIVE_CONNECTIONS.fetch_add(1, Ordering::AcqRel) >= MAX_GREETER_CONNECTIONS {
+                    ACTIVE_CONNECTIONS.fetch_sub(1, Ordering::AcqRel);
+                    warn!("greeter connection limit reached");
+                    continue;
                 }
+                let handler = Arc::clone(&handler);
+                let expected_peer = greeter.clone();
+                let seat = config.daemon.seat.clone();
+                std::thread::spawn(move || {
+                    let result = handle_client(stream, handler.as_ref(), &expected_peer, &seat);
+                    ACTIVE_CONNECTIONS.fetch_sub(1, Ordering::AcqRel);
+                    if let Err(error) = result {
+                        warn!(%error, "failed to handle ipc client");
+                    }
+                });
             }
             Err(error) => warn!(%error, "failed to accept ipc client"),
         }
@@ -69,17 +87,26 @@ fn bind_socket_with<F>(
     ownership_setter: F,
 ) -> Result<UnixListener>
 where
-    F: FnOnce(&Path, libc::uid_t, libc::gid_t) -> io::Result<()>,
+    F: FnOnce(RawFd, libc::uid_t, libc::gid_t) -> io::Result<()>,
 {
     let runtime_dir = socket_path
         .parent()
         .ok_or_else(|| NiralisdError::InvalidSocketPath(socket_path.to_path_buf()))?;
 
-    fs::create_dir_all(runtime_dir)?;
-    fs::set_permissions(runtime_dir, fs::Permissions::from_mode(0o755))?;
+    if runtime_dir.exists() {
+        let metadata = fs::symlink_metadata(runtime_dir)?;
+        if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
+            return Err(NiralisdError::InvalidSocketPath(runtime_dir.to_path_buf()));
+        }
+    } else {
+        fs::create_dir_all(runtime_dir)?;
+    }
+    secure_runtime_dir(runtime_dir)?;
 
-    if socket_path.exists() {
-        let metadata = fs::metadata(socket_path)?;
+    if let Ok(metadata) = fs::symlink_metadata(socket_path) {
+        if metadata.file_type().is_symlink() {
+            return Err(NiralisdError::InvalidSocketPath(socket_path.to_path_buf()));
+        }
         if metadata.file_type().is_socket() {
             fs::remove_file(socket_path)?;
         } else {
@@ -88,7 +115,7 @@ where
     }
 
     let listener = UnixListener::bind(socket_path)?;
-    if let Err(error) = configure_socket(socket_path, greeter, ownership_setter) {
+    if let Err(error) = configure_socket(listener.as_raw_fd(), greeter, ownership_setter) {
         drop(listener);
         let _ = fs::remove_file(socket_path);
         return Err(error);
@@ -97,31 +124,47 @@ where
     Ok(listener)
 }
 
+fn secure_runtime_dir(runtime_dir: &Path) -> Result<()> {
+    let path = CString::new(runtime_dir.as_os_str().as_bytes())
+        .map_err(|_| NiralisdError::InvalidSocketPath(runtime_dir.to_path_buf()))?;
+    let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    let raw = unsafe { libc::open(path.as_ptr(), flags) };
+    if raw < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    // SAFETY: raw is a newly opened directory descriptor owned by this scope.
+    let directory = unsafe { OwnedFd::from_raw_fd(raw) };
+    let uid = unsafe { libc::geteuid() };
+    let gid = unsafe { libc::getegid() };
+    if unsafe { libc::fchown(directory.as_raw_fd(), uid, gid) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    if unsafe { libc::fchmod(directory.as_raw_fd(), 0o700) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(())
+}
+
 fn configure_socket<F>(
-    socket_path: &Path,
+    socket_fd: RawFd,
     greeter: &GreeterIdentity,
     ownership_setter: F,
 ) -> Result<()>
 where
-    F: FnOnce(&Path, libc::uid_t, libc::gid_t) -> io::Result<()>,
+    F: FnOnce(RawFd, libc::uid_t, libc::gid_t) -> io::Result<()>,
 {
     // The service UMask creates the socket with no group or other access. Keep
     // that restrictive state while changing its group, then expose it exactly.
-    ownership_setter(socket_path, 0, greeter.gid)?;
-    fs::set_permissions(socket_path, fs::Permissions::from_mode(0o660))?;
+    ownership_setter(socket_fd, 0, greeter.gid)?;
+    let status = unsafe { libc::fchmod(socket_fd, 0o660) };
+    if status != 0 {
+        return Err(io::Error::last_os_error().into());
+    }
     Ok(())
 }
 
-fn set_socket_ownership(socket_path: &Path, uid: libc::uid_t, gid: libc::gid_t) -> io::Result<()> {
-    let path = CString::new(socket_path.as_os_str().as_bytes()).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "socket path contains a NUL byte",
-        )
-    })?;
-
-    // SAFETY: `path` is a NUL-terminated copy that remains alive for this call.
-    let result = unsafe { libc::chown(path.as_ptr(), uid, gid) };
+fn set_socket_ownership(socket_fd: RawFd, uid: libc::uid_t, gid: libc::gid_t) -> io::Result<()> {
+    let result = unsafe { libc::fchown(socket_fd, uid, gid) };
     if result == 0 {
         Ok(())
     } else {

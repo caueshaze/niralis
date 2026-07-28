@@ -83,7 +83,7 @@ fn state_with(
     ledger.lock().unwrap().create(record).unwrap();
     let provider = Arc::new(SupervisorFixtureRecoveryProvider::successful());
     (
-        SupervisorLoopState::new(provider, host, Some(ledger.clone())),
+        SupervisorLoopState::new(provider, host, Some(ledger.clone()), None),
         ledger,
     )
 }

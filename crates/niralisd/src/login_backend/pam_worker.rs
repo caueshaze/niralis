@@ -71,6 +71,7 @@ impl LoginBackend for PamWorkerLoginBackend {
                             .collect(),
                     }),
                     pam_service: Some(self.pam_service.clone()),
+                    connection: attempt.connection,
                 },
                 niralis_session::LoginSecret::new(attempt.password.to_string()),
                 &WorkerBackendFactory,

@@ -35,6 +35,7 @@ fn worker_request_round_trip_preserves_wayland_x11_and_secret() {
                     username: "test".to_owned(),
                     session: session(kind),
                 },
+                connection: None,
                 pam_service: "niralis".to_owned(),
                 password: WorkerSecret::new("secret".to_owned()),
                 session_child_path: Box::new(PathBuf::from("/usr/libexec/niralis-session-child")),

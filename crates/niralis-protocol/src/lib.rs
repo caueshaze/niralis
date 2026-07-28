@@ -1,3 +1,6 @@
+mod greeter;
+pub use greeter::*;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(PartialEq, Eq, Serialize, Deserialize)]
@@ -79,6 +82,43 @@ pub enum SessionKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+
+    #[test]
+    fn rejected_secret_is_not_debuggable() {
+        let secret = LoginSecret::new("not-for-logs".into());
+        assert!(!format!("{secret:?}").contains("not-for-logs"));
+    }
+
+    #[test]
+    fn duplicate_and_regressive_sequence_are_rejected() {
+        let mut sequence = MonotonicSequence::default();
+        assert!(sequence.accept(1).is_ok());
+        assert_eq!(sequence.accept(1), Err(EnvelopeError::InvalidSequence));
+        assert_eq!(sequence.accept(0), Err(EnvelopeError::InvalidSequence));
+    }
+
+    #[test]
+    fn two_connections_and_sequence_matrix_20_of_20_without_sleep() {
+        for _ in 0..20 {
+            let barrier = Arc::new(Barrier::new(2));
+            let left_barrier = Arc::clone(&barrier);
+            let right_barrier = Arc::clone(&barrier);
+            let left = thread::spawn(move || {
+                let mut sequence = MonotonicSequence::default();
+                left_barrier.wait();
+                sequence.accept(1).is_ok() && sequence.accept(1).is_err()
+            });
+            let right = thread::spawn(move || {
+                let mut sequence = MonotonicSequence::default();
+                right_barrier.wait();
+                sequence.accept(1).is_ok() && sequence.accept(0).is_err()
+            });
+            assert!(left.join().expect("left connection should finish"));
+            assert!(right.join().expect("right connection should finish"));
+        }
+    }
 
     #[test]
     fn serializes_login_request_without_shape_drift() {

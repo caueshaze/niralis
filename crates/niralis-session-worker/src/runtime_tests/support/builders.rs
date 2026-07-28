@@ -22,6 +22,7 @@ pub(super) fn request() -> WorkerEnvelope<WorkerRequest> {
                     kind: SessionKind::Wayland,
                 },
             },
+            connection: None,
             pam_service: "niralis".to_owned(),
             password: WorkerSecret::new("secret".to_owned()),
             session_child_path: Box::new("/usr/libexec/niralis-session-child".into()),

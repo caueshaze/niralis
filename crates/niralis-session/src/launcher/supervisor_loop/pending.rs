@@ -15,7 +15,9 @@ impl SupervisorLoopState {
             .capture_previous_vt("seat0")
             .map_err(|_| SessionError::WorkerIoFailed)?;
         let recovery = self.recovery_admission_state("seat0");
-        let mut lease = self.admission.reserve(lifecycle_id.clone(), recovery, previous_vt)?;
+        let mut lease = self
+            .admission
+            .reserve(lifecycle_id.clone(), recovery, previous_vt)?;
         if let Some(store) = &self.precommit_store {
             let binding = store
                 .lock()

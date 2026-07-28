@@ -10,7 +10,13 @@ use std::time::Instant;
 pub(super) struct LoginTransactionId(String);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct GreeterConnectionIdentity(String);
+pub(super) struct GreeterConnectionIdentity {
+    worker_id: String,
+    connection_id: Option<String>,
+    connection_epoch: Option<u64>,
+    request_id: Option<u64>,
+    seat: Option<String>,
+}
 
 #[derive(Debug)]
 pub(super) struct LoginTransaction {
@@ -102,7 +108,7 @@ impl LoginTransaction {
         &self.lifecycle_id
     }
     pub(super) fn validate_expected(&self, greeter: &str, session: &str) -> bool {
-        self.greeter.as_str() == greeter
+        self.greeter.worker_id == greeter
             && self.session_selection_id == session
             && !self.lifecycle_id.is_empty()
             && !self.seat.is_empty()
@@ -188,7 +194,23 @@ impl TransactionOwnedLoginBackend {
 
 impl GreeterConnectionIdentity {
     pub(super) fn private(value: String) -> Self {
-        Self(value)
+        Self {
+            worker_id: value,
+            connection_id: None,
+            connection_epoch: None,
+            request_id: None,
+            seat: None,
+        }
+    }
+
+    pub(super) fn from_binding(value: crate::LoginRequestBinding, worker_id: String) -> Self {
+        Self {
+            worker_id,
+            connection_id: Some(value.connection_id),
+            connection_epoch: Some(value.connection_epoch),
+            request_id: Some(value.request_id),
+            seat: Some(value.seat),
+        }
     }
 }
 
@@ -285,12 +307,6 @@ impl PendingLaunchTransaction {
 }
 
 impl LoginTransactionId {
-    fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl GreeterConnectionIdentity {
     fn as_str(&self) -> &str {
         &self.0
     }

@@ -5,7 +5,11 @@ use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
-use niralis_protocol::{NiralisRequest, NiralisResponse, SessionKind};
+use niralis_protocol::{
+    GreeterHandshake, GreeterHandshakeResponse, GreeterRequest, GreeterRequestEnvelope,
+    GreeterResponseEnvelope, LoginSecret, NiralisRequest, NiralisResponse, RequestId, SessionKind,
+    MAX_GREETER_FRAME_BYTES, GREETER_PROTOCOL_VERSION,
+};
 use niralis_session::{
     RecoveryAdminEnvelope, RecoveryAdminRequest, RecoveryAdminResponse,
     MAX_RECOVERY_ADMIN_PACKET_BYTES, RECOVERY_ADMIN_PROTOCOL_VERSION,
@@ -75,6 +79,8 @@ enum CliError {
     Io(#[from] std::io::Error),
     #[error("ipc json error: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("greeter protocol error: {0}")]
+    GreeterProtocol(String),
     #[error("recovery administration requires uid 0")]
     RecoveryRequiresRoot,
     #[error("recovery administration protocol error: {0}")]
@@ -221,4 +227,3 @@ fn send_recovery_request(
     }
     Ok(envelope.message)
 }
-
