@@ -8,19 +8,16 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-
 use niralis_protocol::{
     GreeterHandshake, GreeterHandshakeResponse, GreeterRequest,
     GreeterRequestEnvelope, GreeterResponseEnvelope, NiralisRequest,
     GREETER_PROTOCOL_VERSION, MAX_GREETER_FRAME_BYTES,
 };
 use tracing::{info, warn};
-
 use crate::config::Config;
 use crate::connection::GreeterConnectionAuthority;
 use crate::error::{NiralisdError, Result};
 use crate::handler::{RecoveryAdminHandler, RequestHandler};
-
 const NSS_BUFFER_FALLBACK: usize = 1024;
 const NSS_BUFFER_MAX: usize = 1024 * 1024;
 const MAX_GREETER_CONNECTIONS: usize = 32;
@@ -192,7 +189,6 @@ fn set_socket_ownership(socket_fd: RawFd, uid: libc::uid_t, gid: libc::gid_t) ->
         Err(io::Error::last_os_error())
     }
 }
-
 fn resolve_greeter_identity(username: &str) -> Result<GreeterIdentity> {
     resolve_greeter_identity_with(username, lookup_passwd)
 }
@@ -231,7 +227,6 @@ where
         }
     }
 }
-
 fn validate_greeter_identity(identity: GreeterIdentity) -> Result<GreeterIdentity> {
     if identity.uid == 0 {
         return Err(NiralisdError::InvalidGreeterUid);
@@ -241,7 +236,6 @@ fn validate_greeter_identity(identity: GreeterIdentity) -> Result<GreeterIdentit
     }
     Ok(identity)
 }
-
 fn nss_initial_buffer_size() -> usize {
     // SAFETY: `sysconf` has no Rust-visible memory safety preconditions.
     let configured_size = unsafe { libc::sysconf(libc::_SC_GETPW_R_SIZE_MAX) };

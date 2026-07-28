@@ -186,3 +186,35 @@ fn secrets_have_no_debug_path() {
     assert!(text.contains("LoginSecret([redacted])"));
     assert!(!text.contains("#[derive(Debug, Serialize, Deserialize)]\npub struct LoginSecret"));
 }
+
+#[test]
+fn pam_conversation_has_typed_ownership_boundary() {
+    let text = source("crates/niralis-session/src/pam_conversation.rs");
+    assert!(text.contains("pub struct PamConversationAuthority"));
+    assert!(text.contains("pub struct PendingPamPrompt"));
+    assert!(text.contains("PamConversationError::ConversationConsumed"));
+    assert!(text.contains("matches_transaction"));
+}
+
+#[test]
+fn pam_prompt_response_is_style_checked_before_handoff() {
+    let text = source("crates/niralis-session/src/pam_conversation.rs");
+    assert!(text.contains("PamMessageStyle::PromptEchoOff"));
+    assert!(text.contains("PamPromptResponse::Secret"));
+    assert!(text.contains("PamMessageStyle::Informational | PamMessageStyle::Error"));
+}
+
+#[test]
+fn pam_wire_has_connection_epoch_conversation_and_prompt_identity() {
+    let text = source("crates/niralis-protocol/src/pam.rs");
+    for field in [
+        "connection_epoch",
+        "transaction_id",
+        "conversation_id",
+        "prompt_id",
+        "sequence",
+    ] {
+        assert!(text.contains(field), "missing PAM wire field {field}");
+    }
+    assert!(text.contains("PamPromptResponse"));
+}

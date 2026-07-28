@@ -1,6 +1,17 @@
 mod error;
 mod launcher;
 mod mock;
+mod pam_conversation;
+#[cfg(test)]
+mod pam_conversation_races;
+#[cfg(test)]
+mod pam_conversation_tests;
+#[cfg(test)]
+mod pam_race_matrix_tests;
+#[cfg(test)]
+mod pam_required_tests;
+#[cfg(test)]
+mod pam_wire_tests;
 mod protocol;
 mod recovery_admin;
 mod scope_release;
@@ -27,6 +38,10 @@ pub use launcher::{
     PhysicalPreviousBootSmoke, PhysicalPreviousBootSmokeFailpoint, PhysicalPreviousBootSmokePaths,
 };
 pub use mock::MockSessionLauncher;
+pub use pam_conversation::{
+    AuthenticatedConversation, FailedConversation, PamConversationAuthority, PamConversationError,
+    PamPrompt, PendingPamPrompt,
+};
 pub use protocol::{
     ControlTransactionIdentity, PayloadScopeIdentity, PayloadScopeRecoveryReason, SessionExecPlan,
     SessionExecPlanValidationError, TerminalVtCleanupResult, WorkerControlRequest, WorkerEnvelope,
@@ -49,3 +64,10 @@ pub use types::{
     UnboundLoginBackend,
 };
 pub use worker_io::{read_control_request, read_envelope, write_control_request, write_envelope};
+
+pub trait PamConversationTransport: Send + Sync {
+    fn round_trip(
+        &self,
+        prompt: niralis_protocol::PamPromptEnvelope,
+    ) -> Result<niralis_protocol::PamPromptResponseEnvelope, SessionError>;
+}

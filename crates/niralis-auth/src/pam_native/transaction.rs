@@ -5,7 +5,28 @@ impl NativePamTransaction {
         username: String,
         password: String,
     ) -> Result<(Self, AuthenticatedUser), ()> {
-        let mut conversation = Box::new(SilentPasswordConversation::new());
+        Self::authenticate_inner(service, username, password, None)
+    }
+
+    pub(crate) fn authenticate_with_driver(
+        service: &str,
+        username: String,
+        password: String,
+        driver: Box<dyn crate::PamConversationDriver>,
+    ) -> Result<(Self, AuthenticatedUser), ()> {
+        Self::authenticate_inner(service, username, password, Some(driver))
+    }
+
+    fn authenticate_inner(
+        service: &str,
+        username: String,
+        password: String,
+        driver: Option<Box<dyn crate::PamConversationDriver>>,
+    ) -> Result<(Self, AuthenticatedUser), ()> {
+        let mut conversation = match driver {
+            Some(driver) => Box::new(SilentPasswordConversation::with_driver(driver)),
+            None => Box::new(SilentPasswordConversation::new()),
+        };
         conversation.set_credentials(username, password);
         let callback = pam::ffi::pam_conv {
             conv: Some(converse),

@@ -8,6 +8,7 @@ use niralis_session::{
     LoginRequestBinding, RecoveryAdminRequest, RecoveryAdminResponse, StartedSession,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use thiserror::Error;
 use zeroize::Zeroizing;
 
@@ -25,6 +26,7 @@ pub struct LoginAttempt {
     pub launch_spec: ResolvedSessionLaunchSpec,
     pub attempt_id: u64,
     pub connection: Option<LoginRequestBinding>,
+    pub conversation: Option<Arc<dyn niralis_session::PamConversationTransport>>,
 }
 
 static NEXT_LOGIN_ATTEMPT_ID: AtomicU64 = AtomicU64::new(1);

@@ -1,7 +1,6 @@
 use niralis_session::{
     LoginBackendFactory, RecoveryAdminRequest, RecoveryAdminResponse, SessionExecPlan,
-    SessionLauncher, StartedSession, UnauthenticatedLoginRequest, UnboundLoginBackend,
-    WorkerSessionLauncher,
+    StartedSession, UnauthenticatedLoginRequest, UnboundLoginBackend, WorkerSessionLauncher,
 };
 use std::os::unix::ffi::OsStrExt;
 
@@ -45,7 +44,7 @@ impl PamWorkerLoginBackend {
 impl LoginBackend for PamWorkerLoginBackend {
     fn login(&self, attempt: LoginAttempt) -> Result<StartedSession, LoginBackendError> {
         self.launcher
-            .begin_login(
+            .begin_login_with_conversation(
                 UnauthenticatedLoginRequest {
                     username: attempt.username,
                     session: attempt.session,
@@ -75,6 +74,7 @@ impl LoginBackend for PamWorkerLoginBackend {
                 },
                 niralis_session::LoginSecret::new(attempt.password.to_string()),
                 &WorkerBackendFactory,
+                attempt.conversation,
             )
             .map_err(map_session_error)
     }

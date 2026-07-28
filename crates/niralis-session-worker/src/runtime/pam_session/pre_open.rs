@@ -89,7 +89,22 @@
         }
     };
     let authenticator = factory.build(&pam_service);
-    let auth_result = authenticator.authenticate(&request.username, password.expose());
+    let auth_result = match connection {
+        Some(binding) => authenticator.authenticate_with_conversation(
+            &request.username,
+            password.expose(),
+            Box::new(WorkerPamConversationDriver::new(
+                binding,
+                niralis_protocol::PamConversationId::new_for_wire(
+                    format!("pam-{}", login_identity.lifecycle_id),
+                ),
+                login_identity.clone(),
+                worker_id.clone(),
+                std::process::id(),
+            )),
+        ),
+        None => authenticator.authenticate(&request.username, password.expose()),
+    };
     drop(password);
     let mut transaction = match auth_result {
         Ok(transaction) => transaction,

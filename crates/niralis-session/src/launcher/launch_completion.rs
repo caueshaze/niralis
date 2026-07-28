@@ -1,9 +1,19 @@
 impl WorkerSessionLauncher {
     fn start_worker(
         &self,
+        request: WorkerRequest,
+        expected: StartedSession,
+        install_control: bool,
+    ) -> Result<(StartedSession, RuntimeSessionId), SessionError> {
+        self.start_worker_with_conversation(request, expected, install_control, None)
+    }
+
+    fn start_worker_with_conversation(
+        &self,
         mut request: WorkerRequest,
         expected: StartedSession,
         install_control: bool,
+        conversation: Option<std::sync::Arc<dyn crate::PamConversationTransport>>,
     ) -> Result<(StartedSession, RuntimeSessionId), SessionError> {
         let (control_dir, control_path, worker_id) = create_control_endpoint()?;
         let requires_pending_lifecycle = matches!(&request, WorkerRequest::PamSession(_));
@@ -163,6 +173,10 @@ impl WorkerSessionLauncher {
             None
         };
         let writer_result = attempt.wait_writer(deadline);
+        let pam_authority = pending_guard
+            .as_mut()
+            .and_then(|guard| guard.transaction.as_mut())
+            .and_then(|transaction| transaction.conversation_mut());
         let (response_result, phase) = self.wait_launch_response(
             &mut attempt,
             deadline,
@@ -170,6 +184,8 @@ impl WorkerSessionLauncher {
             worker_pid,
             transaction_generation,
             transaction_attempt_id,
+            conversation,
+            pam_authority,
         )?;
         let started_response = response_result
             .as_ref()
@@ -220,6 +236,10 @@ impl WorkerSessionLauncher {
                     if !attempt.is_alive()? {
                         return Err(SessionError::WorkerExitedAfterStart);
                     }
+                    pending_guard
+                        .as_mut()
+                        .expect("PAM launch owns pending login transaction")
+                        .consume_authenticated_conversation()?;
                     attempt.finish();
                     let supervisor_channel = attempt.take_supervisor_channel();
                     #[cfg(any(

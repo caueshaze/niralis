@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use zeroize::{Zeroize, Zeroizing};
 
-pub const GREETER_PROTOCOL_VERSION: u16 = 1;
+pub const GREETER_PROTOCOL_VERSION: u16 = 2;
 pub const MAX_GREETER_FRAME_BYTES: usize = 64 * 1024;
 pub const MAX_GREETER_PAYLOAD_BYTES: usize = 48 * 1024;
 
@@ -47,7 +47,7 @@ impl SeatId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RequestId(pub u64);
 
-#[derive(Serialize, Deserialize)]
+#[derive(PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoginSecret(String);
 
 impl LoginSecret {
@@ -56,6 +56,10 @@ impl LoginSecret {
     }
     pub fn consume(mut self) -> Zeroizing<String> {
         Zeroizing::new(std::mem::take(&mut self.0))
+    }
+    pub fn is_bounded(&self) -> bool {
+        let bytes = self.0.as_bytes();
+        !bytes.is_empty() && bytes.len() <= 4096 && !bytes.contains(&0)
     }
 }
 
@@ -123,6 +127,11 @@ impl GreeterRequestEnvelope {
             .len();
         if actual != self.payload_len || actual > MAX_GREETER_PAYLOAD_BYTES {
             return Err(EnvelopeError::InvalidPayload);
+        }
+        if let GreeterRequest::Login { secret, .. } = &self.payload {
+            if !secret.is_bounded() {
+                return Err(EnvelopeError::InvalidPayload);
+            }
         }
         let expected = match &self.payload {
             GreeterRequest::Status => "status",

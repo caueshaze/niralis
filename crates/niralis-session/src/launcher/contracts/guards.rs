@@ -29,6 +29,7 @@ impl Drop for SeatReservationGuard {
 impl Drop for PendingSupervisorGuard {
     fn drop(&mut self) {
         if let Some(mut transaction) = self.transaction.take() {
+            transaction.consume_failed_conversation();
             let Ok(lease) = transaction.pending_lease() else {
                 return;
             };
@@ -42,6 +43,13 @@ impl Drop for PendingSupervisorGuard {
 }
 
 impl PendingSupervisorGuard {
+    fn consume_authenticated_conversation(&mut self) -> Result<(), SessionError> {
+        self.transaction
+            .as_mut()
+            .expect("pending guard owns login transaction")
+            .consume_authenticated_conversation()
+    }
+
     fn mark_expected_clean(&mut self, status: ExitStatus) {
         self.expected_clean = true;
         self.worker_exit_status = Some(status);
@@ -49,6 +57,7 @@ impl PendingSupervisorGuard {
 
     fn complete(mut self) -> Result<(), SessionError> {
         if let Some(mut transaction) = self.transaction.take() {
+            transaction.consume_failed_conversation();
             let lease = transaction.pending_lease()?;
             self.supervisor.abort_pending(
                 lease,

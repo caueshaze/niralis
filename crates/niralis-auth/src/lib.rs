@@ -6,8 +6,20 @@ mod pam_native;
 mod tests;
 
 pub use mock::{MockAuthenticatedTransaction, MockAuthenticator};
+use niralis_protocol::{PamMessageStyle, PamPromptResponse};
 pub use pam::PamAuthenticator;
 use thiserror::Error;
+
+pub trait PamConversationDriver: Send {
+    fn respond(
+        &mut self,
+        style: PamMessageStyle,
+        message: &std::ffi::CStr,
+    ) -> Result<PamPromptResponse, PamConversationError>;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PamConversationError;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthenticatedUser {
@@ -148,6 +160,16 @@ pub trait Authenticator: Send + Sync {
         username: &str,
         password: &str,
     ) -> Result<Box<dyn AuthenticatedTransaction>, AuthError>;
+
+    fn authenticate_with_conversation(
+        &self,
+        username: &str,
+        password: &str,
+        _driver: Box<dyn PamConversationDriver>,
+    ) -> Result<Box<dyn AuthenticatedTransaction>, AuthError> {
+        let _ = (username, password);
+        Err(AuthError::InfrastructureFailed)
+    }
 }
 
 impl<T> Authenticator for Box<T>
@@ -160,5 +182,14 @@ where
         password: &str,
     ) -> Result<Box<dyn AuthenticatedTransaction>, AuthError> {
         (**self).authenticate(username, password)
+    }
+
+    fn authenticate_with_conversation(
+        &self,
+        username: &str,
+        password: &str,
+        driver: Box<dyn PamConversationDriver>,
+    ) -> Result<Box<dyn AuthenticatedTransaction>, AuthError> {
+        (**self).authenticate_with_conversation(username, password, driver)
     }
 }

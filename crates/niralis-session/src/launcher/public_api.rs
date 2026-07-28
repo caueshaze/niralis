@@ -255,7 +255,19 @@ impl WorkerSessionLauncher {
         password: WorkerSecret,
         connection: Option<crate::LoginRequestBinding>,
     ) -> Result<StartedSession, SessionError> {
-        self.start_worker(
+        self.start_pam_session_with_conversation(request, launch_plan, pam_service, password, connection, None)
+    }
+
+    pub(crate) fn start_pam_session_with_conversation(
+        &self,
+        request: SessionRequest,
+        launch_plan: crate::SessionExecPlan,
+        pam_service: String,
+        password: WorkerSecret,
+        connection: Option<crate::LoginRequestBinding>,
+        conversation: Option<std::sync::Arc<dyn crate::PamConversationTransport>>,
+    ) -> Result<StartedSession, SessionError> {
+        self.start_worker_with_conversation(
             WorkerRequest::PamSession(crate::WorkerPamSessionRequest {
                 request: request.clone(),
                 connection,
@@ -278,6 +290,7 @@ impl WorkerSessionLauncher {
             }),
             expected_started_session(&request),
             true,
+            conversation,
         )
         .map(|(session, _)| session)
     }

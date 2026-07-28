@@ -5,12 +5,24 @@ impl SessionLauncher for WorkerSessionLauncher {
         secret: crate::LoginSecret,
         _factory: &dyn crate::LoginBackendFactory,
     ) -> Result<crate::LoginStartOutcome, crate::SessionError> {
+        self.begin_login_with_conversation(request, secret, _factory, None)
+    }
+}
+
+impl WorkerSessionLauncher {
+    pub fn begin_login_with_conversation(
+        &self,
+        request: crate::UnauthenticatedLoginRequest,
+        secret: crate::LoginSecret,
+        _factory: &dyn crate::LoginBackendFactory,
+        conversation: Option<std::sync::Arc<dyn crate::PamConversationTransport>>,
+    ) -> Result<crate::LoginStartOutcome, crate::SessionError> {
         request.validate()?;
         let connection = request.connection.clone();
         let plan = request
             .launch_plan
             .ok_or(crate::SessionError::WorkerProtocolFailed)?;
-        self.start_pam_session(
+        self.start_pam_session_with_conversation(
             crate::SessionRequest {
                 username: request.username,
                 session: request.session,
@@ -19,6 +31,7 @@ impl SessionLauncher for WorkerSessionLauncher {
             request.pam_service.unwrap_or_else(|| "niralis".to_owned()),
             secret.into(),
             connection,
+            conversation,
         )
     }
 }

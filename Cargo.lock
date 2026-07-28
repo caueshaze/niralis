@@ -612,6 +612,7 @@ name = "niralis-auth"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "niralis-protocol",
  "pam",
  "thiserror",
  "tracing",

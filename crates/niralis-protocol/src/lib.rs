@@ -1,5 +1,7 @@
 mod greeter;
+mod pam;
 pub use greeter::*;
+pub use pam::*;
 
 use serde::{Deserialize, Serialize};
 

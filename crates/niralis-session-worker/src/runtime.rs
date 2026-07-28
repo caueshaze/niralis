@@ -1,6 +1,7 @@
 include!("runtime/contracts.rs");
 include!("runtime/channels.rs");
 include!("runtime/entrypoint.rs");
+include!("runtime/pam_conversation.rs");
 include!("runtime/lifecycle.rs");
 include!("runtime/graceful_tests.rs");
 include!("runtime/supervisor_ack.rs");

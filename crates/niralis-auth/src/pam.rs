@@ -3,6 +3,7 @@ use tracing::debug;
 use crate::pam_native::NativePamTransaction;
 use crate::{
     AuthError, AuthSessionError, AuthenticatedTransaction, AuthenticatedUser, Authenticator,
+    PamConversationDriver,
 };
 
 #[derive(Debug, Clone)]
@@ -35,6 +36,22 @@ impl Authenticator for PamAuthenticator {
         )
         .map_err(|_| AuthError::LoginFailed)?;
 
+        Ok(Box::new(PamAuthenticatedTransaction { user, transaction }))
+    }
+
+    fn authenticate_with_conversation(
+        &self,
+        username: &str,
+        password: &str,
+        driver: Box<dyn PamConversationDriver>,
+    ) -> Result<Box<dyn AuthenticatedTransaction>, AuthError> {
+        let (transaction, user) = NativePamTransaction::authenticate_with_driver(
+            &self.service,
+            username.to_owned(),
+            password.to_owned(),
+            driver,
+        )
+        .map_err(|_| AuthError::LoginFailed)?;
         Ok(Box::new(PamAuthenticatedTransaction { user, transaction }))
     }
 }

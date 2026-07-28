@@ -5,11 +5,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::{LogindSessionId, SessionRequest, StartedSession, WorkerSecret};
 
-/// Version 13 binds every pre-commit worker response to one login transaction.
-pub const WORKER_PROTOCOL_VERSION: u32 = 13;
+/// Version 14 carries transaction-owned PAM prompts before launch commit.
+pub const WORKER_PROTOCOL_VERSION: u32 = 14;
 pub const MAX_WORKER_MESSAGE_BYTES: usize = 64 * 1024;
-/// Version 6 binds every pre-commit control message to its exact admission.
-pub const WORKER_CONTROL_PROTOCOL_VERSION: u32 = 6;
+/// Version 7 carries transaction-owned PAM responses on the supervisor channel.
+pub const WORKER_CONTROL_PROTOCOL_VERSION: u32 = 7;
 pub const MAX_WORKER_CONTROL_MESSAGE_BYTES: usize = 4096;
 /// Private inherited descriptor used for supervisor lifecycle traffic; stdin remains a one-shot WorkerRequest transport and is expected to reach EOF.
 pub const WORKER_SUPERVISOR_FD_ENV: &str = "NIRALIS_WORKER_SUPERVISOR_FD";

@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::sync::Mutex;
 
 fn lookup_passwd(username: &CStr, buffer: &mut [libc::c_char]) -> NssLookupResult {
     // SAFETY: all pointers reference valid writable storage for the duration of
@@ -27,6 +28,13 @@ where H: RequestHandler {
         return Err(NiralisdError::ProtocolRejected("invalid handshake"));
     }
     let authority = next_connection_authority(seat, peer)?;
+    let conversation_stream = Arc::new(Mutex::new(stream.try_clone()?));
+    let conversation = Arc::new(SocketPamConversation {
+        stream: conversation_stream,
+        connection_id: authority.connection_id().clone(),
+        connection_epoch: authority.connection_epoch(),
+        seat: authority.seat().clone(),
+    });
     let _cleanup = ConnectionCleanup { handler, authority: &authority };
     write_json_line(&mut stream, &GreeterHandshakeResponse {
         protocol_version: GREETER_PROTOCOL_VERSION, connection_id: authority.connection_id().clone(),
@@ -68,12 +76,41 @@ where H: RequestHandler {
                 continue;
             }
         };
-        let result = handler.handle_authenticated(&authority, request_id.0, request);
+        let result = handler.handle_authenticated_with_transport(&authority, request_id.0, request, conversation.clone());
         write_response(&mut stream, &GreeterResponseEnvelope {
             request_id, connection_epoch: authority.connection_epoch(), result,
         })?;
     }
     Ok(())
+}
+
+struct SocketPamConversation {
+    stream: Arc<Mutex<UnixStream>>,
+    connection_id: niralis_protocol::GreeterConnectionId,
+    connection_epoch: u64,
+    seat: niralis_protocol::SeatId,
+}
+
+impl niralis_session::PamConversationTransport for SocketPamConversation {
+    fn round_trip(&self, prompt: niralis_protocol::PamPromptEnvelope) -> std::result::Result<niralis_protocol::PamPromptResponseEnvelope, niralis_session::SessionError> {
+        let encoded = serde_json::to_vec(&prompt)
+            .map_err(|_| niralis_session::SessionError::WorkerProtocolFailed)?;
+        let mut stream = self.stream.lock().map_err(|_| niralis_session::SessionError::WorkerIoFailed)?;
+        if encoded.len() > MAX_GREETER_FRAME_BYTES { return Err(niralis_session::SessionError::WorkerProtocolFailed); }
+        stream.write_all(&encoded).map_err(|_| niralis_session::SessionError::WorkerIoFailed)?;
+        stream.write_all(b"\n").map_err(|_| niralis_session::SessionError::WorkerIoFailed)?;
+        stream.flush().map_err(|_| niralis_session::SessionError::WorkerIoFailed)?;
+        let response: niralis_protocol::PamPromptResponseEnvelope = serde_json::from_slice(&read_frame(&mut stream).map_err(|_| niralis_session::SessionError::WorkerIoFailed)?)
+            .map_err(|_| niralis_session::SessionError::WorkerProtocolFailed)?;
+        response.validate_shape().map_err(|_| niralis_session::SessionError::WorkerProtocolFailed)?;
+        if response.connection_id != self.connection_id
+            || response.connection_epoch != self.connection_epoch
+            || response.seat != self.seat
+        {
+            return Err(niralis_session::SessionError::WorkerProtocolFailed);
+        }
+        Ok(response)
+    }
 }
 
 struct ConnectionCleanup<'a, H: RequestHandler> { handler: &'a H, authority: &'a GreeterConnectionAuthority }

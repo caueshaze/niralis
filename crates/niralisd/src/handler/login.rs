@@ -14,6 +14,7 @@ pub(super) fn handle_login_with_binding<L, U, D>(
     password: String,
     session: String,
     connection: Option<niralis_session::LoginRequestBinding>,
+    conversation: Option<std::sync::Arc<dyn niralis_session::PamConversationTransport>>,
 ) -> NiralisResponse
 where
     L: LoginBackend,
@@ -46,6 +47,7 @@ where
         launch_spec,
         attempt_id: next_login_attempt_id(),
         connection,
+        conversation,
     }) {
         Ok(_started) => {
             reset_rate_limit(handler, &username);

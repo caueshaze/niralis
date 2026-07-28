@@ -1,10 +1,11 @@
 mod login;
 mod rate_limit;
 mod transactions;
+include!("conversation.rs");
 
 #[cfg(test)]
 mod tests;
-
+use std::sync::Arc;
 use std::time::Duration;
 
 use niralis_discovery::{DiscoveryError, SessionDirectory, UserDirectory};
@@ -24,6 +25,16 @@ pub trait RequestHandler: Send + Sync {
         request: NiralisRequest,
     ) -> NiralisResponse {
         self.handle(request)
+    }
+
+    fn handle_authenticated_with_transport(
+        &self,
+        authority: &crate::connection::GreeterConnectionAuthority,
+        request_id: u64,
+        request: NiralisRequest,
+        _conversation: Arc<dyn niralis_session::PamConversationTransport>,
+    ) -> NiralisResponse {
+        self.handle_authenticated(authority, request_id, request)
     }
 
     fn connection_closed(&self, _authority: &crate::connection::GreeterConnectionAuthority) {}
@@ -157,6 +168,7 @@ where
                     password,
                     session,
                     Some(binding.clone()),
+                    None,
                 );
                 transactions::finish(
                     &self.transactions,
@@ -167,6 +179,16 @@ where
             }
             other => self.handle(other),
         }
+    }
+
+    fn handle_authenticated_with_transport(
+        &self,
+        authority: &crate::connection::GreeterConnectionAuthority,
+        request_id: u64,
+        request: NiralisRequest,
+        conversation: Arc<dyn niralis_session::PamConversationTransport>,
+    ) -> NiralisResponse {
+        self.handle_login_with_conversation(authority, request_id, request, conversation)
     }
 
     fn connection_closed(&self, authority: &crate::connection::GreeterConnectionAuthority) {

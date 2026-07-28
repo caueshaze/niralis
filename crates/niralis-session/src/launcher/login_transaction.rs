@@ -4,6 +4,8 @@ use super::supervisor_loop::admission::{
     SeatAdmissionController,
 };
 use super::SessionError;
+use crate::PamConversationAuthority;
+use niralis_protocol::PamConversationId;
 use std::time::Instant;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,6 +54,7 @@ pub(super) struct TransactionOwnedLoginBackend {
     channel: ValidatedWorkerChannel,
     expected_stage: &'static str,
     expected_sequence: u64,
+    conversation: Option<PamConversationAuthority>,
 }
 
 #[derive(Debug)]
@@ -81,6 +84,7 @@ pub(super) struct SessionPreparationPermit {
 pub(in crate::launcher) struct PendingLaunchTransaction {
     transaction: LoginTransaction,
     pending_lease: Option<PendingLifecycleLease>,
+    conversation: Option<PamConversationAuthority>,
 }
 
 impl LoginTransaction {
@@ -141,12 +145,34 @@ impl LoginTransaction {
                 return Err(Box::new((error, self)));
             }
         }
+        let conversation = self
+            .greeter
+            .connection_id
+            .as_ref()
+            .and_then(|connection_id| {
+                let request_id = self.greeter.request_id?;
+                PamConversationAuthority::issue(
+                    self.lifecycle_id.clone(),
+                    self.attempt_id,
+                    self.lifecycle_id.clone(),
+                    self.seat.clone(),
+                    self.seat_generation,
+                    connection_id.clone(),
+                    self.greeter.connection_epoch.unwrap_or(0),
+                    request_id,
+                    channel.worker_id.clone(),
+                    PamConversationId::new_for_wire(format!("pam-{}", self.lifecycle_id)),
+                    self.deadline,
+                )
+                .ok()
+            });
         Ok(TransactionOwnedLoginBackend {
             transaction: self,
             _backend: backend,
             channel,
             expected_stage: "reserved",
             expected_sequence: 0,
+            conversation,
         })
     }
 }
@@ -174,6 +200,7 @@ impl TransactionOwnedLoginBackend {
             || self.expected_stage != "reserved"
             || self.expected_sequence != 0
             || self.channel.worker_id != self.transaction.lifecycle_id
+            || (self.transaction.greeter.connection_id.is_some() && self.conversation.is_none())
         {
             return Err(Box::new((SessionError::WorkerTimedOut, self)));
         }
@@ -265,11 +292,34 @@ impl SessionPreparationPermit {
         PendingLaunchTransaction {
             transaction: self.backend.transaction,
             pending_lease: Some(pending_lease),
+            conversation: self.backend.conversation,
         }
     }
 }
 
 impl PendingLaunchTransaction {
+    pub(in crate::launcher) fn consume_failed_conversation(&mut self) {
+        if let Some(conversation) = self.conversation.take() {
+            let _ = conversation.fail();
+        }
+    }
+
+    pub(in crate::launcher) fn consume_authenticated_conversation(
+        &mut self,
+    ) -> Result<(), SessionError> {
+        if let Some(conversation) = self.conversation.take() {
+            conversation
+                .authenticated()
+                .map_err(|_| SessionError::WorkerProtocolFailed)?;
+        }
+        Ok(())
+    }
+
+    pub(in crate::launcher) fn conversation_mut(
+        &mut self,
+    ) -> Option<&mut PamConversationAuthority> {
+        self.conversation.as_mut()
+    }
     pub(in crate::launcher) fn lifecycle_id(&self) -> &str {
         self.transaction.lifecycle_id()
     }

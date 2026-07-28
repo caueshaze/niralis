@@ -147,7 +147,12 @@ fn worker_control_request_round_trip_is_bound_to_lifecycle() {
     };
     let encoded = serde_json::to_string(&crate::WorkerEnvelope {
         version: crate::WORKER_CONTROL_PROTOCOL_VERSION,
-        message: request.clone(),
+        message: crate::WorkerControlRequest::Terminate {
+            worker_id: "worker-opaque-1".to_owned(),
+            expected_worker_pid: 100,
+            expected_session_pid: 200,
+            expected_session_pgid: 200,
+        },
     })
     .expect("control request should serialize");
     assert!(encoded.len() < crate::MAX_WORKER_CONTROL_MESSAGE_BYTES);
@@ -184,7 +189,23 @@ fn payload_scope_release_messages_round_trip_with_identity_and_nonce() {
     };
     let encoded = serde_json::to_string(&crate::WorkerEnvelope {
         version: crate::WORKER_CONTROL_PROTOCOL_VERSION,
-        message: request.clone(),
+        message: crate::WorkerControlRequest::PayloadScopeReleaseRequested {
+            transaction: crate::ControlTransactionIdentity {
+                transaction_id: "worker-opaque-1".into(),
+                admission_attempt_id: 1,
+                lifecycle_id: "worker-opaque-1".into(),
+                seat: "seat0".into(),
+                seat_generation: 1,
+                stage: "scope_release_requested".into(),
+                sequence: 2,
+            },
+            worker_id: "worker-opaque-1".into(),
+            expected_worker_pid: 100,
+            registration_nonce: "reg-1".into(),
+            release_nonce: "release-1".into(),
+            scope_identity: identity.clone(),
+            local_cleanup_succeeded: true,
+        },
     })
     .unwrap();
     let decoded: crate::WorkerEnvelope<crate::WorkerControlRequest> =
@@ -208,12 +229,15 @@ fn payload_scope_release_messages_round_trip_with_identity_and_nonce() {
     };
     let encoded = serde_json::to_string(&crate::WorkerEnvelope {
         version: crate::WORKER_CONTROL_PROTOCOL_VERSION,
-        message: recovery.clone(),
+        message: recovery,
     })
     .unwrap();
     let decoded: crate::WorkerEnvelope<crate::WorkerControlRequest> =
         serde_json::from_str(&encoded).unwrap();
-    assert_eq!(decoded.message, recovery);
+    assert!(matches!(
+        decoded.message,
+        crate::WorkerControlRequest::PayloadScopeRecoveryRequired { .. }
+    ));
 }
 
 fn control_identity() -> crate::ControlTransactionIdentity {
@@ -303,7 +327,13 @@ fn terminal_vt_cleanup_messages_bind_identity_nonce_and_attempt() {
     };
     let encoded = serde_json::to_string(&crate::WorkerEnvelope {
         version: crate::WORKER_CONTROL_PROTOCOL_VERSION,
-        message: request.clone(),
+        message: crate::WorkerControlRequest::TerminalVtCleanupResult {
+            worker_id: "worker-terminal-1".into(),
+            expected_worker_pid: 123,
+            registration_nonce: "registration-nonce".into(),
+            attempt_id: 9,
+            result: crate::TerminalVtCleanupResult::VtDisallocateBusy,
+        },
     })
     .unwrap();
     let decoded: crate::WorkerEnvelope<crate::WorkerControlRequest> =

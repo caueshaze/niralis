@@ -56,7 +56,7 @@ pub fn run_worker_process_with_dependencies<
                 worker_id,
                 launcher_pid,
                 transaction: login_identity,
-                ..
+                connection,
             } = request;
             let control_path = *control_path;
             if !control_path.as_os_str().is_empty()
@@ -88,6 +88,7 @@ pub fn run_worker_process_with_dependencies<
                     session_child_runner_factory: dependencies.session_child_runner_factory,
                     logind_resolver: dependencies.logind_resolver,
                     request,
+                    connection,
                     pam_service,
                     password,
                     session_child_path: *session_child_path,

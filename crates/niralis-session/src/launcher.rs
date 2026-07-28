@@ -34,6 +34,7 @@ include!("launcher/public_api.rs");
 include!("launcher/recovery_admin_api.rs");
 #[cfg(feature = "supervisor-test-fixtures")]
 include!("launcher/public_api_fixtures.rs");
+include!("launcher/pam_prompt.rs");
 include!("launcher/launch_protocol.rs");
 include!("launcher/launch_completion.rs");
 include!("launcher/interface_tests_helpers.rs");

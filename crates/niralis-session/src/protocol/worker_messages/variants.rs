@@ -19,8 +19,20 @@ pub enum WorkerRequest {
     PamSession(WorkerPamSessionRequest),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WorkerControlRequest {
+    PamPrompt {
+        transaction: ControlTransactionIdentity,
+        worker_id: String,
+        expected_worker_pid: u32,
+        prompt: niralis_protocol::PamPromptEnvelope,
+    },
+    PamPromptResponse {
+        transaction: ControlTransactionIdentity,
+        worker_id: String,
+        expected_worker_pid: u32,
+        response: niralis_protocol::PamPromptResponseEnvelope,
+    },
     Authenticate {
         transaction: ControlTransactionIdentity,
         worker_id: String,
@@ -99,6 +111,12 @@ pub enum TerminalVtCleanupResult {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WorkerResponse {
+    PamPrompt {
+        worker_id: String,
+        expected_worker_pid: u32,
+        transaction: WorkerTransactionIdentity,
+        prompt: niralis_protocol::PamPromptEnvelope,
+    },
     Preparing {
         worker_id: String,
         transaction: WorkerTransactionIdentity,

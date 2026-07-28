@@ -69,8 +69,8 @@ mod supervisor_recovery_tests {
         let ack = source.find("PayloadScopeRegistered").unwrap();
         let registered = source.find("mark_payload_registered").unwrap();
         assert!(prepare < ack && ack < registered);
-        assert_eq!(crate::WORKER_PROTOCOL_VERSION, 13);
-        assert_eq!(crate::WORKER_CONTROL_PROTOCOL_VERSION, 6);
+        assert_eq!(crate::WORKER_PROTOCOL_VERSION, 14);
+        assert_eq!(crate::WORKER_CONTROL_PROTOCOL_VERSION, 7);
     }
 
     #[test]

@@ -1,4 +1,5 @@
 impl WorkerSessionLauncher {
+    #[allow(clippy::too_many_arguments)]
     fn wait_launch_response(
         &self,
         attempt: &mut WorkerAttempt,
@@ -7,6 +8,8 @@ impl WorkerSessionLauncher {
         worker_pid: u32,
         transaction_generation: u64,
         transaction_attempt_id: u64,
+        conversation: Option<std::sync::Arc<dyn crate::PamConversationTransport>>,
+        mut pam_authority: Option<&mut crate::PamConversationAuthority>,
     ) -> Result<
         (
             Result<crate::WorkerEnvelope<WorkerResponse>, SessionError>,
@@ -94,6 +97,27 @@ impl WorkerSessionLauncher {
                         .mark_payload_registered(&worker_id, worker_pid)?;
                 }
                 Ok(WorkerEnvelope {
+                    message: WorkerResponse::PamPrompt {
+                        worker_id: event_worker_id,
+                        expected_worker_pid,
+                        transaction,
+                        prompt,
+                    },
+                    ..
+                }) => {
+                    if !matches!(phase, PendingLaunchPhase::Preparing) {
+                        break Err(SessionError::WorkerProtocolFailed);
+                    }
+                    if let Err(error) = forward_pam_prompt(
+                        attempt, event_worker_id, expected_worker_pid, transaction, prompt,
+                        &worker_id, worker_pid, transaction_generation, transaction_attempt_id,
+                        conversation.as_ref(),
+                        pam_authority.as_deref_mut(),
+                    ) {
+                        break Err(error);
+                    }
+                }
+                Ok(WorkerEnvelope {
                     message:
                         WorkerResponse::PayloadScopeReleaseReady {
                             worker_id: event_worker_id,
@@ -107,8 +131,8 @@ impl WorkerSessionLauncher {
                         } if event_worker_id == worker_id => {
                             (identity.clone(), registration_nonce.clone())
                         }
-                        _ => break Err(SessionError::WorkerProtocolFailed),
-                    };
+                    _ => break Err(SessionError::WorkerProtocolFailed),
+                };
                     let request = match attempt.read_supervisor_control_request() {
                         Ok(request) if request.version == crate::WORKER_CONTROL_PROTOCOL_VERSION => {
                             request.message

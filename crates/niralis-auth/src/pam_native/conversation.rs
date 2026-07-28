@@ -47,6 +47,10 @@ unsafe extern "C" fn converse(
             return PamReturnCode::Buf_Err as libc::c_int;
         }
     }
+    if conversation.failed() {
+        libc::free(output.cast());
+        return PamReturnCode::Conv_Err as libc::c_int;
+    }
     *responses = output;
     PamReturnCode::Success as libc::c_int
 }
