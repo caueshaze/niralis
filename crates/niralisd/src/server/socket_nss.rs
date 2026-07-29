@@ -3,7 +3,7 @@ use std::fs;
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -75,16 +75,23 @@ where
 }
 
 fn bind_socket(socket_path: &Path, greeter: &GreeterIdentity) -> Result<UnixListener> {
-    bind_socket_with(socket_path, greeter, set_socket_ownership)
+    bind_socket_with(
+        socket_path,
+        greeter,
+        set_socket_ownership,
+        set_socket_path_ownership,
+    )
 }
 
-fn bind_socket_with<F>(
+fn bind_socket_with<F, G>(
     socket_path: &Path,
     greeter: &GreeterIdentity,
     ownership_setter: F,
+    path_ownership_setter: G,
 ) -> Result<UnixListener>
 where
     F: FnOnce(RawFd, libc::uid_t, libc::gid_t) -> io::Result<()>,
+    G: FnOnce(&Path, libc::uid_t, libc::gid_t) -> io::Result<()>,
 {
     let runtime_dir = socket_path
         .parent()
@@ -117,6 +124,7 @@ where
         socket_path,
         greeter,
         ownership_setter,
+        path_ownership_setter,
     ) {
         drop(listener);
         let _ = fs::remove_file(socket_path);
@@ -156,6 +164,7 @@ fn configure_socket<F>(
     socket_path: &Path,
     greeter: &GreeterIdentity,
     ownership_setter: F,
+    path_ownership_setter: impl FnOnce(&Path, libc::uid_t, libc::gid_t) -> io::Result<()>,
 ) -> Result<()>
 where
     F: FnOnce(RawFd, libc::uid_t, libc::gid_t) -> io::Result<()>,
@@ -177,9 +186,11 @@ where
     if !metadata.file_type().is_socket() {
         return Err(NiralisdError::InvalidSocketPath(socket_path.to_path_buf()));
     }
+    path_ownership_setter(socket_path, 0, greeter.gid)?;
     fs::set_permissions(socket_path, fs::Permissions::from_mode(0o660))?;
-    let mode = fs::symlink_metadata(socket_path)?.permissions().mode() & 0o777;
-    if mode != 0o660 {
+    let metadata = fs::symlink_metadata(socket_path)?;
+    let mode = metadata.permissions().mode() & 0o777;
+    if metadata.uid() != 0 || metadata.gid() != greeter.gid || mode != 0o660 {
         return Err(NiralisdError::InvalidSocketPath(socket_path.to_path_buf()));
     }
     Ok(())
@@ -187,6 +198,21 @@ where
 
 fn set_socket_ownership(socket_fd: RawFd, uid: libc::uid_t, gid: libc::gid_t) -> io::Result<()> {
     let result = unsafe { libc::fchown(socket_fd, uid, gid) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+fn set_socket_path_ownership(
+    socket_path: &Path,
+    uid: libc::uid_t,
+    gid: libc::gid_t,
+) -> io::Result<()> {
+    let path = CString::new(socket_path.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "socket path contains NUL"))?;
+    let result = unsafe { libc::chown(path.as_ptr(), uid, gid) };
     if result == 0 {
         Ok(())
     } else {

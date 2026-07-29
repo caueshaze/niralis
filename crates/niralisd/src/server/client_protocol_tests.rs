@@ -127,7 +127,7 @@ mod tests {
         let ownership = RefCell::new(None); let greeter = identity(464, 465);
         let listener = match bind_socket_with(&socket_path, &greeter, |_, uid, gid| {
             *ownership.borrow_mut() = Some((uid, gid)); Ok(())
-        }) {
+        }, |_, _, _| Ok(())) {
             Ok(listener) => listener,
             Err(NiralisdError::Io(error)) if error.raw_os_error() == Some(libc::EPERM) => return,
             Err(error) => panic!("socket configuration should succeed: {error}"),
@@ -141,7 +141,7 @@ mod tests {
     #[test]
     fn ownership_failure_returns_no_listener_and_removes_socket() {
         let tempdir = tempfile::tempdir().unwrap(); let socket_path = tempdir.path().join("niralisd.sock");
-        let error = bind_socket_with(&socket_path, &identity(464, 465), |_, _, _| Err(io::Error::from_raw_os_error(libc::EPERM))).unwrap_err();
+        let error = bind_socket_with(&socket_path, &identity(464, 465), |_, _, _| Err(io::Error::from_raw_os_error(libc::EPERM)), |_, _, _| Ok(())).unwrap_err();
         assert!(matches!(error, NiralisdError::Io(source) if source.raw_os_error() == Some(libc::EPERM)));
         assert!(!socket_path.exists());
     }
