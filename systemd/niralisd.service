@@ -12,7 +12,7 @@ Type=simple
 ExecStart=/usr/bin/setpriv --inh-caps=-all -- /usr/sbin/niralisd --config /etc/niralis/niralis.toml
 Restart=on-failure
 RuntimeDirectory=niralis
-RuntimeDirectoryMode=0700
+RuntimeDirectoryMode=0710
 UMask=0077
 
 [Install]

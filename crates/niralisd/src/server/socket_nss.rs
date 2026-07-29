@@ -98,7 +98,7 @@ where
     } else {
         fs::create_dir_all(runtime_dir)?;
     }
-    secure_runtime_dir(runtime_dir)?;
+    secure_runtime_dir(runtime_dir, greeter.gid)?;
 
     if let Ok(metadata) = fs::symlink_metadata(socket_path) {
         if metadata.file_type().is_symlink() {
@@ -126,7 +126,7 @@ where
     Ok(listener)
 }
 
-fn secure_runtime_dir(runtime_dir: &Path) -> Result<()> {
+fn secure_runtime_dir(runtime_dir: &Path, greeter_gid: libc::gid_t) -> Result<()> {
     let path = CString::new(runtime_dir.as_os_str().as_bytes())
         .map_err(|_| NiralisdError::InvalidSocketPath(runtime_dir.to_path_buf()))?;
     let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
@@ -137,11 +137,15 @@ fn secure_runtime_dir(runtime_dir: &Path) -> Result<()> {
     // SAFETY: raw is a newly opened directory descriptor owned by this scope.
     let directory = unsafe { OwnedFd::from_raw_fd(raw) };
     let uid = unsafe { libc::geteuid() };
-    let gid = unsafe { libc::getegid() };
+    let gid = if uid == 0 {
+        greeter_gid
+    } else {
+        unsafe { libc::getegid() }
+    };
     if unsafe { libc::fchown(directory.as_raw_fd(), uid, gid) } != 0 {
         return Err(std::io::Error::last_os_error().into());
     }
-    if unsafe { libc::fchmod(directory.as_raw_fd(), 0o700) } != 0 {
+    if unsafe { libc::fchmod(directory.as_raw_fd(), 0o710) } != 0 {
         return Err(std::io::Error::last_os_error().into());
     }
     Ok(())
@@ -167,8 +171,8 @@ where
     // Linux does not consistently expose permission changes made through an
     // AF_UNIX socket descriptor on the directory entry returned by
     // `metadata`. Apply the same explicit mode to the bound pathname as well;
-    // the runtime directory is daemon-owned and mode 0700, so an unrelated
-    // peer cannot replace the entry between bind and this operation.
+    // the runtime directory is daemon-owned and group-traversable only, so an
+    // unrelated peer cannot replace the entry between bind and this operation.
     let metadata = fs::symlink_metadata(socket_path)?;
     if !metadata.file_type().is_socket() {
         return Err(NiralisdError::InvalidSocketPath(socket_path.to_path_buf()));

@@ -134,6 +134,8 @@ mod tests {
         };
         let mode = fs::metadata(&socket_path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o660); assert_eq!(*ownership.borrow(), Some((0, 465))); drop(listener);
+        let directory_mode = fs::metadata(tempdir.path()).unwrap().permissions().mode() & 0o777;
+        assert_eq!(directory_mode, 0o710);
     }
 
     #[test]
