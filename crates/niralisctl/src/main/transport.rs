@@ -86,6 +86,10 @@ fn send_request(socket: &PathBuf, request: &NiralisRequest) -> Result<NiralisRes
         ));
     }
     line.clear();
+    let mut pam_password = match request {
+        NiralisRequest::Login { password, .. } => Some(password.clone()),
+        _ => None,
+    };
     let payload = match request {
         NiralisRequest::Status => GreeterRequest::Status,
         NiralisRequest::GetUsers => GreeterRequest::GetUsers,
@@ -127,18 +131,13 @@ fn send_request(socket: &PathBuf, request: &NiralisRequest) -> Result<NiralisRes
     serde_json::to_writer(reader.get_mut(), &envelope)?;
     reader.get_mut().write_all(b"\n")?;
     reader.get_mut().flush()?;
-    line.clear();
-    read_greeter_line(&mut reader, &mut line)?;
-
-    let response: GreeterResponseEnvelope = serde_json::from_str(line.trim_end())?;
-    if response.request_id != RequestId(1)
-        || response.connection_epoch != handshake.connection_epoch
-    {
-        return Err(CliError::GreeterProtocol(
-            "response correlation mismatch".to_owned(),
-        ));
-    }
-    Ok(response.result)
+    read_login_response(
+        &mut reader,
+        &mut line,
+        request,
+        handshake.connection_epoch,
+        &mut pam_password,
+    )
 }
 
 fn read_greeter_line(
